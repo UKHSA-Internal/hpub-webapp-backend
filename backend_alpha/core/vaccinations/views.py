@@ -1,0 +1,155 @@
+import logging
+import uuid
+
+from core.programs.models import Program
+from core.users.permissions import IsAdminOrRegisteredUser, IsAdminUser
+from core.utils.custom_token_authentication import CustomTokenAuthentication
+from django.core.exceptions import ValidationError
+from django.utils.text import slugify
+from rest_framework import status, viewsets
+from rest_framework.authentication import SessionAuthentication
+from rest_framework.decorators import action
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from wagtail.models import Page
+
+from .models import Vaccination
+from .serializers import VaccinationSerializer
+
+logger = logging.getLogger(__name__)
+
+
+class VaccinationCreateViewSet(viewsets.ModelViewSet):
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    queryset = Vaccination.objects.all()
+    serializer_class = VaccinationSerializer
+
+    def create(self, request, *args, **kwargs):
+        data = request.data
+
+        if isinstance(data, dict) and "vaccinations" in data:
+            items_data = data.pop("vaccinations", [])
+        else:
+            items_data = [data]
+
+        parent_page = self._get_or_create_parent_page_or_error()
+        vaccination_instances = []
+        errors = []
+
+        for vaccination_data in items_data:
+            vaccination_instance = self._create_vaccination_page(
+                vaccination_data, parent_page
+            )
+            if (
+                isinstance(vaccination_instance, dict)
+                and "error" in vaccination_instance
+            ):
+                errors.append(vaccination_instance)
+            else:
+                vaccination_instances.append(vaccination_instance)
+
+        if errors:
+            logger.error(f"Errors during vaccination creation: {errors}")
+            return Response(
+                errors, status=errors[0].get("status_code", status.HTTP_400_BAD_REQUEST)
+            )
+
+        return Response(vaccination_instances, status=status.HTTP_201_CREATED)
+
+    def _create_vaccination_page(
+        self, vaccination_data, parent_page_slug="vaccinations"
+    ):
+        title = vaccination_data.get("name", "Vaccination Title")
+        slug = slugify(f"{title}-{uuid.uuid4()}")
+
+        program_names = vaccination_data.get("program_names", [])
+        program_refs = []
+        for program_name in program_names:
+            try:
+                program_refs.append(Program.objects.get(programme_name=program_name))
+            except Program.DoesNotExist:
+                return {
+                    "error": f"Program '{program_name}' does not exist.",
+                    "status_code": status.HTTP_404_NOT_FOUND,
+                }
+
+        parent_page = self._get_or_create_parent_page(parent_page_slug)
+
+        if Vaccination.objects.filter(name=title).exists():
+            return {
+                "error": f"Vaccination with name '{title}' already exists.",
+                "status_code": status.HTTP_400_BAD_REQUEST,
+            }
+
+        vaccination_page = Vaccination(
+            title=title,
+            slug=slug,
+            vaccination_id=vaccination_data.get("vaccination_id", str(uuid.uuid4())),
+            name=vaccination_data.get("name"),
+            key=vaccination_data.get("key", ""),
+            description=vaccination_data.get("description", ""),
+        )
+
+        parent_page.add_child(instance=vaccination_page)
+        vaccination_page.save()
+        vaccination_page.programs.set(program_refs)
+        vaccination_page.save()
+
+        return VaccinationSerializer(vaccination_page).data
+
+    def _get_or_create_parent_page(self, slug="vaccinations"):
+        try:
+            return Page.objects.get(slug=slug)
+        except Page.DoesNotExist:
+            root_page = Page.objects.first()
+            parent_page = Page(title="Vaccinations", slug=slug)
+            root_page.add_child(instance=parent_page)
+            parent_page.save()
+            return parent_page
+
+    def _get_or_create_parent_page_or_error(self):
+        try:
+            return self._get_or_create_parent_page()
+        except Exception as e:
+            raise ValidationError({"error": "Error creating/retrieving parent page."})
+
+
+class VaccinationListViewSet(viewsets.ReadOnlyModelViewSet):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+    queryset = Vaccination.objects.all()
+    serializer_class = VaccinationSerializer
+
+
+class VaccinationDeleteViewSet(viewsets.ViewSet):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+
+    def destroy(self, request, pk=None):
+        try:
+            vaccination = Vaccination.objects.get(pk=pk)
+            vaccination.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except Vaccination.DoesNotExist:
+            return Response(
+                {"error": "Vaccination not found."}, status=status.HTTP_404_NOT_FOUND
+            )
+
+    @action(detail=False, methods=["delete"], url_path="delete-all")
+    def delete_all(self, request, *args, **kwargs):
+        try:
+            # Delete all Vaccination records
+            count = Vaccination.objects.all().delete()
+            logger.info(f"Deleted {count} vaccination(s).")
+            return Response(
+                {"message": f"Successfully deleted {count} vaccination(s)."},
+                status=status.HTTP_204_NO_CONTENT,
+            )
+        except Exception as e:
+            logger.error(f"Error deleting vaccinations: {str(e)}")
+            return Response(
+                {"error": "Failed to delete all vaccinations."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )

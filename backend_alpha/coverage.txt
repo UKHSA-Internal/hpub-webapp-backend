@@ -1,0 +1,9 @@
+Name                        Stmts   Miss  Cover   Missing
+---------------------------------------------------------
+backend_alpha/__init__.py       0      0   100%
+backend_alpha/asgi.py           4      4     0%   10-16
+backend_alpha/settings.py      36      0   100%
+backend_alpha/urls.py           3      0   100%
+backend_alpha/wsgi.py           4      4     0%   10-16
+---------------------------------------------------------
+TOTAL                          47      8    83%

@@ -1,27 +1,20 @@
-name: Continuous Integration (CI)
+name: Python formatting
 
 on:
   push:
     branches:
       - main
-      - backend-stable
-      - frontend-stable
+
   pull_request:
     branches:
       - main
-      - frontend-stable
-      - backend-stable
-env:
-  AWS_REGION: "eu-west-2"
-  AWS_TEST_ACCOUNT_ID: ${{ secrets.AWS_TEST_ACCOUNT_ID }}
-  AWS_TEST_ACCESS_KEY_ID: ${{ secrets.AWS_TEST_ACCESS_KEY_ID }}      
-permissions:
-  id-token: write
-  contents: read
+      - develop
+      
+
 jobs:
   backend-test:
-    runs-on: self-hosted
-    environment: test
+    runs-on: ubuntu-latest
+   
     steps:
       # Checkout code
       - name: Checkout code
@@ -46,64 +39,11 @@ jobs:
        
       # Install dependencies
       - name: Install dependencies
-        working-directory: hpub-backend/backend_alpha
+        working-directory: backend_alpha
         run: |
           uv add -r requirements.txt
           uv add pytest pytest-cov scikit-learn
           uv run black .  # Formatting with Black
           uv run isort .  # Sorting imports
 
-    # Step 3: Configure AWS Credentials
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v3
-        with:
-          role-to-assume: arn:aws:iam::${{ env.AWS_TEST_ACCOUNT_ID }}:role/test-github-oidc
-          role-session-name: samplerolesession
-          aws-region: ${{ env.AWS_REGION }}
 
-      # Run tests with coverage
-      - name: Run Python Unit Tests with Coveragae
-        continue-on-error: true
-        working-directory: hpub-backend/backend_alpha
-        run: uv run pytest --cov=./ --cov-report=xml --cov-report=html:html_coverage_report test
-
-      # Upload coverage report
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: hpub-backend/backend_alpha/html_coverage_report
-          overwrite: true
-
-  frontend-test:
-    runs-on: self-hosted
-
-    steps:
-      # Checkout code
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # Set up Node.js
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18'
-
-      # Install frontend dependencies
-      - name: Install frontend dependencies
-        working-directory: hp-frontend
-        run: npm install
-
-      # Step to lint React code
-      - name: Lint React Code
-        run: |
-          cd hp-frontend
-          pwd
-          ls -ltr
-          npx eslint . 
-
-      # Run React Unit Tests
-      - name: Run React Unit Tests
-        continue-on-error: true
-        working-directory: hp-frontend
-        run: npm test

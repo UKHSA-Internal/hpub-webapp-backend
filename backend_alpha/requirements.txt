@@ -215,8 +215,4 @@ Willow==1.9.0
 wrapt==1.16.0
 XlsxWriter==3.2.0
 yarg==0.1.9
-<<<<<<< HEAD
 yarl==1.17.1
-=======
-yarl==1.17.1
->>>>>>> origin/backend-frontend-create-resource-integration

@@ -229,6 +229,8 @@ class Config:
         if not pattern:
             raise ValueError("POSTGRES_CONNECTION_REGEX is not defined or empty.")
         return pattern
+
+    @staticmethod
     def get_rsa_private_key():
         """Retrieve the RSA private key from AWS Secrets Manager."""
         secret_data = get_secret_value("hpub/rsa/keys")

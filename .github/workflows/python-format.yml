@@ -13,6 +13,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
+      - name: Set environment variables
+        run: |
+          echo "REPORTER=${{ github.event_name == 'pull_request' && 'github-pr-review' || 'github-check' }}" >> $GITHUB_ENV
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:

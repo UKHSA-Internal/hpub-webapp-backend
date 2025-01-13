@@ -28,4 +28,5 @@ jobs:
           reporter: github-pr-check
           level: warning
           filter_mode: nofilter
+          workdir: backend_alpha
           github_token: ${{ secrets.GITHUB_TOKEN }}

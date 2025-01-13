@@ -224,3 +224,16 @@ dependencies = [
     "yarg==0.1.9",
     "yarl==1.17.1",
 ]
+
+[tool.black]
+line-length = 88
+target-version = ['py312']
+exclude = '''
+/(
+    \.git
+  | \.venv
+  | __pycache__
+  | \.vscode
+  | 0.*_initial\.py
+)/
+'''

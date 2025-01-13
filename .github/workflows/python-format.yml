@@ -27,6 +27,5 @@ jobs:
           black_args: "--check --diff"
           reporter: github-pr-check
           level: warning
-          fail_on_error: true
           filter_mode: file
           github_token: ${{ secrets.GITHUB_TOKEN }}

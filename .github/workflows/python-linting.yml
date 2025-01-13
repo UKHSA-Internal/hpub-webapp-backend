@@ -19,7 +19,6 @@ jobs:
       - name: Install Ruff
         run: pip install ruff
 
-v
       - name: Set up ReviewDog
         uses: reviewdog/action-setup@v3
         with:

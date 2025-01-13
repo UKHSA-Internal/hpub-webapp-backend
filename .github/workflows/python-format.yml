@@ -27,5 +27,5 @@ jobs:
           black_args: "--check"
           reporter: github-pr-check
           level: warning
-          filter_mode: file
+          filter_mode: nofilter
           github_token: ${{ secrets.GITHUB_TOKEN }}

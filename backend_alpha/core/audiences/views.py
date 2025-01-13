@@ -186,12 +186,22 @@ class AudienceBulkUploadViewSet(viewsets.ViewSet):
                 logger.info(f"Audience entry '{name}' created successfully.")
             except ValidationError as e:
                 errors.append(
-                    {"error": f"Validation error for entry '{name}': {str(e)}, at index : {index}"}
+                    {
+                        "error": f"Validation error for entry '{name}': {str(e)}, at index : {index}"
+                    }
                 )
-                logger.error(f"Validation error for entry '{name}': {str(e)}, at index : {index}")
+                logger.error(
+                    f"Validation error for entry '{name}': {str(e)}, at index : {index}"
+                )
             except Exception as e:
-                errors.append({"error": f"Failed to create entry '{name}': {str(e)}, at index : {index}"})
-                logger.error(f"Failed to create audience entry '{name}': {str(e)}, at index : {index}")
+                errors.append(
+                    {
+                        "error": f"Failed to create entry '{name}': {str(e)}, at index : {index}"
+                    }
+                )
+                logger.error(
+                    f"Failed to create audience entry '{name}': {str(e)}, at index : {index}"
+                )
 
         if created_entries:
             return Response(

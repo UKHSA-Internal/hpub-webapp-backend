@@ -469,19 +469,21 @@ class ProductViewSet(viewsets.ViewSet):
                         )
                         product_update.audience_ref.set(audience_instances)
 
-                        where_to_use_instances, where_to_use_names = (
-                            fetch_instances_and_names(
-                                WhereToUse,
-                                "where_to_use_id",
-                                row.get("where_to_use_id"),
-                            )
+                        (
+                            where_to_use_instances,
+                            where_to_use_names,
+                        ) = fetch_instances_and_names(
+                            WhereToUse,
+                            "where_to_use_id",
+                            row.get("where_to_use_id"),
                         )
                         product_update.where_to_use_ref.set(where_to_use_instances)
 
-                        vaccination_instances, vaccination_names = (
-                            fetch_instances_and_names(
-                                Vaccination, "vaccination_id", row.get("vaccination_id")
-                            )
+                        (
+                            vaccination_instances,
+                            vaccination_names,
+                        ) = fetch_instances_and_names(
+                            Vaccination, "vaccination_id", row.get("vaccination_id")
                         )
                         product_update.vaccination_ref.set(vaccination_instances)
 
@@ -1201,6 +1203,7 @@ class ProductDetailDelete(View):
                 ErrorMessage.INTERNAL_SERVER_ERROR,
                 status_code=500,
             )
+
 
 # previous, please check if this is still valid
 # class ProductDetailPageDelete(View):
@@ -3175,19 +3178,23 @@ class ProductCreateView(APIView):
         self, program_id, product_key, iso_language_code, version_number
     ):
         # Abbreviate components to fit within 18 characters
-        short_program_id = str(program_id)[:5]  # Take first 4 characters of program_id / previously 3
+        short_program_id = str(program_id)[
+            :5
+        ]  # Take first 4 characters of program_id / previously 3
         short_product_key = str(product_key)[
             :4
         ]  # Take first 3 characters of product_key
-        short_language_code = iso_language_code[:4]  # Use 4-character ISO code / previously 2
+        short_language_code = iso_language_code[
+            :4
+        ]  # Use 4-character ISO code / previously 2
 
         # Generate compact product code
-        product_code = f"{short_program_id}{short_product_key}{short_language_code}{version_number:03}" # previously version_number:02
+        product_code = f"{short_program_id}{short_product_key}{short_language_code}{version_number:03}"  # previously version_number:02
 
         # Ensure uniqueness
         while Product.objects.filter(product_code=product_code).exists():
             version_number += 1
-            product_code = f"{short_program_id}{short_product_key}{short_language_code}{version_number:03}" # previously version_number:02
+            product_code = f"{short_program_id}{short_product_key}{short_language_code}{version_number:03}"  # previously version_number:02
 
         logger.info("Unique product code generated: %s", product_code)
         return product_code

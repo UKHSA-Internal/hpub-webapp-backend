@@ -333,7 +333,6 @@ class UserLoginView(APIView):
         )
 
 
-
 class UpdateUserView(APIView):
     permission_classes = [IsAuthenticated]
 

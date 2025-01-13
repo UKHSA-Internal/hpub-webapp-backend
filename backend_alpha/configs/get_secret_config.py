@@ -18,10 +18,11 @@ logger = logging.getLogger(__name__)
 
 class Config:
     """Class to retrieve and parse database connection information and other configurations."""
+
     LOCAL_SECRETS_FILE = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "local_secrets.json"
+        os.path.dirname(os.path.abspath(__file__)), "local_secrets.json"
     )
+
     @staticmethod
     def _get_value(key: str, is_secret: bool = False) -> str:
         """
@@ -55,7 +56,7 @@ class Config:
         :raises FileNotFoundError: If the local secrets file is not found in development.
         :raises ValueError: If the local secrets file is not valid JSON.
         """
-        if key == 'AZURE_B2C_CLIENT_ID':
+        if key == "AZURE_B2C_CLIENT_ID":
             pass
         if Config._is_local_environment():
             logger.info(f"Fetching {key} from local secrets file.")
@@ -95,7 +96,7 @@ class Config:
         return os.environ.get("ENVIRONMENT", "localdev") == "localdev"
 
     @staticmethod
-    def _parse_json(json_string: str, key: str or None=None) -> str:
+    def _parse_json(json_string: str, key: str or None = None) -> str:
         """Parse the JSON string and extract the value."""
         try:
             # Convert the JSON string into a Python dictionary
@@ -302,4 +303,3 @@ class Config:
     @property
     def DB_PORT(self):
         return self.db_connection_details["port"]
-    

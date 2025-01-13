@@ -7,7 +7,7 @@ from .models import CustomerSupport
 
 class CustomerSupportSerializer(serializers.ModelSerializer):
     message = serializers.CharField(max_length=500)
-    
+
     class Meta:
         model = CustomerSupport
         fields = [

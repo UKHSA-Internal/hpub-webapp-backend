@@ -320,9 +320,7 @@ class AddressViewSet(viewsets.ModelViewSet):
             }
             for result in results
             if result.get("postcode") == postcode
-            and (
-                result.get("countryCode") in ["E", "England"]
-            )
+            and (result.get("countryCode") in ["E", "England"])
         ]
         if not matched_addresses:
             return Response(

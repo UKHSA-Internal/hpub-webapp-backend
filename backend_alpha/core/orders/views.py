@@ -211,11 +211,11 @@ class OrderViewSet(viewsets.ModelViewSet):
         user_ref = data.pop("user_ref", None)
 
         logger.info(f"Request Data: {data}")
-        print('ITEM_DATA', items_data)
+        print("ITEM_DATA", items_data)
 
         # Check if all products in items_data are live
         for item in items_data:
-            print('ITEM', item)
+            print("ITEM", item)
             product_code = item.get("product_code")
             if not self._is_product_live(product_code):
                 return JsonResponse(
@@ -371,10 +371,10 @@ class OrderViewSet(viewsets.ModelViewSet):
         return True
 
     def _update_product_quantities(self, items_data):
-        print('PRODUCT_Quantity_Items', items_data)
+        print("PRODUCT_Quantity_Items", items_data)
         for item in items_data:
             product = item.get("product_ref")
-            print('PRODUCT_REF', product)
+            print("PRODUCT_REF", product)
             if product is None:
                 logger.error("Product reference is None.")
                 continue
@@ -524,10 +524,10 @@ class OrderViewSet(viewsets.ModelViewSet):
         """
         Creates order items and associates them with the order.
         """
-        print('ORDER_ITEM_DATA', items_data)
+        print("ORDER_ITEM_DATA", items_data)
         for item_data in items_data:
             product_code = item_data.get("product_code")
-            print('ProductCode', product_code)
+            print("ProductCode", product_code)
             if product_code:
                 try:
                     product_instance = Product.objects.get(product_code=product_code)
@@ -539,10 +539,10 @@ class OrderViewSet(viewsets.ModelViewSet):
                     return {"error": f"Product with code {product_code} not found."}
             else:
                 item_data["product_ref"] = None
-            
 
             item_slug = slugify(
-                f"{order_instance.slug}-{product_instance.product_code}" + str(datetime.now())
+                f"{order_instance.slug}-{product_instance.product_code}"
+                + str(datetime.now())
             )
             item_title = (
                 f"{order_instance.title} - {product_instance.title}"
@@ -555,7 +555,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                 title=item_title,
                 quantity=item_data.get("quantity"),
                 product_ref=item_data.get("product_ref"),
-                product_code = product_code,
+                product_code=product_code,
             )
             parent_page.add_child(instance=order_item_instance)
             order_item_instance.save()

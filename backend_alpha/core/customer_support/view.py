@@ -103,13 +103,13 @@ class CustomerSupportViewSet(viewsets.ModelViewSet):
 
             # Log the notification response
             logger.info(notification_response[0])
-            
-            if(notification_response[1] == 200):
+
+            if notification_response[1] == 200:
                 return JsonResponse(
                     CustomerSupportSerializer(customer_support_instance).data,
                     status=201,
                 )
-                
+
             else:
                 logger.error(f"Error adding customer support as child page: {str(e)}")
                 return Response(

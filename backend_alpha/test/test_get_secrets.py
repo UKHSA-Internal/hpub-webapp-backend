@@ -14,7 +14,11 @@ def setup_env():
 
 @patch.dict(
     os.environ,
-    {"AWS_API_KEY": "fake_aws_api_key", "GOV_UK_NOTIFY_API_KEY": "fake_notify_api_key", "ENVIRONMENT": "test"},
+    {
+        "AWS_API_KEY": "fake_aws_api_key",
+        "GOV_UK_NOTIFY_API_KEY": "fake_notify_api_key",
+        "ENVIRONMENT": "test",
+    },
 )
 @patch("configs.get_secret_config.get_secret_value")
 def test_get_value_from_secrets(mock_get_secret_value):

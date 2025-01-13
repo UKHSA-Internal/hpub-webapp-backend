@@ -20,7 +20,7 @@ jobs:
         run: pip install ruff
 
       - name: Set up ReviewDog
-        uses: reviewdog/action-setup@v3
+        uses: reviewdog/action-setup@v1
         with:
           tool: ruff
           version: latest

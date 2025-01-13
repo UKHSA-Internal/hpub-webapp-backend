@@ -22,8 +22,9 @@ jobs:
         run: pip install black
 
       - name: Run Black with ReviewDog
-        uses: reviewdog/action-black@v1
+        uses: reviewdog/action-black@v3
         with:
-          black_flags: "--check --diff ."
+          black_args: "--check --diff ."
           reporter: github-pr-check
           level: warning
+          github_token: ${{ secrets.GITHUB_TOKEN }}

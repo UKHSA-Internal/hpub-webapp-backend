@@ -1,5 +1,6 @@
 name: Python unit test
 
+
 on:
   push:
     branches:
@@ -13,7 +14,7 @@ on:
 env:
   AWS_REGION: "eu-west-2"
   AWS_TEST_ACCOUNT_ID: ${{ secrets.AWS_TEST_ACCOUNT_ID }}
-  AWS_TEST_ACCESS_KEY_ID: ${{ secrets.AWS_TEST_ACCESS_KEY_ID }}      
+  AWS_TEST_ACCESS_KEY_ID: ${{ secrets.AWS_TEST_ACCESS_KEY_ID }}
 permissions:
   id-token: write
   contents: read
@@ -42,7 +43,7 @@ jobs:
       #- name: Initialize uv project
        # working-directory: hpub-backend/backend_alpha
         #run: uv init .
-       
+
       # Install dependencies
       - name: Install dependencies
         working-directory: hpub-backend/backend_alpha

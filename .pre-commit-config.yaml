@@ -3,5 +3,10 @@ repos:
     rev: 22.3.0
     hooks:
       - id: black
+        name: black-auto-fix
         args: [--line-length=88]
+        language_version: python3.12
+      - id: black
+        name: black-check
+        args: [--line-length=88, --check]
         language_version: python3.12

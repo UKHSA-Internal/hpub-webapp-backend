@@ -121,7 +121,7 @@ REST_FRAMEWORK = {
 }
 
 
-ROOT_URLCONF = "backend_alpha.urls"
+ROOT_URLCONF = "health_pubs.urls"
 
 TEMPLATES = [
     {
@@ -139,7 +139,7 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = "backend_alpha.wsgi.application"
+WSGI_APPLICATION = "health_pubs.wsgi.application"
 
 
 # Database

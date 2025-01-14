@@ -11,7 +11,7 @@ from urllib.parse import unquote
 import bcp47
 import boto3
 import pandas as pd
-from backend_alpha import settings
+from health_pubs import settings
 from core.audiences.models import Audience
 from core.diseases.models import Disease
 from core.diseases.serializers import DiseaseSerializer

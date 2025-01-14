@@ -44,14 +44,14 @@ runs:
       uses: actions/cache@v4
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('hpub-backend/backend_alpha/requirements.txt') }} # Adjusted path
+        key: ${{ runner.os }}-pip-${{ hashFiles('hpub-backend/health_pubs/requirements.txt') }} # Adjusted path
         restore-keys: |
           ${{ runner.os }}-pip-
 
     # Install Python dependencies
     - name: Install Python Dependencies
       run: |
-        cd hpub-backend/backend_alpha || { echo "Directory hpub-backend/backend_alpha not found"; exit 1; }
+        cd hpub-backend/health_pubs || { echo "Directory hpub-backend/health_pubs not found"; exit 1; }
         python -m pip install --upgrade pip
         pip install -r requirements.txt
       shell: bash

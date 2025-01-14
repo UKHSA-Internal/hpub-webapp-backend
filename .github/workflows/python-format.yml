@@ -33,6 +33,6 @@ jobs:
           black_args: "--check"
           reporter: ${{ env.REPORTER }}
           filter_mode: 'nofilter'
-          workdir: 'backend_alpha'
+          workdir: 'health_pubs'
           github_token: ${{ secrets.GITHUB_TOKEN }}
           fail_on_error: 'true'

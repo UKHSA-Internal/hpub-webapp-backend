@@ -6,7 +6,7 @@
 # @pytest.fixture
 # def set_django_settings_env():
 #     """Set the DJANGO_SETTINGS_MODULE environment variable for testing."""
-#     os.environ["DJANGO_SETTINGS_MODULE"] = "backend_alpha.settings"
+#     os.environ["DJANGO_SETTINGS_MODULE"] = "health_pubs.settings"
 #     yield
 #     del os.environ["DJANGO_SETTINGS_MODULE"]
 
@@ -18,13 +18,13 @@
 #     - The application object initializes without error.
 #     - The correct Django settings module is used.
 #     """
-#     from backend_alpha.asgi import application
+#     from health_pubs.asgi import application
 
 #     # Verify the ASGI application is initialized
 #     assert application is not None
 
 #     # Verify the settings module is correctly loaded
-#     assert os.environ["DJANGO_SETTINGS_MODULE"] == "backend_alpha.settings"
+#     assert os.environ["DJANGO_SETTINGS_MODULE"] == "health_pubs.settings"
 
 #     # Ensure the application is callable
 #     assert callable(application)
@@ -35,7 +35,7 @@
 #     Test the ASGI application initialization using Django's internal loader.
 #     Ensures that the callable returned by get_asgi_application matches the module's application.
 #     """
-#     from backend_alpha.asgi import application
+#     from health_pubs.asgi import application
 
 #     # Load application using Django's get_asgi_application
 #     loaded_application = get_asgi_application()

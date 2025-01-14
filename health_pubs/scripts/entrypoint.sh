@@ -18,4 +18,4 @@ python manage.py migrate
 python manage.py collectstatic --noinput
 
 # Start the Gunicorn server
-exec gunicorn backend_alpha.wsgi:application --bind 0.0.0.0:8000
+exec gunicorn health_pubs.wsgi:application --bind 0.0.0.0:8000

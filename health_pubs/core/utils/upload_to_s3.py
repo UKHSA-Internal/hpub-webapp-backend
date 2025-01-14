@@ -39,7 +39,7 @@ def upload_file_to_s3(file_name: str, bucket: str, object_name: str = None):
 if __name__ == "__main__":
     # Replace these with your own values
     # Path to the file you want to upload
-    file_name = "/home/ebubeoguchi/hpub-webapp/hpub-backend/backend_alpha/core/utils/audio_transcript.txt"
+    file_name = "/home/ebubeoguchi/hpub-webapp/hpub-backend/health_pubs/core/utils/audio_transcript.txt"
     bucket_name = "hpub-publications-media-dev"  # Your S3 bucket name
     object_name = (
         "audio_transcript.txt"  # The name that will be used for the file in S3

@@ -2,8 +2,13 @@ import pytest
 
 """
 This file contains a test for the purpose of activating coverage test
-This only contains one single empty test with one fixture that will return true
+This only contains one single sample test with one fixture that will return true
+and contains one empty test
 """
+
+
+def test_empty():
+    pass
 
 
 @pytest.fixture

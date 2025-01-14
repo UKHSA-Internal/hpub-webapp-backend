@@ -3,9 +3,6 @@ on:
   push:
     branches:
       - main
-      - feature*
-      - backend*
-      - frontend*
   pull_request:
     types: [opened, synchronize, reopened]
 

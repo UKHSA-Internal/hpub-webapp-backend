@@ -1,10 +1,12 @@
 name: Black Formatter Check with ReviewDog
 
 on:
+  push:
+    branches:
+      - main
   pull_request:
     branches:
       - main
-      - develop
 
 jobs:
   black-check:

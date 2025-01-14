@@ -26,6 +26,9 @@ jobs:
           version: latest
 
       - name: Run Ruff and Annotate PR
-        run: ruff check . --select F,E,BLK --format=json | reviewdog -f="ruff" -reporter=github-pr-check -fail-on-error=true
+        run: >
+          ruff check . | reviewdog -efm="%f:%l:%c: %m"
+          -name=ruff -reporter=github-pr-review
+          -fail-on-error=true -filter-mode=nofilter
         env:
           REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}

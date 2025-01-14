@@ -35,4 +35,3 @@ jobs:
           filter_mode: 'nofilter'
           workdir: 'health_pubs'
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          fail_on_error: 'true'

@@ -27,12 +27,12 @@ services:
         condition: service_healthy
 
     environment:
-      DJANGO_SETTINGS_MODULE: backend_alpha.settings
+      DJANGO_SETTINGS_MODULE: health_pubs.settings
       AWS_DEFAULT_REGION: eu-west-2
     ports:
       - "8080:8000"
     volumes:
-      - ./backend_alpha:/app
+      - ./health_pubs:/app
 
 volumes:
   pg_data:

@@ -40,12 +40,12 @@
 #
 #      # Initialize backend project as a uv project
 #      #- name: Initialize uv project
-#       # working-directory: hpub-backend/backend_alpha
+#       # working-directory: hpub-backend/health_pubs
 #        #run: uv init .
 #
 #      # Install dependencies
 #      - name: Install dependencies
-#        working-directory: hpub-backend/backend_alpha
+#        working-directory: hpub-backend/health_pubs
 #        run: |
 #          uv add -r requirements.txt
 #          uv add pytest pytest-cov scikit-learn
@@ -63,7 +63,7 @@
 #      # Run tests with coverage
 #      - name: Run Python Unit Tests with Coveragae
 #        continue-on-error: false
-#        working-directory: hpub-backend/backend_alpha
+#        working-directory: hpub-backend/health_pubs
 #        run: uv run pytest --cov=./ --cov-report=xml --cov-report=html:html_coverage_report test
 #
 #      # Upload coverage report
@@ -71,6 +71,6 @@
 #        uses: actions/upload-artifact@v4
 #        with:
 #          name: coverage-report
-#          path: hpub-backend/backend_alpha/html_coverage_report
+#          path: hpub-backend/health_pubs/html_coverage_report
 #          overwrite: true
 #

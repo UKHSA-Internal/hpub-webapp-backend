@@ -90,10 +90,20 @@ class Config:
     def _is_local_environment() -> bool:
         """
         Determine if the current environment is local development.
+        Also checks if the local_secrets.json exits, if not then
+        environment would not be local.
 
         :return: True if the environment is local, False otherwise.
         """
-        return os.environ.get("ENVIRONMENT", "localdev") == "localdev"
+        local_secrets_exists = os.path.exists(Config.LOCAL_SECRETS_FILE)
+        is_localdev = os.environ.get("ENVIRONMENT", "localdev") == "localdev"
+
+        if (not is_localdev) and local_secrets_exists:
+            logger.waring(
+                "Environment is not local and local_secrets file exists. Do not use local secrets in production"
+            )
+
+        return is_localdev and local_secrets_exists
 
     @staticmethod
     def _parse_json(json_string: str, key: str or None = None) -> str:

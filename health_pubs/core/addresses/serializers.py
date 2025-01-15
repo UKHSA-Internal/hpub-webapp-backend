@@ -49,9 +49,9 @@ class AddressSerializer(serializers.ModelSerializer):
         # Check if the 'address_id' is provided in the request
         address_id = validated_data.get("address_id", None)
         if not address_id:
-            validated_data[
-                "address_id"
-            ] = uuid.uuid4()  # Generate a UUID if no id is provided
+            validated_data["address_id"] = (
+                uuid.uuid4()
+            )  # Generate a UUID if no id is provided
         return super().create(validated_data)
 
     def get_user_info(self, obj):

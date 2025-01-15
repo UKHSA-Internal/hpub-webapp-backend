@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 
 class CustomTokenAuthentication(BaseAuthentication):
-
     def authenticate(self, request):
         # For debugging purposes
         logger.info("Starting Token Authentication.....")
@@ -41,13 +40,14 @@ class CustomTokenAuthentication(BaseAuthentication):
             )  # For debugging purposes
 
             # Check if it's an Azure B2C token by looking for known claims
-            if "iss" in unverified_payload and "tfp" in unverified_payload:
+            # if "iss" in unverified_payload and "tfp" in unverified_payload:
+            if "iss" in unverified_payload:
                 # Validate as Azure B2C token
                 # For debugging purposes
                 logger.info("Detected Azure B2C token")
                 payload = validate_azure_b2c_token(token)
                 # logger.info("Payload", payload) # For debugging purposes
-                user = User.objects.filter(email=payload.get("emails")[0]).first()
+                user = User.objects.filter(email=payload.get("email_address")).first()
                 logger.info(
                     f"Authenticated user with refresh token: {user}"
                 )  # For debugging purposes

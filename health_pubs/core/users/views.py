@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 config = Config()
 
+TOKEN_ISSUER_DOMAIN = "ciamlogin.com"
 
 # Helper function to validate Azure B2C token
 
@@ -51,7 +52,9 @@ def refresh_b2c_token(refresh_token):
     client_id = config.get_azure_b2c_client_id()
     tenant_name = config.get_azure_b2c_tenant_name()
     tenant_id = config.get_azure_b2c_tenant_id()
-    token_url = f"https://{tenant_name}.b2clogin.com/{tenant_id}/oauth2/v2.0/token"
+    token_url = (
+        f"https://{tenant_name}.{TOKEN_ISSUER_DOMAIN}/{tenant_id}/oauth2/v2.0/token"
+    )
 
     # Prepare the data for refreshing the token
     data = {
@@ -107,7 +110,7 @@ def validate_azure_b2c_token(token):
             pem_key,
             algorithms=["RS256"],
             audience=client_id,
-            issuer=f"https://{config.get_azure_b2c_tenant_name()}.b2clogin.com/{config.get_azure_b2c_tenant_id()}/v2.0/",
+            issuer=f"https://{config.get_azure_b2c_tenant_id()}.{TOKEN_ISSUER_DOMAIN}/{config.get_azure_b2c_tenant_id()}/v2.0",
         )
         # logger.info("decoded_token", decoded_token) #for debugging
         return decoded_token
@@ -280,7 +283,9 @@ class UserLoginView(APIView):
             token = auth_header.split(" ")[1]
             decoded_token = validate_azure_b2c_token(token)
             email = (
-                decoded_token.get("emails")[0] if "emails" in decoded_token else None
+                decoded_token.get("email_address")
+                if "email_address" in decoded_token
+                else None
             )
         except (IndexError, ValueError) as e:
             return Response({"error": str(e)}, status=status.HTTP_401_UNAUTHORIZED)

@@ -149,7 +149,9 @@ class UserSignUpView(APIView):
             "last_name": decoded_token.get("family_name", ""),
             "mobile_number": decoded_token.get("extension_MobileNumber", ""),
             "email": (
-                decoded_token.get("emails")[0] if "emails" in decoded_token else None
+                decoded_token.get("email_address")
+                if "email_address" in decoded_token
+                else None
             ),
             "role_name": decoded_token.get("extension_UserAppRole"),
         }

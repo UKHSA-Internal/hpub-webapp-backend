@@ -52,7 +52,6 @@ def refresh_b2c_token(refresh_token):
     client_id = config.get_azure_b2c_client_id()
     tenant_name = config.get_azure_b2c_tenant_name()
     tenant_id = config.get_azure_b2c_tenant_id()
-
     token_url = (
         f"https://{tenant_name}.{TOKEN_ISSUER_DOMAIN}/{tenant_id}/oauth2/v2.0/token"
     )

@@ -7,7 +7,6 @@ db.sqlite3
 0*_initial.py
 .vscode/
 
-
 local_secrets.json
 .idea
 **venv/

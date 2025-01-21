@@ -19,9 +19,6 @@ logger = logging.getLogger(__name__)
 class Config:
     """Class to retrieve and parse database connection information and other configurations."""
 
-    LOCAL_SECRETS_FILE = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "local_secrets.json"
-    )
 
     @staticmethod
     def _get_value(key: str, is_secret: bool = False) -> str:
@@ -58,52 +55,10 @@ class Config:
         """
         if key == "AZURE_B2C_CLIENT_ID":
             pass
-        if Config._is_local_environment():
-            logger.info(f"Fetching {key} from local secrets file.")
-            return Config._get_local_secret(key)
         else:
             logger.info(f"Fetching {key} from AWS Secrets Manager.")
             return get_secret_value(key)
 
-    @staticmethod
-    def _get_local_secret(key: str) -> Optional[str]:
-        """
-        Fetch the secret value from a local secrets file.
-
-        :param key: The name of the secret to retrieve.
-        :return: The secret value, or None if not found.
-        :raises FileNotFoundError: If the local secrets file does not exist.
-        :raises ValueError: If the local secrets file is not valid JSON.
-        """
-        try:
-            with open(Config.LOCAL_SECRETS_FILE, "r", encoding="utf-8") as file:
-                local_secrets = json.load(file)
-            return local_secrets.get(key)
-        except FileNotFoundError:
-            logger.error(f"Local secrets file {Config.LOCAL_SECRETS_FILE} not found.")
-            raise FileNotFoundError("Local secrets file not found")
-        except json.JSONDecodeError:
-            logger.error("Failed to parse local secrets file as JSON.")
-            raise ValueError("Local secrets file is not valid JSON")
-
-    @staticmethod
-    def _is_local_environment() -> bool:
-        """
-        Determine if the current environment is local development.
-        Also checks if the local_secrets.json exits, if not then
-        environment would not be local.
-
-        :return: True if the environment is local, False otherwise.
-        """
-        local_secrets_exists = os.path.exists(Config.LOCAL_SECRETS_FILE)
-        is_localdev = os.environ.get("ENVIRONMENT", "localdev") == "localdev"
-
-        if (not is_localdev) and local_secrets_exists:
-            logger.waring(
-                "Environment is not local and local_secrets file exists. Do not use local secrets in production"
-            )
-
-        return is_localdev and local_secrets_exists
 
     @staticmethod
     def _parse_json(json_string: str, key: str or None = None) -> str:

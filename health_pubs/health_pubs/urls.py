@@ -22,4 +22,5 @@ urlpatterns = [
     path(f"{API_PREFIX}", include("core.customer_support.urls")),
     path(f"{API_PREFIX}", include("core.languages.urls")),
     path(f"{API_PREFIX}", include("core.where_to_use.urls")),
+    path(f"{API_PREFIX}", include("core.get_secrets.urls")),
 ]

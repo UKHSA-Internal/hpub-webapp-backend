@@ -33,6 +33,7 @@ def get_frontend_secrets(request):
     Retrieve front-end specific secrets from AWS Secrets Manager
     and return them as JSON for the frontend to ingest.
     """
+    # Mapping of frontend variable names to the actual secrets manager keys
     secrets_map = {
         "VITE_APP_PORT": "hpub/frontend/app/port",
         "VITE_API_TARGET": "hpub/api/target",
@@ -46,6 +47,7 @@ def get_frontend_secrets(request):
         "VITE_API_BASE_URL": "hpub/frontend/base/url",
     }
 
+    # Fetch each secret from Secrets Manager
     response_data = {}
     try:
         for frontend_var, secret_key in secrets_map.items():

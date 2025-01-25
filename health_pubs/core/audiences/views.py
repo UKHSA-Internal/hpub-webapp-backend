@@ -1,7 +1,7 @@
 import logging
 
 import pandas as pd
-from core.users.permissions import IsAdminOrRegisteredUser, IsAdminUser
+from core.users.permissions import IsAdminUser
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
@@ -11,7 +11,7 @@ from django.utils.timezone import now
 from rest_framework import status, viewsets
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from wagtail.models import Page
 

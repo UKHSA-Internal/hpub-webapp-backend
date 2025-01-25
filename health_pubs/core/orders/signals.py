@@ -60,7 +60,7 @@ def send_event(order_instance):
                         "Source": "hpub.backend",
                         "DetailType": "OrderPlaced",
                         "Detail": json.dumps(event_detail),
-                        "EventBusName": "HpubCustomEventBus",
+                        "EventBusName": "051826714322-Hpubeventbus",
                     }
                 ]
             )

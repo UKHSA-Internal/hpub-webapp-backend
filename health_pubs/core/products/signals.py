@@ -123,7 +123,7 @@ def send_product_event(product_instance, event_type, detail_type, required_field
                         "Source": "hpub.backend",
                         "DetailType": detail_type,
                         "Detail": json.dumps(event_detail),
-                        "EventBusName": "HpubCustomEventBus",
+                        "EventBusName": "051826714322-Hpubeventbus",
                     }
                 ]
             )

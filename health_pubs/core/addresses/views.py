@@ -185,12 +185,17 @@ class AddressViewSet(viewsets.ModelViewSet):
         Custom action to verify an address by calling the matchAddress API.
         """
         data = request.data
-        address = data.get("address")
+        postcode = data.get("postcode")
+        building_number = data.get("building_number")
 
-        if not address:
+        if not postcode or not building_number:
             return Response(
-                {"error": "Address is required"}, status=status.HTTP_400_BAD_REQUEST
+                {"error": "Postcode and building number are required"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # Concatenate building number and postcode into the address
+        address = f"{building_number} {postcode}".strip()
 
         # Prepare the matchAddress payload
         match_address_payload = {
@@ -218,17 +223,17 @@ class AddressViewSet(viewsets.ModelViewSet):
 
         logging.info("Match Address Response:", match_response.json())
         if match_response.status_code == 200:
-            # Filter to only include addresses in England (countryCode = "E")
+            # Filter to only include addresses in England (countryCode = "E") and matching the same postcode
             matched_addresses = [
                 addr
                 for addr in match_response.json().get("matchedAddresses", [])
-                if addr.get("countryCode") in ["E", "England"]
+                if addr.get("countryCode") in ["E", "England"] and addr.get("postcode") == postcode
             ]
             if not matched_addresses:
-                # If no addresses match England, return an error
+                # If no addresses match the criteria, return an error
                 return Response(
                     {
-                        "error": "No addresses found in England. Please select an address in England only."
+                        "error": "No addresses found in England with the provided postcode. Please select a valid address."
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
@@ -241,6 +246,7 @@ class AddressViewSet(viewsets.ModelViewSet):
                 {"error": "Failed to verify address", "details": match_response.json()},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
 
     @action(detail=False, methods=["post"], url_path="geo-code-address")
     def geo_code_address(self, request):

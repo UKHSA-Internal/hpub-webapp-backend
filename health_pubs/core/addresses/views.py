@@ -248,6 +248,7 @@ class AddressViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+
     @action(detail=False, methods=["post"], url_path="geo-code-address")
     def geo_code_address(self, request):
         """

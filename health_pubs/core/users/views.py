@@ -52,6 +52,7 @@ def refresh_b2c_token(refresh_token):
     client_id = config.get_azure_b2c_client_id()
     tenant_name = config.get_azure_b2c_tenant_name()
     tenant_id = config.get_azure_b2c_tenant_id()
+    
     token_url = (
         f"https://{tenant_name}.{TOKEN_ISSUER_DOMAIN}/{tenant_id}/oauth2/v2.0/token"
     )
@@ -112,7 +113,7 @@ def validate_azure_b2c_token(token):
             audience=client_id,
             issuer=f"https://{config.get_azure_b2c_tenant_id()}.{TOKEN_ISSUER_DOMAIN}/{config.get_azure_b2c_tenant_id()}/v2.0",
         )
-        # logger.info("decoded_token", decoded_token) #for debugging
+        #logger.info("decoded_token", decoded_token) #for debugging
         return decoded_token
 
     except jwt.ExpiredSignatureError:
@@ -304,26 +305,26 @@ class UserLoginView(APIView):
                 {"error": "User not found"}, status=status.HTTP_404_NOT_FOUND
             )
         # Debug print user information
-        print("User found:", user)
+        logger.info("User found:", user)
 
         # Retrieve role
         role_ref = user.role_ref
         if role_ref:
-            print("Role found:", role_ref)
-            print("Role name:", role_ref.name)
+            logger.info("Role found:", role_ref)
+            logger.info("Role name:", role_ref.name)
             role_name = role_ref.name
         else:
-            print("No role found for role_ref:", user.role_ref)
+            logger.info("No role found for role_ref:", user.role_ref)
             role_name = None
 
         # Retrieve organization
         organization_ref = user.organization_ref
         if organization_ref:
-            print("Organization found:", organization_ref)
-            print("Organization name:", organization_ref.name)
+            logger.info("Organization found:", organization_ref)
+            logger.info("Organization name:", organization_ref.name)
             organization_name = organization_ref.name
         else:
-            print("No role found for organization_ref:", user.organization_ref)
+            logger.info("No role found for organization_ref:", user.organization_ref)
             organization_name = None
         short_term_token = generate_short_term_token(
             user.user_id, user.email, role_name

@@ -59,7 +59,7 @@ def generate_long_term_token(user_id, email, role_name):
         "email": email,
         "role": role_name,
         "type": "refresh",
-        "exp": timezone.now() + timedelta(days=7),
+        "exp": timezone.now() + timedelta(days=1),
     }
     return jwt.encode(payload, settings.PRIVATE_KEY, algorithm="RS256")
 

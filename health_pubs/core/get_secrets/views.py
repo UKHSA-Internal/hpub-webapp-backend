@@ -30,7 +30,7 @@ def get_frontend_secrets(request):
         "VITE_MSAL_KNOWN_AUTHORITIES": "hpub/azure/b2c/known/authorities",
         "VITE_MSAL_LOGIN_REQUEST_SCOPES": "hpub/azure/b2c/scope",
         "VITE_MSAL_LOGIN_REQUEST_PROMPT": "hpub/azure/b2c/login/request/prompt",
-        "VITE_API_BASE_URL": "hpub/frontend/base/url"
+        "VITE_API_BASE_URL": "hpub/frontend/base/url",
     }
 
     # Fetch each secret from Secrets Manager

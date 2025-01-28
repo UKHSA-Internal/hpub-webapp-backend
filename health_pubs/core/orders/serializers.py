@@ -25,9 +25,9 @@ class OrderItemSerializer(serializers.ModelSerializer):
         # Check if the 'order_item_id' is provided in the request
         order_item_id = validated_data.get("order_item_id", None)
         if not order_item_id:
-            validated_data["order_item_id"] = (
-                uuid.uuid4()
-            )  # Generate a UUID if no id is provided
+            validated_data[
+                "order_item_id"
+            ] = uuid.uuid4()  # Generate a UUID if no id is provided
         return super().create(validated_data)
 
 
@@ -80,7 +80,7 @@ class OrderSerializer(serializers.ModelSerializer):
         # Check if the 'order_id' is provided in the request
         order_id = validated_data.get("order_id", None)
         if not order_id:
-            validated_data["order_id"] = (
-                uuid.uuid4()
-            )  # Generate a UUID if no id is provided
+            validated_data[
+                "order_id"
+            ] = uuid.uuid4()  # Generate a UUID if no id is provided
         return super().create(validated_data)

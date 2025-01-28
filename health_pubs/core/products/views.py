@@ -1,17 +1,13 @@
-import csv
 import datetime
 import json
 import logging
 import re
 import uuid
-from sys import version
 from typing import Optional
 from urllib.parse import unquote
 
 import bcp47
-import boto3
 import pandas as pd
-from health_pubs import settings
 from core.audiences.models import Audience
 from core.diseases.models import Disease
 from core.diseases.serializers import DiseaseSerializer
@@ -25,9 +21,7 @@ from core.programs.models import Program
 from core.roles.models import Role
 from core.users.models import User
 from core.users.permissions import (
-    IsAdminOrRegisteredUser,
     IsAdminUser,
-    IsRegisteredUser,
 )
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from core.utils.extract_file_metadata import get_file_metadata
@@ -47,7 +41,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.text import slugify
 from django.views import View
-from pydantic import BaseModel, Field, ValidationError, validator
+from pydantic import BaseModel, ValidationError, validator
 from rest_framework import status, viewsets
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action

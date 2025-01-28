@@ -2,7 +2,7 @@ import logging
 import uuid
 
 from core.programs.models import Program
-from core.users.permissions import IsAdminOrRegisteredUser, IsAdminUser
+from core.users.permissions import IsAdminUser
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from django.core.exceptions import ValidationError
 from django.utils.text import slugify

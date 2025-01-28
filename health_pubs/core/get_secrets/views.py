@@ -11,7 +11,8 @@ target_path = pathlib.Path(os.path.abspath(__file__)).parents[2]
 sys.path.append(target_path)
 from configs.config import get_secret_value
 
-@api_view(['GET'])
+
+@api_view(["GET"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([AllowAny])
 def get_frontend_secrets(request):

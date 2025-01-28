@@ -2,7 +2,6 @@ import logging
 from datetime import datetime
 import uuid
 
-from core.utils.custom_token_authentication import CustomTokenAuthentication
 from core.utils.send_contact_us_notification_email import send_notification
 from django.contrib.contenttypes.models import ContentType
 from django.http import JsonResponse

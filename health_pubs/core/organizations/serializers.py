@@ -14,7 +14,7 @@ class OrganizationSerializer(serializers.ModelSerializer):
         # Check if the 'organization_id' is provided in the request
         organization_id = validated_data.get("organization_id", None)
         if not organization_id:
-            validated_data["organization_id"] = (
-                uuid.uuid4()
-            )  # Generate a UUID if no id is provided
+            validated_data[
+                "organization_id"
+            ] = uuid.uuid4()  # Generate a UUID if no id is provided
         return super().create(validated_data)

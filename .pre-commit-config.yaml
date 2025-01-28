@@ -10,3 +10,9 @@ repos:
         name: black-check
         args: [--line-length=88, --check]
         language_version: python3.12
+
+  - repo: https://github.com/PyCQA/autoflake
+    rev: v2.3.1
+    hooks:
+    - id: autoflake
+      args: [--remove-all-unused-imports, --in-place, --ignore-init-module-imports, --remove-unused-variables]

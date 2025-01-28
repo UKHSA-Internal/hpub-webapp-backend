@@ -1,7 +1,6 @@
 import io
 import logging
 import uuid
-from unittest.mock import patch
 
 import jwt
 import pandas as pd
@@ -9,7 +8,6 @@ import pytest
 from core.audiences.models import Audience
 from core.roles.models import Role
 from core.users.models import User
-from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.urls import reverse
 from django.utils import timezone
@@ -176,7 +174,7 @@ def audience(db, parent_page):
 @pytest.fixture
 def parent_page(db):
     """Fixture to create a parent page for audiences."""
-    slug_parent = slugify(f"parent-page-{str(uuid.uuid4())}-{str(timezone.now())}")
+    slugify(f"parent-page-{str(uuid.uuid4())}-{str(timezone.now())}")
 
     # Create or get parent page
     parent_page = get_or_create_parent_page("Audiences", "audiences")

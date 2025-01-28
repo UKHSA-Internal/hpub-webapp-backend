@@ -18,7 +18,6 @@ from core.roles.models import Role
 from core.users.models import User
 from django.contrib.contenttypes.models import ContentType
 from django.db import DatabaseError, IntegrityError, OperationalError, ProgrammingError
-from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import quote
@@ -700,7 +699,6 @@ def auth_api_client_admin(api_client, user_admin):
 
 @pytest.mark.django_db
 class TestProductAdminListView:
-
     def test_product_list_admin_successful(
         self, create_product_setup, auth_api_client_admin
     ):
@@ -763,7 +761,6 @@ class TestProductAdminListView:
 
 @pytest.mark.django_db
 class TestProductUsersListView:
-
     def test_product_list_users_successful(
         self, create_product_setup, auth_api_client_user
     ):
@@ -826,7 +823,6 @@ class TestProductUsersListView:
 
 @pytest.mark.django_db
 class TestProductPatch:
-
     def test_product_patch_success(
         self, product, valid_patch_data, auth_api_client_admin
     ):
@@ -889,7 +885,6 @@ class TestProductPatch:
 
 @pytest.mark.django_db
 class TestProductCreateView:
-
     def test_create_product_success(self, product, program, auth_api_client_admin):
         # Prepare the payload for creating a product
         payload = {

@@ -22,7 +22,7 @@ from django.core.validators import validate_email
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.text import slugify
-from rest_framework import status, viewsets
+from rest_framework import status
 from rest_framework.generics import GenericAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -85,7 +85,7 @@ def validate_azure_b2c_token(token):
         # Log the token's kid
 
         # Log all available kids in JWKS
-        available_kids = [key["kid"] for key in jwks["keys"]]
+        [key["kid"] for key in jwks["keys"]]
 
         # Select the correct key based on kid
         rsa_key = {}

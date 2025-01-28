@@ -14,7 +14,7 @@ class LanguageSerializer(serializers.ModelSerializer):
         # Check if the 'language_id' is provided in the request
         language_id = validated_data.get("language_id", None)
         if not language_id:
-            validated_data["language_id"] = (
-                uuid.uuid4()
-            )  # Generate a UUID if no id is provided
+            validated_data[
+                "language_id"
+            ] = uuid.uuid4()  # Generate a UUID if no id is provided
         return super().create(validated_data)

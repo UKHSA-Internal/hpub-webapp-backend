@@ -5,7 +5,7 @@ import pandas as pd
 from core.errors.enums import ErrorCode, ErrorMessage
 from core.errors.error_function import handle_error
 from core.organizations.models import Organization
-from core.users.permissions import IsAdminOrRegisteredUser, IsAdminUser
+from core.users.permissions import IsAdminUser
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError

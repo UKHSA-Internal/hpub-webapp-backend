@@ -3,7 +3,7 @@ import os
 import sys
 import uuid
 from datetime import datetime, timedelta
-from unittest.mock import ANY, patch
+from unittest.mock import patch
 
 import jwt
 import pytest
@@ -24,7 +24,6 @@ from wagtail.models import Page
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
-from configs.get_secret_config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -518,7 +517,6 @@ def test_token_refresh_missing_authorization(api_client):
 
 @pytest.mark.django_db
 class TestAPIs:
-
     @patch("core.users.views.validate_azure_b2c_token")
     def test_user_signup_positive(
         self,

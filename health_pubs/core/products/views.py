@@ -1757,7 +1757,7 @@ class ProductSearchUserView(APIView):
             products = Product.objects.filter(query)
             if not products.exists():
                 return Response(
-                    {"detail": ErrorMessage.PRODUCT_NOT_FOUND},
+                    {"detail": str(ErrorMessage.PRODUCT_NOT_FOUND)},
                     status=status.HTTP_404_NOT_FOUND,
                 )
 

@@ -3,7 +3,7 @@ import string
 import uuid
 
 import pandas as pd
-from core.users.permissions import IsAdminOrRegisteredUser, IsAdminUser
+from core.users.permissions import IsAdminUser
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from django.contrib.contenttypes.models import ContentType
 from django.db import IntegrityError
@@ -15,7 +15,6 @@ from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.viewsets import ViewSet
 from wagtail.models import Page
 
 from .models import Program

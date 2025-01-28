@@ -3,11 +3,11 @@ import uuid
 
 import langcodes
 import pandas as pd
-from core.users.permissions import IsAdminOrRegisteredUser, IsAdminUser
+from core.users.permissions import IsAdminUser
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from django.utils import timezone
 from django.utils.text import slugify
-from rest_framework import status, viewsets
+from rest_framework import status
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated

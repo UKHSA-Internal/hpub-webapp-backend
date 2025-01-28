@@ -227,7 +227,8 @@ class AddressViewSet(viewsets.ModelViewSet):
             matched_addresses = [
                 addr
                 for addr in match_response.json().get("matchedAddresses", [])
-                if addr.get("countryCode") in ["E", "England"] and addr.get("postcode") == postcode
+                if addr.get("countryCode") in ["E", "England"]
+                and addr.get("postcode") == postcode
             ]
             if not matched_addresses:
                 # If no addresses match the criteria, return an error
@@ -246,7 +247,6 @@ class AddressViewSet(viewsets.ModelViewSet):
                 {"error": "Failed to verify address", "details": match_response.json()},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
 
     @action(detail=False, methods=["post"], url_path="geo-code-address")
     def geo_code_address(self, request):

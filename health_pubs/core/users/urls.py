@@ -2,9 +2,11 @@ from django.urls import path
 
 from .views import (
     LogoutView,
+    MigrateUsersAPIView,
     TokenRefresh,
     UpdateUserView,
     UserDetailView,
+    UserListView,
     UserLoginView,
     UserSignUpView,
 )
@@ -16,4 +18,6 @@ urlpatterns = [
     path("users/logout/", LogoutView().as_view(), name="logout"),
     path("users/refresh/", TokenRefresh.as_view(), name="token_refresh"),
     path("users/<uuid:user_id>/", UserDetailView.as_view(), name="user-detail"),
+    path("auth/users/", UserListView.as_view(), name="user-list"),
+    path("users/migrate-users/", MigrateUsersAPIView.as_view(), name="user-migrate"),
 ]

@@ -3278,33 +3278,47 @@ class ProductCreateView(APIView):
 
 
 class ProgramProductsView(APIView):
+    """
+    API view to retrieve products related to a specific program,
+    filtered by associated diseases and vaccinations.
+    """
+
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
     def get(self, request, program_id):
+        """
+        Handle GET requests to retrieve filtered products, diseases, and vaccinations
+        related to the specified program.
+        """
         try:
-            # Fetch the program
+            # Fetch the program; return 404 if not found
             program = get_object_or_404(Program, pk=program_id)
 
-            # Retrieve diseases and vaccinations related to the program
+            # Retrieve diseases and vaccinations associated with the program
             diseases = Disease.objects.filter(programs=program)
             vaccinations = Vaccination.objects.filter(programs=program)
 
-            # Get all products related to diseases and vaccinations
-            products = (
-                Product.objects.filter(
-                    program_id=program, update_ref__diseases_ref__in=diseases
-                ).distinct()
-                | Product.objects.filter(
-                    program_id=program, update_ref__vaccination_ref__in=vaccinations
-                ).distinct()
+            # Construct Q objects for diseases and vaccinations
+            diseases_q = Q(update_ref__diseases_ref__in=diseases)
+            vaccinations_q = Q(update_ref__vaccination_ref__in=vaccinations)
+
+            # Combine Q objects using OR to include products related to either or both
+            products = Product.objects.filter(
+                Q(program_id=program) & (diseases_q | vaccinations_q)
+            ).distinct()
+
+            # Optimize query with prefetch_related if relationships exist
+            # Adjust 'update_ref' and related fields based on your actual model relations
+            products = products.prefetch_related(
+                "update_ref__diseases_ref", "update_ref__vaccination_ref"
             )
 
             # Initialize custom pagination
             paginator = CustomPagination()
             paginated_products = paginator.paginate_queryset(products, request)
 
-            # Serialize the filtered products
+            # Serialize the paginated products
             product_serializer = ProductSerializer(paginated_products, many=True)
 
             # Extract S3 URLs for presigned URL generation
@@ -3316,99 +3330,123 @@ class ProgramProductsView(APIView):
             # Update product URLs with the new presigned URLs
             self.update_product_urls(product_serializer.data, presigned_urls)
 
-            # Serialize diseases and vaccinations for filtering on the frontend
+            # Serialize diseases and vaccinations for frontend filtering
             disease_serializer = DiseaseSerializer(diseases, many=True)
             vaccination_serializer = VaccinationSerializer(vaccinations, many=True)
 
-            # Construct the response with products, diseases, and vaccinations
+            # Construct the response data
             response_data = {
                 "products": product_serializer.data,
                 "diseases": disease_serializer.data,
                 "vaccinations": vaccination_serializer.data,
             }
 
-            # Return the paginated response with the status code
+            # Return the paginated response with HTTP 200 status
             return paginator.get_paginated_response(
                 response_data, status_code=status.HTTP_200_OK
             )
 
         except Http404:
+            # Handle case where program is not found
             return Response(
                 {"detail": "Program not found."}, status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
+            # Log the exception with stack trace for debugging
             logger.exception(
                 "An error occurred while fetching program products: %s", str(e)
             )
+            # Return a generic error message to the client
             return Response(
                 {"detail": UNEXPECTED_ERROR_MSG},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
     def extract_s3_urls(self, products_data):
-        """Extract S3 URLs from products data for presigned URL generation."""
+        """
+        Extract S3 URLs from the serialized products data for presigned URL generation.
+
+        Args:
+            products_data (list): Serialized list of product data.
+
+        Returns:
+            list: List of S3 bucket URLs.
+        """
         all_download_urls = []
         for product in products_data:
             update_refs = product.get("update_ref", {})
             if isinstance(update_refs, dict):
                 product_downloads = update_refs.get("product_downloads", {})
 
-                # Check main download URL
-                if "main_download_url" in product_downloads:
-                    main_download = product_downloads.get("main_download_url", {})
-                    if (
-                        isinstance(main_download, dict)
-                        and "s3_bucket_url" in main_download
-                    ):
-                        all_download_urls.append(main_download["s3_bucket_url"])
+                # Check and extract main download URL
+                main_download = product_downloads.get("main_download_url", {})
+                if isinstance(main_download, dict):
+                    s3_url = main_download.get("s3_bucket_url")
+                    if s3_url:
+                        all_download_urls.append(s3_url)
 
-                # Check other download types
-                for download_type in [
+                # Define other download types to check
+                other_download_types = [
                     "web_download_url",
                     "print_download_url",
                     "transcript_url",
-                ]:
+                ]
+
+                # Iterate through other download types and extract S3 URLs
+                for download_type in other_download_types:
                     downloads = product_downloads.get(download_type, [])
                     if isinstance(downloads, list):
                         for item in downloads:
-                            if isinstance(item, dict) and "s3_bucket_url" in item:
-                                all_download_urls.append(item["s3_bucket_url"])
+                            if isinstance(item, dict):
+                                s3_url = item.get("s3_bucket_url")
+                                if s3_url:
+                                    all_download_urls.append(s3_url)
             else:
                 logger.warning(
-                    "Expected update_ref to be a dictionary but got %s",
+                    "Expected 'update_ref' to be a dictionary but got %s",
                     type(update_refs).__name__,
                 )
         return all_download_urls
 
     def update_product_urls(self, products_data, presigned_urls):
-        """Update product URLs with presigned URLs in the serialized data."""
+        """
+        Update product URLs in the serialized data with presigned URLs.
+
+        Args:
+            products_data (list): Serialized list of product data.
+            presigned_urls (dict): Mapping of original S3 URLs to presigned URLs.
+        """
         for product in products_data:
             update_refs = product.get("update_ref", {})
             if isinstance(update_refs, dict):
                 product_downloads = update_refs.get("product_downloads", {})
 
-                # Update main download URL
-                if "main_download_url" in product_downloads:
-                    main_download = product_downloads.get("main_download_url", {})
-                    s3_url = main_download.get("s3_bucket_url", "")
-                    if s3_url in presigned_urls:
+                # Update main download URL if present
+                main_download = product_downloads.get("main_download_url", {})
+                if isinstance(main_download, dict):
+                    s3_url = main_download.get("s3_bucket_url")
+                    if s3_url and s3_url in presigned_urls:
                         main_download["URL"] = presigned_urls[s3_url]
 
-                # Update URLs for other download types
-                for download_type in [
+                # Define other download types to update
+                other_download_types = [
                     "web_download_url",
                     "print_download_url",
                     "transcript_url",
-                ]:
+                ]
+
+                # Iterate through other download types and update URLs
+                for download_type in other_download_types:
                     downloads = product_downloads.get(download_type, [])
                     if isinstance(downloads, list):
                         for item in downloads:
-                            s3_url = item.get("s3_bucket_url", "")
-                            if s3_url in presigned_urls:
-                                item["URL"] = presigned_urls[s3_url]
+                            if isinstance(item, dict):
+                                s3_url = item.get("s3_bucket_url")
+                                if s3_url and s3_url in presigned_urls:
+                                    item["URL"] = presigned_urls[s3_url]
             else:
                 logger.warning(
-                    "Expected update_ref to be a dictionary but got %s",
+                    "Expected 'update_ref' to be a dictionary but got %s",
                     type(update_refs).__name__,
                 )
 

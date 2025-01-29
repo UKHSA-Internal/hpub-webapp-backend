@@ -11,4 +11,3 @@ db.sqlite3
 local_secrets.json
 .idea
 **venv/
-ZscalerRootCA.crt

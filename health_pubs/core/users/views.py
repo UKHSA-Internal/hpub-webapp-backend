@@ -164,7 +164,7 @@ class UserSignUpView(APIView):
             ),
             "role_name": decoded_token.get("extension_UserAppRole"),
         }
-        logger.info(user_info)
+        logger.info("extracted user_info: %s", user_info)
 
         role_name = user_info["role_name"]
 

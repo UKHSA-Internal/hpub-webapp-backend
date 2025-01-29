@@ -1,4 +1,5 @@
 from datetime import timedelta
+import uuid
 
 import jwt
 from core.users.models import InvalidatedToken
@@ -47,19 +48,23 @@ def generate_short_term_token(user_id, email, role_name):
         "email": email,
         "role": role_name,
         "type": "access",
+        "jti": str(uuid.uuid4()),
         "exp": timezone.now() + timedelta(minutes=30),
+        "iat": timezone.now(),
     }
     return jwt.encode(payload, settings.PRIVATE_KEY, algorithm="RS256")
 
 
 def generate_long_term_token(user_id, email, role_name):
-    """Generates a long-lived refresh JWT token (e.g., 7 days) for API access authorization."""
+    """Generates a long-lived refresh JWT token (e.g., 1 day) for API access authorization."""
     payload = {
         "user_id": user_id,
         "email": email,
         "role": role_name,
         "type": "refresh",
+        "jti": str(uuid.uuid4()),
         "exp": timezone.now() + timedelta(days=1),
+        "iat": timezone.now(),
     }
     return jwt.encode(payload, settings.PRIVATE_KEY, algorithm="RS256")
 

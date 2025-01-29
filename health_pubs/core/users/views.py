@@ -164,7 +164,7 @@ class UserSignUpView(APIView):
             ),
             "role_name": decoded_token.get("extension_UserAppRole"),
         }
-        logger.info(user_info)
+        logger.info("extracted user_info: %s", user_info)
 
         role_name = user_info["role_name"]
 
@@ -194,7 +194,7 @@ class UserSignUpView(APIView):
             )
 
         # Step 3: Retrieve role based on role_name from token
-        logger.info("roleName", role_name)
+        logger.info("roleName: %s", role_name)
         role = Role.objects.filter(name=role_name).first()
         if role_name and not role:
             return Response(
@@ -313,26 +313,27 @@ class UserLoginView(APIView):
                 {"error": "User not found"}, status=status.HTTP_404_NOT_FOUND
             )
         # Debug print user information
-        logger.info("User found:", user)
+        logger.info("User found: %s", user)
 
         # Retrieve role
         role_ref = user.role_ref
         if role_ref:
-            logger.info("Role found:", role_ref)
-            logger.info("Role name:", role_ref.name)
+            logger.info("Role found: %s", role_ref)
+            logger.info("Role name: %s", role_ref.name)
             role_name = role_ref.name
         else:
-            logger.info("No role found for role_ref:", user.role_ref)
+            logger.info("No role found for role_ref: %s", user.role_ref)
             role_name = None
 
         # Retrieve organization
         organization_ref = user.organization_ref
         if organization_ref:
-            logger.info("Organization found:", organization_ref)
-            logger.info("Organization name:", organization_ref.name)
+            logger.info("Organization found: %s", organization_ref)
+            logger.info("Organization name: %s", organization_ref.name)
+
             organization_name = organization_ref.name
         else:
-            logger.info("No role found for organization_ref:", user.organization_ref)
+            logger.info("No role found for organization_ref: %s", user.organization_ref)
             organization_name = None
         short_term_token = generate_short_term_token(
             user.user_id, user.email, role_name

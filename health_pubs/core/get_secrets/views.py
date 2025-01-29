@@ -60,9 +60,10 @@ def get_frontend_secrets(request):
                 logger.warning(f"Unexpected secret format for key: {secret_key}")
                 response_data[frontend_var] = None  # Handle as appropriate
     except Exception as e:
-        logger.exception("Error occurred while retrieving frontend secrets.")
+        logger.exception(f"Error occurred while retrieving frontend secrets{str(e)}")
         return Response(
-            {"error": "Internal server error while retrieving secrets."}, status=500
+            {"error": f"Internal server error while retrieving secrets: {str(e)}"},
+            status=500,
         )
 
     return Response(response_data, status=200)

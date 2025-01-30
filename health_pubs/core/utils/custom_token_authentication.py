@@ -40,7 +40,6 @@ class CustomTokenAuthentication(BaseAuthentication):
             )  # For debugging purposes
 
             # Check if it's an Azure B2C token by looking for known claims
-            # if "iss" in unverified_payload and "tfp" in unverified_payload:
             if "iss" in unverified_payload:
                 # Validate as Azure B2C token
                 # For debugging purposes

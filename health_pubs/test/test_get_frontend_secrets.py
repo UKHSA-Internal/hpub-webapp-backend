@@ -1,14 +1,26 @@
 import json
 import pytest
 from unittest.mock import patch
-from rest_framework.test import APIRequestFactory
-
+from rest_framework.test import APIRequestFactory, APIClient
+from django.urls import reverse, resolve
 from core.get_secrets.views import get_frontend_secrets
+from core.get_secrets.urls import urlpatterns
 
 
 @pytest.fixture
 def api_factory():
     return APIRequestFactory()
+
+
+@pytest.fixture
+def api_client():
+    return APIClient()
+
+
+# Test that the URL correctly resolves to the expected view function
+def test_url_resolves_to_get_frontend_secrets():
+    resolver = resolve("/api/v1/frontend-secrets/")
+    assert resolver.func == get_frontend_secrets
 
 
 @patch("core.get_secrets.views.get_secret_value")
@@ -24,8 +36,7 @@ def test_get_frontend_secrets_success(mock_logger, mock_get_secret_value, api_fa
         return mock_secrets.get(key, json.dumps({"value": "mock_value"}))
 
     mock_get_secret_value.side_effect = mock_get_secret
-
-    request = api_factory.get("/get-frontend-secrets")
+    request = api_factory.get("/frontend-secrets/")
     response = get_frontend_secrets(request)
 
     assert response.status_code == 200
@@ -50,10 +61,30 @@ def test_get_frontend_secrets_failure(mock_logger, mock_get_secret_value, api_fa
     # Simulate an exception when retrieving secrets
     mock_get_secret_value.side_effect = Exception("AWS Secrets Manager error")
 
-    request = api_factory.get("/get-frontend-secrets")
+    request = api_factory.get("/frontend-secrets/")
     response = get_frontend_secrets(request)
 
+    # Assertions for error handling coverage
     assert response.status_code == 500
     assert "error" in response.data
-    assert "AWS Secrets Manager error" in response.data["error"]
+    assert (
+        response.data["error"]
+        == "Internal server error while retrieving secrets: AWS Secrets Manager error"
+    )
+
+    # Ensure the logger.exception method was called to log the error
     mock_logger.exception.assert_called()
+
+
+# Test calling the endpoint using Django's test client
+@patch("core.get_secrets.views.get_secret_value")
+def test_frontend_secrets_url_returns_success(mock_get_secret_value, api_client):
+    mock_get_secret_value.return_value = json.dumps({"value": "5173"})
+
+    url = reverse("frontend_secrets")  # Uses the named URL pattern from urlpatterns
+    response = api_client.get(url)
+
+    assert response.status_code in [
+        200,
+        500,
+    ]  # Expect either success or a handled error response

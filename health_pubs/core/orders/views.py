@@ -26,6 +26,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from wagtail.models import Page
@@ -39,12 +40,32 @@ logger = logging.getLogger(__name__)
 from django.db import transaction
 
 
+class CustomPagination(PageNumberPagination):
+    page_size = 20  # Set pagination to 20 items per page
+
+    def get_paginated_response(self, data, status_code=200):
+        response = Response(
+            {
+                "links": {
+                    "next": self.get_next_link(),
+                    "previous": self.get_previous_link(),
+                },
+                "count": self.page.paginator.count,
+                "results": data,
+            }
+        )
+        response.status_code = status_code
+
+        return response
+
+
 class OrderViewSet(viewsets.ModelViewSet):
 
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminOrRegisteredUser]
     queryset = Order.objects.all()
     serializer_class = OrderSerializer
+    pagination_class = CustomPagination
 
     @action(detail=False, methods=["post"], url_path="admin")
     def create_for_admin(self, request, *args, **kwargs):
@@ -712,16 +733,38 @@ class OrderViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["get"], url_path="get-all-orders")
     def get_all_orders(self, request):
         try:
-            # Fetch all orders, you can add filtering or pagination if needed
-            orders = Order.objects.all()
+            # Fetch all orders with pagination
+            page = self.paginate_queryset(Order.objects.all())
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
 
-            # Serialize the data
-            serializer = self.get_serializer(orders, many=True)
-
-            # Return the serialized data
+            # Serialize the data if no pagination is applied
+            serializer = self.get_serializer(Order.objects.all(), many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
         except Exception as e:
             # Handle any unexpected errors
+            return Response(
+                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=["get"], url_path="orders-by-user-id")
+    def get_all_orders_by_user_id(self, request):
+        try:
+            user_id = request.query_params.get("user_id", None)
+            orders = Order.objects.all()
+
+            if user_id:
+                orders = orders.filter(user_id=user_id)
+
+            page = self.paginate_queryset(orders)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
+
+            serializer = self.get_serializer(orders, many=True)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as e:
             return Response(
                 {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )

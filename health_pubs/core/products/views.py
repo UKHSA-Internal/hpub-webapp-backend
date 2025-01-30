@@ -34,6 +34,7 @@ from core.vaccinations.serializers import VaccinationSerializer
 from core.where_to_use.models import WhereToUse
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.core.cache import cache
 from django.db import DatabaseError, transaction
 from django.db.models import Q
 from django.http import Http404, JsonResponse
@@ -43,6 +44,8 @@ from django.utils.text import slugify
 from django.views import View
 from pydantic import BaseModel, ValidationError, validator
 from rest_framework import status, viewsets
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
@@ -60,7 +63,11 @@ from wagtail.models import Page
 
 from .enums import required_event_fields_archived
 from .models import Product, ProductUpdate
-from .serializers import ProductSerializer, ProductUpdateSerializer
+from .serializers import (
+    ProductSerializer,
+    ProductUpdateSerializer,
+    RelatedProductSerializer,
+)
 from .signals import send_product_event
 
 # from .signals import send_product_deletion_event, send_product_event
@@ -270,6 +277,10 @@ class ProductSchema(BaseModel):
 class ProductViewSet(viewsets.ViewSet):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
+
+    # Set the lookup field to 'product_code'
+    lookup_field = "product_code"
+    lookup_value_regex = "[^/]+"
 
     @action(detail=False, methods=["post"], url_path="bulk-upload")
     def bulk_upload(self, request):
@@ -694,6 +705,106 @@ class ProductViewSet(viewsets.ViewSet):
                 logger.error("Failed to create root page: %s", str(ex))
                 raise
         return root_page
+
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="related-products/(?P<product_code>[\w-]+)",
+    )
+    def related_publications(self, request, product_code=None):
+        """
+        Retrieve related publications based on cosine similarity of TF-IDF vectors,
+        now fetching product_type and summary_of_guidance from ProductUpdate.
+        """
+        try:
+            product = Product.objects.get(product_code=product_code)
+        except Product.DoesNotExist:
+            return Response({"error": "Product not found."}, status=404)
+
+        # Fetch associated ProductUpdate
+        product_update = product.update_ref
+        if not product_update:
+            return Response(
+                {"error": "No associated product update found."}, status=404
+            )
+
+        # Define cache key
+        cache_key = f"related_products_{product_code}"
+
+        # Try to get from cache
+        related_products = cache.get(cache_key)
+        if related_products is not None:
+            return Response(related_products)
+
+        # Fetch all products with their updates
+        products = Product.objects.select_related("update_ref").all()
+
+        # Create a DataFrame for easier manipulation
+        df = pd.DataFrame(
+            [
+                {
+                    "product_code": p.product_code,
+                    "product_title": p.product_title,
+                    "summary_of_guidance": p.update_ref.summary_of_guidance
+                    if p.update_ref
+                    else "",
+                    "product_type": p.update_ref.product_type if p.update_ref else "",
+                }
+                for p in products
+            ]
+        )
+
+        # Combine text fields
+        df["text"] = (
+            df["product_title"].fillna("")
+            + " "
+            + df["summary_of_guidance"].fillna("")
+            + " "
+            + df["product_type"].fillna("")
+        )
+
+        # Initialize TF-IDF Vectorizer
+        vectorizer = TfidfVectorizer(stop_words="english")
+
+        # Fit and transform the text data
+        tfidf_matrix = vectorizer.fit_transform(df["text"])
+
+        # Get the index of the target product
+        target_index = df.index[df["product_code"] == product_code].tolist()
+        if not target_index:
+            return Response({"error": "Product not found in dataset."}, status=404)
+        target_index = target_index[0]
+
+        # Compute cosine similarity
+        cosine_sim = cosine_similarity(
+            tfidf_matrix[target_index], tfidf_matrix
+        ).flatten()
+
+        # Create a Series with similarity scores
+        df["similarity_score"] = cosine_sim
+
+        # Remove the target product from the list
+        df = df[df["product_code"] != product_code]
+
+        # Sort by similarity score
+        df_sorted = df.sort_values(by="similarity_score", ascending=False)
+
+        # Select top N related products, e.g., top 10
+        top_n = 10
+        top_related = df_sorted.head(top_n)
+
+        # Retrieve actual Product objects for serialization
+        related_product_objects = Product.objects.filter(
+            product_code__in=top_related["product_code"].tolist()
+        )
+
+        # Serialize the related products
+        serializer = RelatedProductSerializer(related_product_objects, many=True)
+
+        # Cache the result for future requests
+        cache.set(cache_key, serializer.data, timeout=60 * 60)  # Cache for 1 hour
+
+        return Response(serializer.data)
 
 
 class ProductAdminListView(APIView):
@@ -1191,82 +1302,6 @@ class ProductDetailDelete(View):
         except Exception:
             logger.exception(
                 f"An unexpected error occurred while archiving the product with product_code: {decoded_product_code}"
-            )
-            return handle_error(
-                ErrorCode.INTERNAL_SERVER_ERROR,
-                ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=500,
-            )
-
-
-# previous, please check if this is still valid
-# class ProductDetailPageDelete(View):
-# please remove if not.
-class ProductDeleteAll(View):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
-
-    def delete(self, request, product_code, *args, **kwargs):
-
-        decoded_product_code = unquote(product_code)
-        logger.info(
-            f"Attempting to delete product with product_code: {decoded_product_code}"
-        )
-        try:
-            product = Product.objects.filter(
-                product_code__startswith=decoded_product_code
-            ).first()
-            logger.info("deleted_product", product)
-
-            if not product:
-                logger.warning(
-                    f"No product found with product_code: {decoded_product_code}"
-                )
-                return handle_error(
-                    ErrorCode.PRODUCT_NOT_FOUND,
-                    ErrorMessage.PRODUCT_NOT_FOUND,
-                    status_code=HTTP_404_NOT_FOUND,
-                )
-
-            # Allow deletion only if product status is 'draft' or 'live'
-            if product.status not in ["draft", "live"]:
-                logger.warning(
-                    f"Cannot delete product {decoded_product_code} as it is not in draft or live status."
-                )
-                return handle_error(
-                    ErrorCode.INVALID_DATA,
-                    ErrorMessage.INVALID_DATA,
-                    status_code=HTTP_403_FORBIDDEN,
-                )
-
-            # Permanently delete the product from the database
-            product.delete()
-            logger.info(
-                f"Product with product_code {decoded_product_code} deleted successfully."
-            )
-
-            return JsonResponse(
-                {"message": "Product deleted successfully."},
-                status=HTTP_204_NO_CONTENT,
-            )
-
-        except DatabaseError:
-            logger.exception("Database error occurred while deleting product.")
-            return handle_error(
-                ErrorCode.DATABASE_ERROR,
-                ErrorMessage.DATABASE_ERROR,
-                status_code=500,
-            )
-        except TimeoutError:
-            logger.exception("Timeout error occurred while deleting product.")
-            return handle_error(
-                ErrorCode.TIMEOUT_ERROR,
-                ErrorMessage.TIMEOUT_ERROR,
-                status_code=504,
-            )
-        except Exception:
-            logger.exception(
-                f"An unexpected error occurred while deleting the product with product_code: {decoded_product_code}"
             )
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,

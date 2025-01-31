@@ -20,7 +20,7 @@ from core.utils.token_generation_validation import (
     validate_token_refresh,
 )
 from django.contrib.contenttypes.models import ContentType
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ValidationError, ObjectDoesNotExist
 from django.core.validators import validate_email
 from django.shortcuts import get_object_or_404
 from django.http import JsonResponse
@@ -541,32 +541,48 @@ class CustomPagination(PageNumberPagination):
     page_size = 20  # Set pagination to 20 items per page
 
     def get_paginated_response(self, data, status_code=200):
-        response = Response(
-            {
-                "links": {
-                    "next": self.get_next_link(),
-                    "previous": self.get_previous_link(),
+        try:
+            response = Response(
+                {
+                    "links": {
+                        "next": self.get_next_link(),
+                        "previous": self.get_previous_link(),
+                    },
+                    "count": self.page.paginator.count,
+                    "results": data,
                 },
-                "count": self.page.paginator.count,
-                "results": data,
-            }
-        )
-        response.status_code = status_code
-        return response
+                status=status_code,
+            )
+            return response
+        except AttributeError as e:
+            logger.error(f"Pagination error: {e}")
+            return Response({"error": "Pagination data is unavailable."}, status=500)
+        except Exception as e:
+            logger.error(f"Unexpected error in pagination: {e}")
+            return Response(
+                {"error": "An unexpected error occurred in pagination."}, status=500
+            )
 
 
 class UserListView(generics.ListAPIView):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
     queryset = User.objects.all()
     serializer_class = UserSerializer
     pagination_class = CustomPagination
 
     def get(self, request, *args, **kwargs):
         """
-        Override the get method to provide custom behavior or additional filtering if needed.
+        Get a list of users with pagination.
         """
-        return super().get(request, *args, **kwargs)
+        try:
+            return super().get(request, *args, **kwargs)
+        except ObjectDoesNotExist:
+            logger.error("Requested user list does not exist.")
+            return JsonResponse({"error": "Users not found."}, status=404)
+        except Exception as e:
+            logger.error(f"Unexpected error in UserListView: {e}")
+            return JsonResponse({"error": "An unexpected error occurred."}, status=500)
 
 
 class UserDeleteAll(APIView):

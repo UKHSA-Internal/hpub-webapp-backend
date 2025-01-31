@@ -227,7 +227,8 @@ class AddressViewSet(viewsets.ModelViewSet):
             matched_addresses = [
                 addr
                 for addr in match_response.json().get("matchedAddresses", [])
-                if addr.get("countryCode") in ["E", "England"] and addr.get("postcode") == postcode
+                if addr.get("countryCode") in ["E", "England"]
+                and addr.get("postcode") == postcode
             ]
             if not matched_addresses:
                 # If no addresses match the criteria, return an error

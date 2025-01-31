@@ -6,7 +6,7 @@ This project is a Wagtail-Django-based backend application for managing various 
 
 ## Prerequisites
 
-   Before running the project, ensure that you have the following installed:
+   Before running the project, ensure that you have the following:
 
    1. Python (3.10+)
    2. PostgreSQL, Django

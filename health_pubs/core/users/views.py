@@ -159,8 +159,6 @@ class UserSignUpView(APIView):
             "mobile_number": decoded_token.get("extension_MobileNumber", ""),
             "email": (
                 decoded_token.get("email_address")
-                if "email_address" in decoded_token
-                else None
             ),
             "role_name": decoded_token.get("extension_UserAppRole"),
         }

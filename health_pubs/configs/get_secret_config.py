@@ -59,7 +59,6 @@ class Config:
             logger.info(f"Fetching {key} from AWS Secrets Manager.")
             return get_secret_value(key)
 
-
     @staticmethod
     def _parse_json(json_string: str, key: str or None = None) -> str:
         """Parse the JSON string and extract the value."""

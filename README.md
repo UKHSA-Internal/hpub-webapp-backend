@@ -30,7 +30,8 @@ This project is a Wagtail-Django-based backend application for managing various 
    - Ensure you have .env.dev file in the `/backend-alpha/configs/` directory.
 
 3. Install Dependencies
-
+   - `python -m venv venv`
+   - `.\venv\Scripts\Activate.ps1`
    - `pip install -r requirements.txt`
 
 4. Apply Database Migrations(Optional, this is for only if you made changes to the model structure)

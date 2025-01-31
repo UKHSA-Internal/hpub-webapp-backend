@@ -21,11 +21,11 @@ This project is a Wagtail-Django-based backend application for managing various 
 
 1. Clone Repository
     - `git clone <repository-url>`
-    - `cd hpub-backend/health_pubs`
+    - `cd hpub-backend/backend_alpha`
 
 2. Set Up Environment Variables
 
-   - Create an .env.dev file in the directory `/hpub-backend/health_pubs/configs/`
+   - Create an .env.dev file in the directory `/hpub-backend/backend_alpha/configs/`
 
    - Ensure you have .env.dev file in the `/backend-alpha/configs/` directory.
 
@@ -42,54 +42,6 @@ This project is a Wagtail-Django-based backend application for managing various 
 5. Start the Development Server
    Start the Django development server with the specified port (optional), If you do not specify a port, the server will run on the default port 8000.
    - `python manage.py runserver <port>`
-
-## Run Locally Without Access to AWS Secrets Manager
-
-1. Create a PostgreSQL database.
-2. Load the dumped data with:
-```shell
-pg_restore -h localhost -U <username> -d <database_name> /path/to/dump_file.dump
-```
-3. Create a file `local_secrets.json` inside `health_pubs/configs` directory with the following format:
-
-    ```json
-    {
-        "dev/hpub/database": "{\"HPUB_POSTGRES_CONNECTION_STRING\":\"postgresql://username:password@localhost:5432/dbname\"}",
-        "hpub/postgres/connection/regex": "{\"POSTGRES_CONNECTION_REGEX\": \"postgresql://(?P<user>[^:]+):(?P<password>.+)@(?P<host>[^:]+):(?P<port>\\\\d+)/(?P<dbname>.+)$\"}",
-        "hpub/api/key/gov/notify": "{\"GOV_UK_NOTIFY_API_KEY\":\"sample-gov-uk-notify-api-key\"}",
-        "aps/api/key": "{\"APS_API_KEY\":\"sample-aps-api-key\"}",
-        "address/verify/api/key": "{\"OS_ADDRESS_VERIFICATION_API_KEY\":\"sample-address-verification-api-key\"}",
-        "address/verify/client/id": "{\"OS_ADDRESS_VERIFICATION_CLIENT_ID\":\"sample-client-id\"}",
-        "address/verify/client/scope": "{\"OS_ADDRESS_VERIFICATION_CLIENT_SCOPE\":\"sample-client-scope\"}",
-        "hpub-webapp/hpub-backend/": "{\"RELATIVE_PATH\":\"relative-path-placeholder\"}",
-        "hpub/email/template/id/gov/notify": "{\"GOV_UK_NOTIFY_EMAIL_TEMPLATE_ID\":\"sample-email-template-id\"}",
-        "hpub/sms/template/id/gov": "{\"GOV_UK_NOTIFY_SMS_TEMPLATE_ID\":\"sample-sms-template-id  \"}",
-        "hpub/notify/api/url": "{\"GOV_UK_NOTIFY_API_URL\":\"shttps://dev-notify-api.example.com\"}",
-        "hpub/aps/test/base/url": "{\"APS_TEST_BASE_URL\":\"shttps://dev-aps-test-base-url.example.com\"}",
-        "hpub/os/address/validation/base/url": "{\"OS_ADDRESS_VERIFICATION_BASE_URL\":\"https://dev-address-validation-base-url.example.com\"}",
-        "hpub/os/address/verification/token/url": "{\"OS_ADDRESS_VERIFICATION_TOKEN_URL\":\"https://dev-token-url.example.com\"}",
-        "hpub/contact/us/aps/email/address": "{\"CONTACT_US_APS_EMAIL_ADDRESS\":\"contact@dev-aps.example.com\"}",
-        "hpub/contact/us/template/id": "{\"CONTACT_US_TEMPLATE_ID\":\"sample-contact-us-template-id\"}",
-        "hpub/azure/b2c/client/id": "{\"AZURE_B2C_CLIENT_ID\":\"sample-azure-b2c-client-id\"}",
-        "hpub/azure/b2c/client/secret/id": "{\"AZURE_B2C_CLIENT_SECRET_ID\":\"sample-azure-b2c-client-secret\"}",
-        "hpub/azure/b2c/tenant/id": "{\"AZURE_B2C_TENANT_ID\":\"sample-tenant-id\"}",
-        "hpub/azure/b2c/tenant/name": "{\"AZURE_B2C_TENANT_NAME\":\"sample-tenant-name\"}" ,
-        "hpub/azure/b2c/policy/name": "{\"AZURE_B2C_POLICY_NAME\":\"sample-policy-name\"}",
-        "hpub/azure/b2c/jwks/uri": "{\"AZURE_B2C_JWKS_URI\":\"https://dev-jwks-uri.example.com"\"}",
-        "hpub/django/secret/key": "{\"DJANGO_SECRET_KEY\":\"sample-django-secret-key\"}",
-        "hpub/azure/b2c/issuer": "{\"AZURE_B2C_ISSUER\":\"https://dev-issuer.example.com"\"}",
-        "hpub/rsa/keys": "{\"RSA_PUBLIC_KEY\": \"-----BEGIN PUBLIC KEY-----\\n123\\n-----END PUBLIC KEY-----\", \"RSA_PRIVATE_KEY\": \"-----BEGIN RSA PRIVATE KEY-----\\n123\\n-----END RSA PRIVATE KEY-----\"}"
-    }
-    ```
-
-3. Activate env with
-```shell
-source /path/to/.env.dev
-```
-4. Run as normal with
-```shell
-python manage.py runserver <port>
-```
 
 ## Running the Application with Docker
 
@@ -175,8 +127,8 @@ To be able to deploy to Docker, you need to follow the below steps
 
 Below is a detailed explanation of the folder structure for the Health Publication Backend application. This Django-based web application leverages Wagtail (a Django-based CMS) to manage and serve various health publication content.
 
-## Top-Level Directory: `health_pubs`
-**Path:** `\hpub-webapp\hpub-backend\health_pubs`
+## Top-Level Directory: `backend_alpha`
+**Path:** `\hpub-webapp\hpub-backend\backend_alpha`
 
 ### Contents:
 - **`manage.py`**: The Django management script used to run the server, create database migrations, run tests, etc.
@@ -191,14 +143,14 @@ Below is a detailed explanation of the folder structure for the Health Publicati
 - **`.pytest_cache/`**: A cache directory generated by pytest.
 
 ## Main Subdirectories:
-1. **`health_pubs/`** (Django project module)
+1. **`backend_alpha/`** (Django project module)
 2. **`configs/`** (Configuration files and utilities)
 3. **`core/`** (Domain logic and apps)
 
 ---
 
-## `health_pubs/health_pubs/`
-**Path:** `hpub-webapp\hpub-backend\health_pubs\health_pubs`
+## `backend_alpha/backend_alpha/`
+**Path:** `hpub-webapp\hpub-backend\backend_alpha\backend_alpha`
 
 This inner folder defines the core Django project module.
 
@@ -211,8 +163,8 @@ This inner folder defines the core Django project module.
 
 ---
 
-## `health_pubs/configs/`
-**Path:** `\hpub-webapp\hpub-backend\health_pubs\configs`
+## `backend_alpha/configs/`
+**Path:** `\hpub-webapp\hpub-backend\backend_alpha\configs`
 
 Contains configuration-related files and utilities.
 
@@ -227,8 +179,8 @@ Centralized management of environment variables and configuration parameters for
 
 ---
 
-## `health_pubs/core/`
-**Path:** `hpub-webapp\hpub-backend\health_pubs\core`
+## `backend_alpha/core/`
+**Path:** `hpub-webapp\hpub-backend\backend_alpha\core`
 
 Acts as the main container for the domain logic of the application. Each subdirectory represents a Django “app” or functional module.
 
@@ -260,7 +212,21 @@ Acts as the main container for the domain logic of the application. Each subdire
 17. **`vaccinations/`**: Manages vaccine-related publications.
 18. **`where_to_use/`**: Details places where a particular publication can be applied/ where it is intended.
 
-
+### How To Run Tests:
+1. Navigate to the test directory, 
+   Open a terminal and run:  
+   cd `health_pubs/test/` 
+2. Run a specific test file
+   Use the following command: 
+   `pytest <name_of_test_file> -v`
+   Example:
+   `pytest test_audiences.py -v`
+3. Run all tests in the directory
+   If you want to run all tests at once, execute:
+   `pytest -v`
+4. Run tests with coverage(Optional):
+   If you want to check test coverage, install `pytest-cov` using `pip` and run:
+   `pytest --cov=health_pubs`
 
 
 # API Documentation

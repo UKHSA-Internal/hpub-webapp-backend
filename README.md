@@ -265,3 +265,33 @@ Acts as the main container for the domain logic of the application. Each subdire
 
 # API Documentation
 This is a link to to the published backend api doc: https://documenter.getpostman.com/view/17965993/2sAYBd8Tjr
+
+
+
+## 🔹 Update User Role via Management Command
+After assigning a user to `Admin` status in Azure External Id do the following to update the role of that user in Database:
+
+### 📌 Description
+The `update_user_role` management command allows you to change a user's role from **User** (`role_ref_id=1`) to **Admin** (`role_ref_id=8`). This is useful when updating roles via the command line without manually editing the database.
+
+---
+
+### ✅ **Setup & Installation**
+Ensure that your Django project is set up and that you have access to the virtual environment.
+
+cd into `hpub-webapp-backend\health_pubs`
+
+```sh
+# Activate virtual environment
+source venv/bin/activate  # Mac/Linux
+venv\Scripts\activate     # Windows
+
+
+
+### 🚀 **Running the Command**
+To promote a user to Admin, use the following command:
+`python manage.py update_user_role ebube.oguchi@ukhas.gov.uk`
+##### ✔ If successful, you should see:
+`Successfully updated ebube.oguchi@ukhas.gov.uk to Admin.`
+##### ❌ If the user is not found, you will see:
+`User with email ebube.oguchi@ukhas.gov.uk and role_ref_id='1' not found.`

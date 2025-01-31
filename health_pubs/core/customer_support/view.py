@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime
+import uuid
 
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from core.utils.send_contact_us_notification_email import send_notification
@@ -27,7 +28,7 @@ class CustomerSupportViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         # Extract title or use a default value
         title = request.data.get("title", "Customer Support")
-        slug = slugify(title + str(datetime.now()))
+        slug = slugify(title + "-" + str(uuid.uuid4() + str(datetime.now())))
 
         # Retrieve or create the parent page for customer support
         try:

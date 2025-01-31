@@ -59,7 +59,6 @@ class CustomerSupportViewSet(viewsets.ModelViewSet):
 
             # Check if the user is authenticated
             if request.user and request.user.is_authenticated:
-
                 # Get contact details from user information
                 contact_name = f"{request.user.first_name} {request.user.last_name}"
                 contact_email = request.user.email

@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 class Config:
     """Class to retrieve and parse database connection information and other configurations."""
 
-
     @staticmethod
     def _get_value(key: str, is_secret: bool = False) -> str:
         """
@@ -58,7 +57,6 @@ class Config:
         else:
             logger.info(f"Fetching {key} from AWS Secrets Manager.")
             return get_secret_value(key)
-
 
     @staticmethod
     def _parse_json(json_string: str, key: str or None = None) -> str:

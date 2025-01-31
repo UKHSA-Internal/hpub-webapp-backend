@@ -16,6 +16,7 @@ This project is a Wagtail-Django-based backend application for managing various 
    6. Ensure your Ip is whitelisted in Aurora DB please speak with Jagan (DevOps Engineer)
    7. Install PgAdmin to visualize the db using this Link `https://ftp.postgresql.org/pub/pgadmin/pgadmin4/v8.13/windows/pgadmin4-8.13-x64.exe`
    8. Install and set up Postman to test out the endpoints.
+   9. Have access to AWS Environments
 
 ## Getting Started
 
@@ -33,14 +34,17 @@ This project is a Wagtail-Django-based backend application for managing various 
    - `python -m venv venv`
    - `.\venv\Scripts\Activate.ps1`
    - `pip install -r requirements.txt`
+4. Activate Your AWS Configuration
+   - In your terminal Run `aws configure`
+   - Add your secrets-key, access-key and default region = `eu-west-2`
 
-4. Apply Database Migrations(Optional, this is for only if you made changes to the model structure)
+5. Apply Database Migrations(Optional, this is for only if you made changes to the model structure)
    Run the following commands to apply migrations
    - `python manage.py makemigrations`
 
    - `python manage.py migrate`
 
-5. Start the Development Server
+6. Start the Development Server
    Start the Django development server with the specified port (optional), If you do not specify a port, the server will run on the default port 8000.
    - `python manage.py runserver <port>`
 

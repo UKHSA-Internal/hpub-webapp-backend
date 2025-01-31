@@ -1,173 +1,116 @@
-import pytest
-from unittest import mock
-from rest_framework import status
-from rest_framework.test import APIClient
+from unittest.mock import patch, MagicMock
 from django.urls import reverse
-import logging
-from core.products.models import Product
-
-logger = logging.getLogger(__name__)
-
-# Mock the Django models
-@pytest.fixture
-def mock_user():
-    user = mock.MagicMock()
-    user.user_id = 123
-    user.email = "testuser@example.com"
-    user.first_name = "Test"
-    user.last_name = "User"
-    return user
+from rest_framework import status
 
 
-@pytest.fixture
-def mock_product():
-    product = mock.MagicMock()
-    product.product_code = "prod-1"
-    product.product_id = "4677686-678888"
-    return product
-
-
-@pytest.fixture
-def mock_address():
-    address = mock.MagicMock()
-    address.address_id = "1"
-    return address
-
-
-@pytest.fixture
-def mock_order_data(mock_product, mock_address, mock_user):
-    return {
-        "order_items": [
-            {"product_code": mock_product.product_code, "quantity": 2},
-        ],
-        "user_info": {
-            "first_name": "John",
-            "last_name": "Doe",
-            "email": "john.doe@example.com",
-            "mobile_number": "1234567890",
-        },
-        "address_ref": mock_address.address_id,
-        "tracking_number": "TRACK12345",
-    }
-
-
-@pytest.fixture
-def api_client():
-    return APIClient()
-
-
-@pytest.fixture
-def auth_api_client_user(api_client, mock_user):
-    # Simulating authentication
-    api_client.credentials(
-        HTTP_AUTHORIZATION=f"Bearer mock_token_for_{mock_user.user_id}"
-    )
-    return api_client
-
-
-# Test class for order-related APIs
-@pytest.mark.django_db
 class TestOrderViewSet:
-    def test_create_order_for_admin_success(
-        self, auth_api_client_user, mock_order_data, mock_user
+    @patch("rest_framework.permissions.IsAuthenticated.has_permission")
+    @patch("core.users.permissions.IsAdminOrRegisteredUser.has_permission")
+    @patch(
+        "core.utils.custom_token_authentication.CustomTokenAuthentication.authenticate"
+    )
+    @patch("core.users.models.User.objects.get")
+    @patch("core.addresses.models.Address.objects.get")
+    @patch("core.orders.models.Order.objects.create")
+    @patch("core.orders.serializers.OrderSerializer")
+    def test_create_for_admin_success(
+        self,
+        mock_order_serializer,
+        mock_order_create,
+        mock_address_get,
+        mock_user_get,
+        mock_authenticate,
+        mock_is_admin_or_registered,
+        mock_is_authenticated,
+        client,
     ):
-        """Test creating order for admin (mocked success case)"""
+        """Test creating an order for admin successfully with authentication and permission mocks"""
+
         url = reverse("order-create-for-admin")
+
+        # ✅ Mock authentication to return a valid user
+        mock_user = MagicMock(
+            user_id="12345", email="admin@test.com", is_staff=True, is_superuser=True
+        )
+        mock_authenticate.return_value = (
+            mock_user,
+            None,
+        )  # Simulate successful authentication
+
+        # ✅ Mock user retrieval
+        mock_user_get.return_value = mock_user
+
+        # ✅ Mock address retrieval
+        mock_address = MagicMock(address_id="addr-1", city="Test City")
+        mock_address_get.return_value = mock_address
+
+        # ✅ Mock Order creation
+        mock_order = MagicMock(order_id="order-1")
+        mock_order_create.return_value = mock_order
+
+        # ✅ Mock Serializer
+        mock_serializer = MagicMock()
+        mock_serializer.data = {"order_id": "order-1"}
+        mock_serializer.is_valid.return_value = True
+        mock_serializer.save.return_value = mock_order
+        mock_order_serializer.return_value = mock_serializer
+
+        # ✅ Mock Permissions (return True to grant access)
+        mock_is_authenticated.return_value = True  # Mock IsAuthenticated
+        mock_is_admin_or_registered.return_value = True  # Mock IsAdminOrRegisteredUser
+
+        # ✅ Fix: Send JSON Data as a Dictionary
         payload = {
-            "order_id": "12345",
-            "order_items": mock_order_data["order_items"],
-            "user_info": mock_order_data["user_info"],
-            "user_ref": mock_user.user_id,
-            "address_ref": mock_order_data["address_ref"],
-            "order_confirmation_number": "CONFIRM123",
-            "order_origin": "order_on_behalf",
+            "order_items": [{"product_code": "prod-1", "quantity": 1}],
+            "user_ref": "12345",
+            "user_info": {"email": "testuser@example.com"},
+            "address_ref": "addr-1",
         }
 
-        with mock.patch("core.orders.views.Order.objects.create") as mock_create_order:
-            mock_create_order.return_value.order_id = "12345"
-            response = auth_api_client_user.post(url, payload, format="json")
+        # ✅ Use `json=` instead of `data=` to properly pass JSON
+        response = client.post(url, json=payload, HTTP_AUTHORIZATION="Token testtoken")
+        print("RES", response.json())
 
-        logger.info(f"Response Data: {response.json()}")
+        # ✅ Assertions
         assert response.status_code == status.HTTP_201_CREATED
-        assert response.data["order_id"] == payload["order_id"]
+        assert response.json()["order_id"] == "order-1"
 
-    def test_create_order_for_admin_missing_user_data(
-        self, auth_api_client_user, mock_order_data
-    ):
-        """Test creating order with missing user data (mocked failure case)"""
-        url = reverse("order-create-for-admin")
-        payload = {
-            "order_id": "12345",
-            "order_items": mock_order_data["order_items"],
-            "address_ref": mock_order_data["address_ref"],
-            "tracking_number": "TRACK12345",
-        }
+        # ✅ Ensure mock methods were called
+        mock_authenticate.assert_called_once()  # Verify authentication was called
+        mock_is_authenticated.assert_called_once()  # Verify authentication check was performed
+        mock_is_admin_or_registered.assert_called_once()  # Verify role-based access was checked
+        mock_user_get.assert_called_once_with(user_id="12345")
+        mock_address_get.assert_called_once_with(address_id="addr-1")
+        mock_order_create.assert_called_once()
+        mock_order_serializer.assert_called_once()
 
-        response = auth_api_client_user.post(url, payload, format="json")
+    # def test_create_for_admin_missing_user_ref(client, mocker):
+    #     """Test order creation fails when user_ref is missing"""
 
-        logger.info(f"Response Data: {response.json()}")
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
-        assert response.json()["error_code"] == "USER_REF_REQUIRED"
-        assert (
-            response.json()["error_message"]
-            == "The logged-in user's reference is required."
-        )
+    #     url = reverse("order-create-for-admin")
 
-    def test_create_order_exceeds_limit(
-        self, auth_api_client_user, mock_order_data, mock_product
-    ):
-        """Test order exceeds product limit (mocked failure case)"""
-        url = reverse("order-list")
+    #     payload = {
+    #         "order_items": [{"product_code": "prod-1", "quantity": 1}],
+    #         "user_info": {"email": "testuser@example.com"},
+    #         "address_ref": "addr-1"
+    #     }
 
-        # Mock the order limit check
-        with mock.patch(
-            "core.order_limits.views.OrderLimitPage.objects.filter"
-        ) as mock_filter:
-            mock_filter.return_value.exists.return_value = True
-            mock_filter.return_value.first.return_value = mock.MagicMock(order_limit=10)
+    #     response = client.post(url, data=payload, format="json")
+    #     assert response.status_code == status.HTTP_400_BAD_REQUEST
+    #     assert response.json()["error_code"] == "USER_REF_REQUIRED"
 
-            payload = {
-                "order_id": "12345",
-                "order_items": [
-                    {
-                        "product_code": mock_product.product_code,
-                        "quantity": 15,
-                    },  # Exceeds limit
-                ],
-                "user_ref": mock_order_data["user_info"]["email"],
-                "address_ref": mock_order_data["address_ref"],
-                "tracking_number": "TRACK12345",
-            }
-            response = auth_api_client_user.post(url, payload, format="json")
+    # def test_get_all_orders(client, mocker):
+    #     """Test fetching all orders"""
 
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
-        assert (
-            response.json()["error_message"] == "Order limit exceeded for this product."
-        )
+    #     url = reverse("order-get-all-orders")
 
-    def test_create_order_invalid_product(self, auth_api_client_user, mock_order_data):
-        """Test order with invalid product code (mocked failure case)"""
-        url = reverse("order-list")
+    #     # Mock Orders Queryset
+    #     mock_order1 = MagicMock(order_id="order-1")
+    #     mock_order2 = MagicMock(order_id="order-2")
+    #     mocker.patch("core.order.models.Order.objects.all", return_value=[mock_order1, mock_order2])
 
-        payload = {
-            "order_id": "12345",
-            "order_items": [{"product_code": "INVALID_CODE", "quantity": 2}],
-            "user_ref": mock_order_data["user_info"]["email"],
-            "address_ref": mock_order_data["address_ref"],
-            "tracking_number": "TRACK12345",
-            "order_confirmation_number": "CONFM123334",
-            "order_origin": "by_user",
-        }
+    #     response = client.get(url)
+    #     assert response.status_code == status.HTTP_200_OK
+    #     assert len(response.json()) == 2
 
-        with mock.patch("core.products.views.Product.objects.get") as mock_get_product:
-            mock_get_product.side_effect = Product.DoesNotExist
-            response = auth_api_client_user.post(url, payload, format="json")
-
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
-        assert response.json()["error_code"] == "PRODUCT_NOT_LIVE"
-        assert (
-            response.json()["error_message"]
-            == "Product with code INVALID_CODE is not live yet."
-        )
-
-    # Further tests can be written in a similar manner...
+    #

@@ -90,10 +90,9 @@ def validate_azure_b2c_token(token):
         unverified_header = jwt.get_unverified_header(token)
         token_kid = unverified_header.get("kid")
 
-        # Log the token's kid
-
         # Log all available kids in JWKS
-        [key["kid"] for key in jwks["keys"]]
+        available_kids = [key["kid"] for key in jwks["keys"]]
+        logger.info(f"Number of keys in JWKS: {len(available_kids)}")  # for debugging
 
         # Select the correct key based on kid
         rsa_key = {}
@@ -157,9 +156,7 @@ class UserSignUpView(APIView):
             "first_name": decoded_token.get("given_name", ""),
             "last_name": decoded_token.get("family_name", ""),
             "mobile_number": decoded_token.get("extension_MobileNumber", ""),
-            "email": (
-                decoded_token.get("email_address")
-            ),
+            "email": (decoded_token.get("email_address")),
             "role_name": decoded_token.get("extension_UserAppRole"),
         }
         logger.info("extracted user_info: %s", user_info)

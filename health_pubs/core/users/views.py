@@ -880,7 +880,6 @@ class MigrateUsersAPIView(APIView):
 
     def _get_role_ref(self, role_id):
         try:
-
             return Role.objects.get(role_id=role_id)
         except Role.DoesNotExist:
             logger.warning("Role not found for id: %s", role_id)

@@ -6,6 +6,7 @@ from core.utils.send_contact_us_notification_email import send_notification
 from django.contrib.contenttypes.models import ContentType
 from django.http import JsonResponse
 from django.utils.text import slugify
+from core.utils.custom_token_authentication import CustomTokenAuthentication
 from rest_framework import status, viewsets
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.permissions import AllowAny

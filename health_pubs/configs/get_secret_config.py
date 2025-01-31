@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 class Config:
     """Class to retrieve and parse database connection information and other configurations."""
 
-
     @staticmethod
     def _get_value(key: str, is_secret: bool = False) -> str:
         """

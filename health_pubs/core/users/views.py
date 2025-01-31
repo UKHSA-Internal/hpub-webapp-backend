@@ -120,7 +120,7 @@ def validate_azure_b2c_token(token):
             audience=client_id,
             issuer=f"https://{config.get_azure_b2c_tenant_id()}.{TOKEN_ISSUER_DOMAIN}/{config.get_azure_b2c_tenant_id()}/v2.0",
         )
-        #logger.info("decoded_token", decoded_token) #for debugging
+        # logger.info("decoded_token", decoded_token) #for debugging
         return decoded_token
 
     except jwt.ExpiredSignatureError:

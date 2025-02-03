@@ -154,8 +154,9 @@ def get_pdf_metadata(file_path):
         pdf_reader = PyPDF2.PdfReader(f)
         num_pages = len(pdf_reader.pages)
         # dimensions of the first page
-        page_size = pdf_reader.pages[0].mediaBox
-        dimensions = (page_size.getWidth(), page_size.getHeight())
+        page_size = pdf_reader.pages[0].mediabox
+        dimensions = (page_size.width, page_size.height)
+
     return num_pages, dimensions, page_size
 
 

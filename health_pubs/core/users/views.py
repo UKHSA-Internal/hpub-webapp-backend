@@ -35,7 +35,7 @@ from rest_framework.authentication import SessionAuthentication
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from wagtail.models import Page
-from django.db import transaction, DatabaseError
+from django.db import transaction, DatabaseError, IntegrityError
 
 from .models import InvalidatedToken, User
 from .serializers import UserSerializer
@@ -134,47 +134,61 @@ def validate_azure_b2c_token(token):
 
 
 class UserSignUpView(APIView):
+    """
+    API endpoint for signing up a new user based on a decoded Azure B2C token.
+    """
+
     permission_classes = [AllowAny]
 
     def post(self, request):
-        # Step 1: Retrieve and validate the Azure B2C token
-        auth_header = request.headers.get("Authorization")
-        if not auth_header:
+        # --- Step 1: Validate Authorization Header & Token ---
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            logger.error("Authorization header missing or improperly formatted.")
             return Response(
-                {"error": "Authorization token missing"},
+                {"error": "Invalid or missing Authorization token"},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
         try:
             token = auth_header.split(" ")[1]
+        except IndexError:
+            logger.error("Authorization token not found after splitting header.")
+            return Response(
+                {"error": "Invalid Authorization header format"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        try:
             decoded_token = validate_azure_b2c_token(token)
-            # logger.info("Decoded_Token", decoded_token) # For debugging purposes
-        except (IndexError, ValueError) as e:
-            return Response({"error": str(e)}, status=status.HTTP_401_UNAUTHORIZED)
+            logger.info("Successfully decoded token: %s", decoded_token)
+        except Exception as e:
+            logger.error("Token validation error: %s", str(e))
+            return Response(
+                {"error": f"Invalid token: {str(e)}"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
 
-        # Step 2: Extract user information from the decoded token
-        user_info = {
-            "first_name": decoded_token.get("given_name", ""),
-            "last_name": decoded_token.get("family_name", ""),
-            "mobile_number": decoded_token.get("extension_MobileNumber", ""),
-            "email": (
-                decoded_token.get("email_address")
-                if "email_address" in decoded_token
-                else None
-            ),
-            "role_name": decoded_token.get("extension_UserAppRole"),
-        }
-        logger.info("extracted user_info: %s", user_info)
+        # --- Step 2: Extract and Validate User Information ---
+        first_name = decoded_token.get("given_name", "").strip()
+        last_name = decoded_token.get("family_name", "").strip()
+        mobile_number = decoded_token.get("mobile_number", "").strip()
+        # Try to get email from one of two possible keys
+        email = decoded_token.get("email_address") or decoded_token.get("email")
+        if email:
+            email = email.strip()
 
-        role_name = user_info["role_name"]
+        # Default role to "User" if missing or blank.
+        role_name = decoded_token.get("user_approle", "").strip() or "User"
 
-        # If the field exists but is empty, default to 'User'
-        if role_name is None or role_name.strip() == "":
-            role_name = "User"
+        logger.info(
+            "Extracted user_info: first_name=%s, last_name=%s, email=%s, role_name=%s",
+            first_name,
+            last_name,
+            email,
+            role_name,
+        )
 
-        role_name = role_name
-
-        email = user_info["email"]
         if not email:
             return Response(
                 {"error": "Email not found in token"},
@@ -184,24 +198,32 @@ class UserSignUpView(APIView):
         try:
             validate_email(email)
         except ValidationError:
+            logger.error("Invalid email format: %s", email)
             return Response(
                 {"error": "Invalid email format"}, status=status.HTTP_400_BAD_REQUEST
             )
 
+        # --- Step 3: Check for Existing User ---
         if User.objects.filter(email=email).exists():
-            return Response(
-                {"error": "Email already in use"}, status=status.HTTP_400_BAD_REQUEST
+            logger.info("User with email %s already exists.", email)
+            existing_user = User.objects.get(email=email)
+            return self._return_user(
+                existing_user,
+                email,
+                role_name,
+                message="User already exists",
+                status_code=status.HTTP_200_OK,
             )
 
-        # Step 3: Retrieve role based on role_name from token
-        logger.info("roleName: %s", role_name)
+        # --- Step 4: Validate Role ---
         role = Role.objects.filter(name=role_name).first()
         if role_name and not role:
+            logger.error("Role not found: %s", role_name)
             return Response(
                 {"error": "Role not found"}, status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Step 4: Retrieve establishment if provided
+        # --- Step 5: Validate Establishment (if provided) ---
         establishment_id = request.data.get("establishment_id")
         establishment = None
         organization_ref = None
@@ -210,19 +232,26 @@ class UserSignUpView(APIView):
                 establishment_id=establishment_id
             ).first()
             if not establishment:
+                logger.error("Establishment not found: %s", establishment_id)
                 return Response(
                     {"error": "Establishment not found"},
                     status=status.HTTP_404_NOT_FOUND,
                 )
             organization_ref = establishment.organization_ref
 
-        # Step 5: Retrieve or create the parent page for the user
+        # --- Step 6: Retrieve or Create the Parent 'Users' Page ---
         try:
             parent_page = Page.objects.get(slug="users")
             logger.info("Parent page 'users' found.")
         except Page.DoesNotExist:
-            logger.warning("Parent page 'users' not found, creating a new one.")
+            logger.warning("Parent page 'users' not found. Attempting to create one.")
             root_page = Page.objects.first()
+            if not root_page:
+                logger.error("No root page available to attach 'users' page.")
+                return Response(
+                    {"error": "Root page not found"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
             parent_page = Page(
                 title="Users",
                 slug="users",
@@ -231,52 +260,101 @@ class UserSignUpView(APIView):
             root_page.add_child(instance=parent_page)
             logger.info("Parent page 'users' created.")
 
-        # Step 6: Create user instance
-        user_instance = User(
-            title=f"User: {user_info['first_name']} {user_info['last_name']}",
-            slug=slugify(
-                f"user-{user_info['first_name']}-{user_info['last_name']}-{timezone.now().timestamp()}"
-            ),
-            user_id=str(uuid.uuid4()),
-            email=email,
-            first_name=user_info["first_name"],
-            last_name=user_info["last_name"],
-            email_verified=True,
-            is_authorized=True,
-            mobile_number=user_info["mobile_number"],
-            establishment_ref=establishment,
-            organization_ref=organization_ref,
-            role_ref=role,
-        )
-
-        # Step 7: Save user and return response
+        # --- Step 7: Create the User Instance and Add as a Child Page ---
         try:
-
-            parent_page.add_child(instance=user_instance)
-            user_instance.save()
-
-            user_response_data = UserSerializer(user_instance).data
-
-            # Generate tokens without saving them in the database
-            short_term_token = generate_short_term_token(
-                user_instance.user_id, email, role_name
+            # Generate a unique slug using UUID.
+            unique_slug = slugify(f"user-{first_name}-{last_name}-{uuid.uuid4()}")
+            user_instance = User(
+                title=f"User: {first_name} {last_name}",
+                slug=unique_slug,
+                user_id=str(uuid.uuid4()),
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                email_verified=True,
+                is_authorized=True,
+                mobile_number=mobile_number,
+                establishment_ref=establishment,
+                organization_ref=organization_ref,
+                role_ref=role,
             )
-            long_term_token = generate_long_term_token(
-                user_instance.user_id, email, role_name
-            )
 
-            response_data = {
-                "user": user_response_data,
-                "short_term_token": short_term_token,
-                "long_term_token": long_term_token,
-            }
-            return Response(response_data, status=status.HTTP_201_CREATED)
+            # Use an atomic transaction for page creation.
+            with transaction.atomic():
+                new_user_page = parent_page.add_child(instance=user_instance)
+            logger.info("User instance created successfully: %s", new_user_page)
+
+        except IntegrityError as ie:
+            logger.error("Integrity error while creating user: %s", str(ie))
+            existing_user = User.objects.filter(email=email).first()
+            if existing_user:
+                return self._return_user(
+                    existing_user,
+                    email,
+                    role_name,
+                    message="User already exists",
+                    status_code=status.HTTP_200_OK,
+                )
+            return Response(
+                {"error": "Integrity error while creating user page"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
         except Exception as ex:
-            logger.error(f"Failed to create user: {str(ex)}")
+            # Check if the error indicates a duplicate email or page path.
+            error_str = str(ex)
+            if ("User with this Email already exists" in error_str) or (
+                "Page with this Path already exists" in error_str
+            ):
+                logger.info("Duplicate detected during creation: %s", error_str)
+                existing_user = User.objects.filter(email=email).first()
+                if existing_user:
+                    return self._return_user(
+                        existing_user,
+                        email,
+                        role_name,
+                        message="User already exists",
+                        status_code=status.HTTP_200_OK,
+                    )
+            logger.error("Failed to create user: %s", ex)
             return Response(
                 {"error": "Failed to create user page"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+        # --- Step 8: Generate Tokens and Return Response for a newly created user ---
+        return self._return_user(
+            new_user_page, email, role_name, status_code=status.HTTP_201_CREATED
+        )
+
+    def _return_user(
+        self, user_page, email, role_name, message=None, status_code=status.HTTP_200_OK
+    ):
+        """
+        Helper method to generate tokens and return the user data.
+        Includes a message only if provided (for existing users).
+        """
+        user_response_data = UserSerializer(user_page).data
+        try:
+            short_term_token = generate_short_term_token(
+                user_page.user_id, email, role_name
+            )
+            long_term_token = generate_long_term_token(
+                user_page.user_id, email, role_name
+            )
+        except Exception as token_error:
+            logger.error("Token generation failed: %s", str(token_error))
+            return Response(
+                {"error": "Failed to generate authentication tokens"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        response_data = {
+            "user": user_response_data,
+            "short_term_token": short_term_token,
+            "long_term_token": long_term_token,
+        }
+        if message:
+            response_data["message"] = message
+        return Response(response_data, status=status_code)
 
 
 class UserLoginView(APIView):

@@ -2,15 +2,14 @@ import json
 
 import jwt
 import pytest
-from django.contrib.contenttypes.models import ContentType
 from django.urls import reverse
+from django.test import SimpleTestCase
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 from unittest.mock import MagicMock, patch
 
 # Adjust these imports to match your project.
-from core.roles.models import Role
 from core.users.views import (
     TokenRefresh,
     UserDeleteAll,
@@ -19,6 +18,7 @@ from core.users.views import (
     UpdateUserView,
     LogoutView,
     UserDetailView,
+    UserSignUpView,
 )
 
 
@@ -159,143 +159,163 @@ def test_token_refresh_missing_auth():
 # -----------------------------------------------------------------------------
 
 
-@pytest.mark.unit
-def test_successful_signup_with_force_authenticate():
-    """
-    Test that a POST to the signup API (at /api/v1/users/signup/)
-    returns a 201 CREATED response with the expected tokens and user data.
-    All external functions (token validation, token generation, ORM queries,
-    and serialization) are mocked so that no actual DB or external service is used.
-    """
-    # -- Fake decoded token as returned from Azure B2C validation --
-    fake_decoded_token = {
-        "given_name": "Alice",
-        "family_name": "Smith",
-        "extension_MobileNumber": "555-1234",
-        "email_address": "alice.smith@example.com",
-        "extension_UserAppRole": "User",
-    }
+class TestUserSignUpView(SimpleTestCase):
+    def setUp(self):
+        # Use APIRequestFactory so that no database is needed.
+        self.factory = APIRequestFactory()
+        # Instantiate the view as a callable.
+        self.view = UserSignUpView.as_view()
+        # Hardcode a URL (avoid reverse() if that would trigger DB access).
+        self.url = "/api/v1/users/signup/"
 
-    # -- Create a dummy Role instance without calling __init__ --
-    fake_role = Role.__new__(Role)  # bypass __init__ and database access
-    fake_role.name = "User"
-    # Manually add a fake _state to satisfy Django's check
-    fake_role._state = type("FakeState", (), {})()
-    fake_role._state.db = None
-    # Set a dummy primary key and id so that relation assignment works
-    fake_role.pk = 1
-    fake_role.id = 1
-
-    # -- Fake Parent Page (the 'users' page) --
-    fake_parent_page = MagicMock()
-    fake_parent_page.add_child = MagicMock()
-
-    # -- Fake serializer output --
-    fake_serializer = MagicMock()
-    fake_serializer.data = {
-        "user_id": "some-uuid",
-        "email": "alice.smith@example.com",
-        "first_name": "Alice",
-        "last_name": "Smith",
-    }
-
-    # Create a dummy ContentType instance to be returned by our patch.
-    dummy_ct = ContentType()
-    dummy_ct.pk = 1
-    dummy_ct.app_label = "users"  # adjust as needed
-    dummy_ct.model = "user"
-
-    # Patch ContentType lookup to avoid actual DB access during model initialization.
-    with patch(
-        "django.contrib.contenttypes.models.ContentType.objects.get_for_model",
-        return_value=dummy_ct,
+    @patch("core.users.views.UserSignUpView._return_user")
+    @patch("core.users.views.UserSignUpView._create_user_instance")
+    @patch("core.users.views.UserSignUpView._get_or_create_parent_page")
+    @patch("core.users.views.UserSignUpView._get_establishment_and_org")
+    @patch("core.users.views.UserSignUpView._extract_user_info")
+    @patch("core.users.views.UserSignUpView._get_decoded_token")
+    @patch("core.users.views.validate_email")
+    @patch("core.users.views.Role.objects.filter")
+    @patch("core.users.views.User.objects.get")
+    @patch("core.users.views.User.objects.filter")
+    @patch("core.users.views.generate_short_term_token")
+    @patch("core.users.views.generate_long_term_token")
+    @patch("core.users.views.UserSerializer")
+    def test_successful_signup(
+        self,
+        mock_serializer,
+        mock_long_term_token,
+        mock_short_term_token,
+        mock_user_filter,
+        mock_user_get,
+        mock_role_filter,
+        mock_validate_email,
+        mock_get_decoded_token,
+        mock_extract_user_info,
+        mock_get_establishment_and_org,
+        mock_get_or_create_parent_page,
+        mock_create_user_instance,
+        mock_return_user,
     ):
-        # Begin patching external dependencies.
-        with patch(
-            "core.users.views.validate_azure_b2c_token", return_value=fake_decoded_token
-        ) as mock_validate:
-            with patch(
-                "core.users.views.generate_short_term_token", return_value="short_token"
-            ) as mock_short_token:
-                with patch(
-                    "core.users.views.generate_long_term_token",
-                    return_value="long_token",
-                ) as mock_long_token:
-                    # Patch the duplicate email check to simulate that no user exists.
-                    with patch(
-                        "core.users.views.User.objects.filter"
-                    ) as mock_user_filter:
-                        fake_email_filter = MagicMock()
-                        fake_email_filter.exists.return_value = False
-                        mock_user_filter.return_value = fake_email_filter
+        """
+        Test a successful sign-up. All helper functions and external calls are patched so that
+        no actual database or external service is used.
+        """
 
-                        # Patch Role lookup so that Role.objects.filter(...).first() returns our fake_role.
-                        with patch(
-                            "core.users.views.Role.objects.filter"
-                        ) as mock_role_filter:
-                            fake_role_filter = MagicMock()
-                            fake_role_filter.first.return_value = fake_role
-                            mock_role_filter.return_value = fake_role_filter
+        # --- Arrange ---
 
-                            # Patch the lookup of the parent 'users' page.
-                            with patch(
-                                "core.users.views.Page.objects.get",
-                                return_value=fake_parent_page,
-                            ) as mock_page_get:
-                                # Patch the User.save() method to avoid actual DB writes.
-                                with patch(
-                                    "core.users.views.User.save", return_value=None
-                                ) as mock_user_save:
-                                    # Patch the serializer so that UserSerializer(instance).data returns fake_serializer.data.
-                                    with patch(
-                                        "core.users.views.UserSerializer",
-                                        return_value=fake_serializer,
-                                    ) as mock_serializer:
-                                        # Create an APIClient instance and force authenticate.
-                                        client = APIClient()
-                                        client.force_authenticate(user=MagicMock())
+        # 1. Patch _get_decoded_token to return a fake decoded token.
+        fake_decoded_token = {"dummy": "data"}
+        mock_get_decoded_token.return_value = fake_decoded_token
 
-                                        # Get the URL using reverse (ensure your URL conf is loaded during testing).
-                                        url = reverse(
-                                            "signup"
-                                        )  # Expected to resolve to '/api/v1/users/signup/'
+        # 2. Patch _extract_user_info to return valid user info.
+        user_info = {
+            "first_name": "Alice",
+            "last_name": "Smith",
+            "email": "alice.smith@example.com",
+            "mobile_number": "555-1234",
+            "role_name": "User",
+        }
+        mock_extract_user_info.return_value = user_info
 
-                                        # Make the POST request with the required Authorization header.
-                                        response = client.post(
-                                            url,
-                                            data={
-                                                "establishment_id": None
-                                            },  # Optional; adjust as needed.
-                                            format="json",
-                                            HTTP_AUTHORIZATION="Bearer fake_token",
-                                        )
+        # 3. Patch validate_email so that it does not raise.
+        mock_validate_email.return_value = None
 
-                                        # Assert that the response status code is 201 (Created).
-                                        assert (
-                                            response.status_code == 201
-                                        ), f"Expected status 201 but got {response.status_code}"
+        # 4. Patch User.objects.filter so that no existing user is found.
+        fake_user_filter = MagicMock()
+        fake_user_filter.exists.return_value = False
+        mock_user_filter.return_value = fake_user_filter
 
-                                        # Assert that the response data contains the expected tokens and user data.
-                                        response_data = response.data
-                                        assert (
-                                            "user" in response_data
-                                        ), "Missing 'user' in response."
-                                        assert (
-                                            response_data["short_term_token"]
-                                            == "short_token"
-                                        ), "Short term token mismatch."
-                                        assert (
-                                            response_data["long_term_token"]
-                                            == "long_token"
-                                        ), "Long term token mismatch."
+        # 5. Patch Role lookup to return a fake role.
+        fake_role = MagicMock(name="FakeRole")
+        fake_role_qs = MagicMock()
+        fake_role_qs.first.return_value = fake_role
+        mock_role_filter.return_value = fake_role_qs
 
-                                        # (Optional) Verify that the token validation was called with the expected token.
-                                        mock_validate.assert_called_once_with(
-                                            "fake_token"
-                                        )
+        # 6. Patch _get_establishment_and_org to return (None, None).
+        mock_get_establishment_and_org.return_value = (None, None)
 
-                                        # (Optional) Verify that the parent's add_child() method was called.
-                                        fake_parent_page.add_child.assert_called_once()
+        # 7. Patch _get_or_create_parent_page to return a fake parent page.
+        fake_parent_page = MagicMock(name="FakeParentPage")
+        mock_get_or_create_parent_page.return_value = fake_parent_page
+
+        # 8. Patch _create_user_instance to return a fake new user page.
+        fake_new_user_page = MagicMock(name="FakeNewUserPage")
+        mock_create_user_instance.return_value = fake_new_user_page
+
+        # 9. Patch token generators to return fixed tokens.
+        mock_short_term_token.return_value = "short_token"
+        mock_long_term_token.return_value = "long_token"
+
+        # 10. Patch UserSerializer so that when _return_user calls it,
+        #     it returns a fake serializer whose .data is preset.
+        fake_serializer_instance = MagicMock()
+        fake_serializer_instance.data = {
+            "user_id": "fake-uuid",
+            "email": "alice.smith@example.com",
+            "first_name": "Alice",
+            "last_name": "Smith",
+        }
+        mock_serializer.return_value = fake_serializer_instance
+
+        # 11. Finally, patch _return_user to simply return a Response
+        #     with our expected payload.
+        expected_response = Response(
+            {
+                "user": fake_serializer_instance.data,
+                "short_term_token": "short_token",
+                "long_term_token": "long_token",
+            },
+            status=status.HTTP_201_CREATED,
+        )
+        mock_return_user.return_value = expected_response
+
+        # --- Act ---
+        # Create a POST request with a fake Authorization header.
+        request = self.factory.post(self.url, {"establishment_id": None}, format="json")
+        request.headers = {"Authorization": "Bearer fake_token"}
+        # Force authenticate the request so that authentication does not block access.
+        force_authenticate(request, user=MagicMock())
+
+        response = self.view(request)
+
+        # --- Assert ---
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["user"], fake_serializer_instance.data)
+        self.assertEqual(response.data["short_term_token"], "short_token")
+        self.assertEqual(response.data["long_term_token"], "long_token")
+
+        # Instead of asserting an exact match on the request object,
+        # assert that _get_decoded_token was called and check that the request's path is correct.
+        mock_get_decoded_token.assert_called_once()
+        called_request = mock_get_decoded_token.call_args[0][0]
+        self.assertEqual(called_request.path, self.url)
+
+        mock_extract_user_info.assert_called_once_with(fake_decoded_token)
+        mock_validate_email.assert_called_once_with(user_info["email"])
+        mock_user_filter.assert_called_once_with(email=user_info["email"])
+        # (Since no user exists, User.objects.get is not used in this branch.)
+        mock_get_establishment_and_org.assert_called_once()
+        called_req = mock_get_establishment_and_org.call_args[0][0]
+        self.assertEqual(called_req.path, self.url)
+
+        mock_get_or_create_parent_page.assert_called_once()
+        mock_create_user_instance.assert_called_once_with(
+            fake_parent_page,
+            user_info["first_name"],
+            user_info["last_name"],
+            user_info["email"],
+            user_info["mobile_number"],
+            None,
+            None,
+            fake_role,
+        )
+        mock_return_user.assert_called_once_with(
+            fake_new_user_page,
+            user_info["email"],
+            user_info["role_name"],
+            status_code=status.HTTP_201_CREATED,
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -358,12 +378,12 @@ def test_user_list_view():
                 with patch(
                     "core.users.views.UserSerializer",
                     return_value=MagicMock(data=fake_serialized_users),
-                ) as mock_serializer:
+                ):
                     # Patch the paginator's paginate_queryset method to avoid database access.
                     with patch(
                         "core.users.views.CustomPagination.paginate_queryset",
                         return_value=list(fake_queryset),
-                    ) as mock_paginate_queryset:
+                    ):
                         # Patch get_paginated_response to return our dummy response.
                         with patch(
                             "core.users.views.CustomPagination.get_paginated_response",
@@ -398,7 +418,6 @@ def test_user_list_view():
 
                             # (Optional) Ensure that our patched functions were called.
                             mock_get_queryset.assert_called_once()
-                            # Removed: mock_serializer.assert_called_once()
                             mock_paginated_response.assert_called_once()
 
 

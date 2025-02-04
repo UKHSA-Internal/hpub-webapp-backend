@@ -44,6 +44,10 @@ class DummyProductUpdate:
         self.product_downloads = downloads
 
     def save(self):
+        # The save() method is intentionally left empty.
+        # This is a dummy class used for testing or simulation purposes only,
+        # and it does not persist data to any storage.
+        # If persistence is needed in the future, implement the appropriate logic here.
         pass
 
     def __dict__(self):

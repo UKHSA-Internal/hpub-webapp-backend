@@ -186,11 +186,11 @@ class UserSignUpView(APIView):
         role = None
         if role_name:
             role = Role.objects.filter(name=role_name).first()
-            if not role:
-                logger.error("Role not found: %s", role_name)
-                return Response(
-                    {"error": "Role not found"}, status=status.HTTP_400_BAD_REQUEST
-                )
+        if role_name and not role:
+            logger.error("Role not found: %s", role_name)
+            return Response(
+                {"error": "Role not found"}, status=status.HTTP_400_BAD_REQUEST
+            )
 
         # Step 5: Validate Establishment (if provided).
         establishment_result = self._get_establishment_and_org(request)
@@ -216,41 +216,43 @@ class UserSignUpView(APIView):
                 role,
             )
         except (IntegrityError, Exception) as ex:
-            error_str = str(ex)
-            if isinstance(ex, IntegrityError):
-                logger.error("Integrity error while creating user: %s", error_str)
-            else:
-                logger.error("Failed to create user: %s", error_str)
-
-            # If error indicates duplicate user, try to return the existing user.
-            if (
-                "User with this Email already exists" in error_str
-                or "Page with this Path already exists" in error_str
-                or isinstance(ex, IntegrityError)
-            ):
-                existing_user = User.objects.filter(email=email).first()
-                if existing_user:
-                    return self._return_user(
-                        existing_user,
-                        email,
-                        role_name,
-                        message=USER_EXISTS_MSG,
-                        status_code=status.HTTP_200_OK,
-                    )
-
-            err_msg = (
-                "Integrity error while creating user page"
-                if isinstance(ex, IntegrityError)
-                else "Failed to create user page"
-            )
-            return Response(
-                {"error": err_msg},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            return self._handle_create_user_error(ex, email, role_name)
 
         # Step 8: Generate tokens and return response.
         return self._return_user(
             new_user_page, email, role_name, status_code=status.HTTP_201_CREATED
+        )
+
+    def _handle_create_user_error(self, ex, email, role_name):
+        error_str = str(ex)
+        if isinstance(ex, IntegrityError):
+            logger.error("Integrity error while creating user: %s", error_str)
+        else:
+            logger.error("Failed to create user: %s", error_str)
+
+        if (
+            "User with this Email already exists" in error_str
+            or "Page with this Path already exists" in error_str
+            or isinstance(ex, IntegrityError)
+        ):
+            existing_user = User.objects.filter(email=email).first()
+            if existing_user:
+                return self._return_user(
+                    existing_user,
+                    email,
+                    role_name,
+                    message=USER_EXISTS_MSG,
+                    status_code=status.HTTP_200_OK,
+                )
+
+        err_msg = (
+            "Integrity error while creating user page"
+            if isinstance(ex, IntegrityError)
+            else "Failed to create user page"
+        )
+        return Response(
+            {"error": err_msg},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
     def _get_decoded_token(self, request):

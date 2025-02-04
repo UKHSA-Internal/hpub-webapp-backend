@@ -59,11 +59,7 @@ class DummyProductSerializer:
         if many:
             self.data = [instance_item.__dict__ for instance_item in instance]
         else:
-            # If instance is a DummyProductUpdate, return its dict
-            if isinstance(instance, DummyProductUpdate):
-                self.data = instance.__dict__()
-            else:
-                self.data = instance.__dict__()
+            self.data = instance.__dict__()
 
 
 # Dummy pagination that simply returns all items.

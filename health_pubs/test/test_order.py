@@ -112,7 +112,6 @@ def test_create_for_admin_success(
         "django.contrib.contenttypes.models.ContentType.objects.get_for_model",
         return_value=MagicMock(_state=MagicMock(db="default")),
     ):
-
         # --- Prepare payload ---
         payload = {
             "order_items": [{"product_code": "prod-1", "quantity": 1}],

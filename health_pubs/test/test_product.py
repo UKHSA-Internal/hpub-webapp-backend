@@ -83,6 +83,7 @@ DUMMY_PRODUCT_CREATE_URL = "/dummy/create-product/"
 DUMMY_PRODUCT_DELETE_ALL_URL = "/dummy/product-delete-all/"
 DUMMY_PRODUCT_STATUS_UPDATE_URL = "/dummy/product-status-update/P-001/"
 
+
 # Dummy context manager to replace transaction.atomic
 class DummyContextManager:
     def __enter__(self):
@@ -167,6 +168,7 @@ class DummyProductSerializer:
 
 
 # --- Unit Test Examples ---
+
 
 # ----- Test: Bulk Upload Success -----
 @patch("core.products.views.pd.read_excel")

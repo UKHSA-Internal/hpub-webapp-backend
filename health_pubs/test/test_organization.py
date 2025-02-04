@@ -106,7 +106,7 @@ def test_bulk_create_organizations_invalid_data_unit(
         view = OrganizationBulkCreateViewSet.as_view({"post": "create"})
         try:
             response = view(request)
-        except Exception as exc:
+        except Exception:
             # Catch the exception that would be handled by DRF and simulate a Response.
             # In your actual view, you might catch the exception and return a Response.
             response = Response(

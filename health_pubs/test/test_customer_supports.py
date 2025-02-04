@@ -237,7 +237,6 @@ def test_create_customer_support_success_without_user(client):
     }
 
     response = client.post(url, data, format="json")
-    logging.info("Data:", response.json())
 
     assert response.status_code == status.HTTP_201_CREATED
     assert CustomerSupport.objects.count() == 1
@@ -263,7 +262,6 @@ def test_create_customer_support_success_with_user(auth_api_client, user):
     }
 
     response = auth_api_client.post(url, data, format="json")
-    logging.info("Data:", response.json())
 
     assert response.status_code == status.HTTP_201_CREATED
     assert CustomerSupport.objects.count() == 1
@@ -283,7 +281,6 @@ def test_create_customer_support_missing_fields(client):
     }
 
     response = client.post(url, data, format="json")
-    logging.info("Data:", response.json())
 
     assert response.status_code == status.HTTP_400_BAD_REQUEST
     assert "error" in response.json()

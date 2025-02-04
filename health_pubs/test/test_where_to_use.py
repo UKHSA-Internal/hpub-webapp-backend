@@ -39,6 +39,7 @@ def get_dummy_user(is_admin=False):
 # Unit Tests for WhereToUse Endpoints
 # -------------------------------------------------------------------
 
+
 # ----- Test: Create WhereToUse (Success) -----
 @patch(
     "core.where_to_use.views.WhereToUseCreateViewSet.create",

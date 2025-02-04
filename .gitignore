@@ -2,10 +2,12 @@
 *.log
 *.pot
 *.pyc
-__pycache__
 db.sqlite3
 0*_initial.py
 .vscode/
+**/.env
+**/core/utils/files/
+**/__pycache__/
 
 
 local_secrets.json

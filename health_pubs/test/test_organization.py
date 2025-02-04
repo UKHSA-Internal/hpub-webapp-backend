@@ -13,6 +13,7 @@ from core.organizations.views import (
     OrganizationUpdateViewSet,
 )
 
+
 # ----------------------------
 # Bulk Create Organizations Unit Test (Valid Data)
 # ----------------------------
@@ -106,7 +107,7 @@ def test_bulk_create_organizations_invalid_data_unit(
         view = OrganizationBulkCreateViewSet.as_view({"post": "create"})
         try:
             response = view(request)
-        except Exception as exc:
+        except Exception:
             # Catch the exception that would be handled by DRF and simulate a Response.
             # In your actual view, you might catch the exception and return a Response.
             response = Response(
@@ -169,6 +170,7 @@ def test_update_organization_unit(mock_get_serializer, mock_org_objects):
         # Configure a dummy serializer.
         dummy_serializer = MagicMock()
         dummy_serializer.is_valid.return_value = True
+
         # When save() is called, update dummy_org.name and return dummy_org.
         def save_side_effect():
             dummy_org.name = update_data["name"]

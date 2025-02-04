@@ -46,7 +46,7 @@ class Command(BaseCommand):
             )
         except Role.DoesNotExist:
             self.stdout.write(
-                self.style.ERROR(f"Admin role not found in the Role table.")
+                self.style.ERROR("Admin role not found in the Role table.")
             )
         except Exception as e:
             self.stdout.write(self.style.ERROR(f"An error occurred: {e}"))

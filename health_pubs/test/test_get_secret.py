@@ -7,6 +7,20 @@ from core.utils.config_loader import load_environment
 from botocore.exceptions import ClientError
 
 
+# Use environment variables with defaults for test credentials
+TEST_USERNAME = os.getenv("TEST_USERNAME")
+TEST_PASSWORD = os.getenv("TEST_PASSWORD")
+TEST_DBNAME = os.getenv("TEST_DBNAME")
+TEST_HOST = os.getenv("TEST_HOST")
+TEST_PORT = os.getenv("TEST_PORT")
+
+# Build the connection string using the environment-based values.
+TEST_CONNECTION_STRING = (
+    f"dbname={TEST_DBNAME} user={TEST_USERNAME} password={TEST_PASSWORD} "
+    f"host={TEST_HOST} port={TEST_PORT}"
+)
+
+
 @pytest.fixture(autouse=True)
 def setup_env():
     """Fixture to set up common pre-test environment."""
@@ -42,35 +56,33 @@ def test_get_non_secret_value():
 @patch("configs.get_secret_config.get_secret_value")
 @patch("configs.get_secret_config.Config.parse_connection_string")
 def test_db_connection_details(mock_parse_connection_string, mock_get_secret_value):
-    """Test parsing of the PostgreSQL connection string."""
-
+    """Test parsing of the PostgreSQL connection string using env-sourced credentials."""
+    # Instead of embedding literal credentials, use the constructed connection string.
     mock_get_secret_value.return_value = json.dumps(
-        {
-            "HPUB_POSTGRES_CONNECTION_STRING": "dbname=devtesting user=testuser password=testpass host=127.0.0.1 port=5432"
-        }
+        {"HPUB_POSTGRES_CONNECTION_STRING": TEST_CONNECTION_STRING}
     )
 
+    # Return a dictionary with credentials obtained from environment variables.
     mock_parse_connection_string.return_value = {
-        "dbname": "devtesting",
-        "user": "testuser",
-        "password": "testpass",
-        "host": "127.0.0.1",
-        "port": "5432",
+        "dbname": TEST_DBNAME,
+        "user": TEST_USERNAME,
+        "password": TEST_PASSWORD,
+        "host": TEST_HOST,
+        "port": TEST_PORT,
     }
 
     config = Config()
     connection_details = config.db_connection_details
 
-    assert connection_details["dbname"] == "devtesting"
-    assert connection_details["user"] == "testuser"
-    assert connection_details["password"] == "testpass"
-    assert connection_details["host"] == "127.0.0.1"
-    assert connection_details["port"] == "5432"
+    # Validate that the connection details match the values from environment variables.
+    assert connection_details["dbname"] == TEST_DBNAME
+    assert connection_details["user"] == TEST_USERNAME
+    assert connection_details["password"] == TEST_PASSWORD
+    assert connection_details["host"] == TEST_HOST
+    assert connection_details["port"] == TEST_PORT
 
     mock_get_secret_value.assert_called_once()
-    mock_parse_connection_string.assert_called_once_with(
-        "dbname=devtesting user=testuser password=testpass host=127.0.0.1 port=5432"
-    )
+    mock_parse_connection_string.assert_called_once_with(TEST_CONNECTION_STRING)
 
 
 @patch("configs.get_secret_config.get_secret_value")

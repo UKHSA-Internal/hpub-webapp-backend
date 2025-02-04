@@ -155,7 +155,6 @@ def user(db, role):
             user_id="12345",
             email="testuser@example.com",
             email_verified=True,
-            password="testpass",
             first_name="Test",
             last_name="User",
             is_authorized=True,

@@ -1,15 +1,11 @@
 import uuid
-
-from unittest.mock import MagicMock, patch
-
+import json
+from unittest.mock import MagicMock, patch, DEFAULT
 from django.urls import reverse
 from rest_framework import status
 import pandas as pd
 from django.core.files.uploadedfile import SimpleUploadedFile
-
-
 from core.users.models import User
-
 from rest_framework.test import APIClient
 from django.contrib.auth.models import User
 
@@ -23,33 +19,14 @@ from django.contrib.auth.models import User
     return_value=MagicMock(data={"order_id": "order-1"}),
 )
 @patch(
-    "core.users.permissions.IsAdminOrRegisteredUser.has_permission", return_value=True
+    "core.users.permissions.IsAdminOrRegisteredUser.has_permission",
+    return_value=True,
 )
 @patch("rest_framework.permissions.IsAuthenticated.has_permission", return_value=True)
 @patch("core.utils.custom_token_authentication.CustomTokenAuthentication.authenticate")
 @patch("core.addresses.models.Address.objects.get")
 @patch("django.db.transaction.atomic")
-@patch(
-    "core.orders.views.OrderViewSet.get_unique_slug", return_value="order-unique-slug"
-)
-@patch("core.orders.views.OrderViewSet._validate_order_limits", return_value=True)
-@patch("core.orders.views.OrderViewSet._get_or_create_user")
-@patch("core.orders.views.OrderViewSet._get_existing_user")
-@patch("core.orders.views.OrderViewSet._get_or_create_parent_page")
-@patch("core.orders.views.OrderViewSet._create_order_instance")
-@patch("core.orders.views.OrderViewSet._create_order_items")
-@patch("core.orders.views.OrderViewSet._update_product_quantities")
-@patch("core.orders.views.OrderViewSet._send_order_confirmation")
 def test_create_for_admin_success(
-    mock_send_order_confirmation,
-    mock_update_product_quantities,
-    mock_create_order_items,
-    mock_create_order_instance,
-    mock_get_or_create_parent_page,
-    mock_get_existing_user,
-    mock_get_or_create_user,
-    mock_validate_order_limits,
-    mock_get_unique_slug,
     mock_transaction_atomic,
     mock_address_get,
     mock_authenticate,
@@ -63,112 +40,138 @@ def test_create_for_admin_success(
     Test the create_for_admin action of OrderViewSet for an admin user.
     All DB access and heavy operations are patched.
     """
+    # Group a set of patches for methods on OrderViewSet into one context.
+    with patch.multiple(
+        "core.orders.views.OrderViewSet",
+        get_unique_slug=DEFAULT,
+        _validate_order_limits=DEFAULT,
+        _get_or_create_user=DEFAULT,
+        _get_existing_user=DEFAULT,
+        _get_or_create_parent_page=DEFAULT,
+        _create_order_instance=DEFAULT,
+        _create_order_items=DEFAULT,
+        _update_product_quantities=DEFAULT,
+        _send_order_confirmation=DEFAULT,
+    ) as mocks:
+        # Assign the grouped mocks to local names for clarity.
+        mock_get_unique_slug = mocks["get_unique_slug"]
+        mock_validate_order_limits = mocks["_validate_order_limits"]
+        mock_get_or_create_user = mocks["_get_or_create_user"]
+        mock_get_existing_user = mocks["_get_existing_user"]
+        mock_get_or_create_parent_page = mocks["_get_or_create_parent_page"]
+        mock_create_order_instance = mocks["_create_order_instance"]
+        mock_create_order_items = mocks["_create_order_items"]
+        mock_update_product_quantities = mocks["_update_product_quantities"]
+        mock_send_order_confirmation = mocks["_send_order_confirmation"]
 
-    # --- Set up dummy objects simulating real instances ---
-    dummy_parent_page = MagicMock(name="ParentPage")
+        # --- Set up dummy objects simulating real instances ---
+        dummy_parent_page = MagicMock(name="ParentPage")
 
-    dummy_delivery_user = MagicMock(name="DeliveryUser")
-    dummy_delivery_user.user_id = "67890"
-    dummy_delivery_user.email = "delivery@test.com"
-    dummy_delivery_user._state = MagicMock(db="default")
+        dummy_delivery_user = MagicMock(name="DeliveryUser")
+        dummy_delivery_user.user_id = "67890"
+        dummy_delivery_user.email = "delivery@test.com"
+        dummy_delivery_user._state = MagicMock(db="default")
 
-    dummy_admin_user = MagicMock(name="AdminUser")
-    dummy_admin_user.user_id = "12345"
-    dummy_admin_user.email = "admin@test.com"
-    # Simulate an establishment with a full_external_key:
-    dummy_establishment = MagicMock(full_external_key="ext-key")
-    dummy_admin_user.establishment_ref = dummy_establishment
-    dummy_admin_user._state = MagicMock(db="default")
+        dummy_admin_user = MagicMock(name="AdminUser")
+        dummy_admin_user.user_id = "12345"
+        dummy_admin_user.email = "admin@test.com"
+        # Simulate an establishment with a full_external_key:
+        dummy_establishment = MagicMock(full_external_key="ext-key")
+        dummy_admin_user.establishment_ref = dummy_establishment
+        dummy_admin_user._state = MagicMock(db="default")
 
-    dummy_address = MagicMock(name="Address")
-    dummy_address.address_id = "addr-1"
-    dummy_address.city = "Test City"
-    dummy_address._state = MagicMock(db="default")
+        dummy_address = MagicMock(name="Address")
+        dummy_address.address_id = "addr-1"
+        dummy_address.city = "Test City"
+        dummy_address._state = MagicMock(db="default")
 
-    dummy_order = MagicMock(name="Order")
-    dummy_order.order_id = "order-1"
-    dummy_order._state = MagicMock(db="default")
+        dummy_order = MagicMock(name="Order")
+        dummy_order.order_id = "order-1"
+        dummy_order._state = MagicMock(db="default")
 
-    dummy_product = MagicMock(name="Product")
-    dummy_product.product_code = "prod-1"
-    dummy_product._state = MagicMock(db="default")
+        dummy_product = MagicMock(name="Product")
+        dummy_product.product_code = "prod-1"
+        dummy_product._state = MagicMock(db="default")
 
-    # --- Configure patched return values ---
-    mock_get_or_create_parent_page.return_value = dummy_parent_page
-    mock_get_or_create_user.return_value = dummy_delivery_user
-    mock_get_existing_user.return_value = dummy_admin_user
-    mock_get_unique_slug.return_value = "order-unique-slug"
-    mock_transaction_atomic.return_value.__enter__.return_value = None
-    mock_transaction_atomic.return_value.__exit__.return_value = None
-    mock_address_get.return_value = dummy_address
-    mock_authenticate.return_value = (dummy_admin_user, None)
-    mock_product_get.return_value = dummy_product
-    mock_create_order_instance.return_value = dummy_order
+        # --- Configure grouped patch return values ---
+        mock_get_or_create_parent_page.return_value = dummy_parent_page
+        mock_get_or_create_user.return_value = dummy_delivery_user
+        mock_get_existing_user.return_value = dummy_admin_user
+        mock_get_unique_slug.return_value = "order-unique-slug"
+        mock_validate_order_limits.return_value = True
+        mock_transaction_atomic.return_value.__enter__.return_value = None
+        mock_transaction_atomic.return_value.__exit__.return_value = None
+        mock_create_order_instance.return_value = dummy_order
 
-    # --- Patch Order.save, refresh_from_db, and ContentType lookup to avoid DB access ---
-    with patch("core.orders.models.Order.save", lambda self: None), patch(
-        "core.orders.models.Order.refresh_from_db", lambda self: None
-    ), patch(
-        "django.contrib.contenttypes.models.ContentType.objects.get_for_model",
-        return_value=MagicMock(_state=MagicMock(db="default")),
-    ):
+        # --- Configure remaining patched return values ---
+        mock_address_get.return_value = dummy_address
+        mock_authenticate.return_value = (dummy_admin_user, None)
+        mock_product_get.return_value = dummy_product
 
-        # --- Prepare payload ---
-        payload = {
-            "order_items": [{"product_code": "prod-1", "quantity": 1}],
-            "user_ref": "12345",
-            "user_info": {
-                "email": "testuser@example.com",
-                "first_name": "Test",
-                "last_name": "User",
-            },
-            "address_ref": "addr-1",
-            "order_origin": "online",
-        }
+        # --- Patch Order.save, refresh_from_db, and ContentType lookup to avoid DB access ---
+        with patch("core.orders.models.Order.save", lambda self: None), patch(
+            "core.orders.models.Order.refresh_from_db", lambda self: None
+        ), patch(
+            "django.contrib.contenttypes.models.ContentType.objects.get_for_model",
+            return_value=MagicMock(_state=MagicMock(db="default")),
+        ):
 
-        url = reverse("order-create-for-admin")
-        response = client.post(
-            url,
-            data=json.dumps(payload),
-            content_type="application/json",
-            HTTP_AUTHORIZATION="Token testtoken",
-        )
+            # --- Prepare payload ---
+            payload = {
+                "order_items": [{"product_code": "prod-1", "quantity": 1}],
+                "user_ref": "12345",
+                "user_info": {
+                    "email": "testuser@example.com",
+                    "first_name": "Test",
+                    "last_name": "User",
+                },
+                "address_ref": "addr-1",
+                "order_origin": "online",
+            }
 
-        print("ADMIN RESPONSE:", response.json())
-        assert response.status_code == status.HTTP_201_CREATED, response.json()
-        assert response.json().get("order_id") == "order-1"
+            url = reverse("order-create-for-admin")
+            response = client.post(
+                url,
+                data=json.dumps(payload),
+                content_type="application/json",
+                HTTP_AUTHORIZATION="Token testtoken",
+            )
 
-        # --- Verify that patched functions were called with expected arguments ---
-        mock_authenticate.assert_called_once()
-        mock_is_authenticated.assert_called_once()
-        mock_is_admin_or_registered.assert_called_once()
-        mock_address_get.assert_called_once_with(address_id="addr-1")
-        mock_get_or_create_parent_page.assert_called_once()
-        mock_get_or_create_user.assert_called_once_with(
-            {
-                "email": "testuser@example.com",
-                "first_name": "Test",
-                "last_name": "User",
-            },
-            dummy_parent_page,
-        )
-        mock_get_existing_user.assert_called_once_with("12345")
-        mock_validate_order_limits.assert_called_once_with(
-            [{"product_code": "prod-1", "quantity": 1}], dummy_admin_user
-        )
-        # Note: get_unique_slug may not be called in this flow.
-        mock_create_order_instance.assert_called_once()
-        mock_create_order_items.assert_called_once_with(
-            [{"product_code": "prod-1", "quantity": 1}],
-            dummy_order,
-            dummy_parent_page,
-            dummy_delivery_user,
-        )
-        mock_update_product_quantities.assert_called_once_with(
-            [{"product_code": "prod-1", "quantity": 1}]
-        )
-        mock_send_order_confirmation.assert_called_once_with(dummy_order)
-        mock_transaction_atomic.assert_called_once()
+            print("ADMIN RESPONSE:", response.json())
+            assert response.status_code == status.HTTP_201_CREATED, response.json()
+            assert response.json().get("order_id") == "order-1"
+
+            # --- Verify that patched functions were called with expected arguments ---
+            mock_authenticate.assert_called_once()
+            mock_is_authenticated.assert_called_once()
+            mock_is_admin_or_registered.assert_called_once()
+            mock_address_get.assert_called_once_with(address_id="addr-1")
+            mock_get_or_create_parent_page.assert_called_once()
+            mock_get_or_create_user.assert_called_once_with(
+                {
+                    "email": "testuser@example.com",
+                    "first_name": "Test",
+                    "last_name": "User",
+                },
+                dummy_parent_page,
+            )
+            mock_get_existing_user.assert_called_once_with("12345")
+            mock_validate_order_limits.assert_called_once_with(
+                [{"product_code": "prod-1", "quantity": 1}], dummy_admin_user
+            )
+            # Note: get_unique_slug may not be called in this flow.
+            mock_create_order_instance.assert_called_once()
+            mock_create_order_items.assert_called_once_with(
+                [{"product_code": "prod-1", "quantity": 1}],
+                dummy_order,
+                dummy_parent_page,
+                dummy_delivery_user,
+            )
+            mock_update_product_quantities.assert_called_once_with(
+                [{"product_code": "prod-1", "quantity": 1}]
+            )
+            mock_send_order_confirmation.assert_called_once_with(dummy_order)
+            mock_transaction_atomic.assert_called_once()
 
 
 @patch(

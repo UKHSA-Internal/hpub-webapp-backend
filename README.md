@@ -6,7 +6,7 @@ This project is a Wagtail-Django-based backend application for managing various 
 
 ## Prerequisites
 
-   Before running the project, ensure that you have the following installed:
+   Before running the project, ensure that you have the following:
 
    1. Python (3.10+)
    2. PostgreSQL, Django
@@ -16,80 +16,37 @@ This project is a Wagtail-Django-based backend application for managing various 
    6. Ensure your Ip is whitelisted in Aurora DB please speak with Jagan (DevOps Engineer)
    7. Install PgAdmin to visualize the db using this Link `https://ftp.postgresql.org/pub/pgadmin/pgadmin4/v8.13/windows/pgadmin4-8.13-x64.exe`
    8. Install and set up Postman to test out the endpoints.
+   9. Have access to AWS Environments
 
 ## Getting Started
 
 1. Clone Repository
     - `git clone <repository-url>`
-    - `cd hpub-backend/health_pubs`
+    - `cd hpub-webapp-backend/health_pubs`
 
 2. Set Up Environment Variables
 
-   - Create an .env.dev file in the directory `/hpub-backend/health_pubs/configs/`
+   - Create an .env.dev file in the directory `/hpub-webapp-backend/health_pubs/configs/`
 
    - Ensure you have .env.dev file in the `/backend-alpha/configs/` directory.
 
 3. Install Dependencies
-
+   - `python -m venv venv`
+   - `.\venv\Scripts\Activate.ps1`
    - `pip install -r requirements.txt`
+4. Activate Your AWS Configuration
+   - In your terminal Run `aws configure`
+   - Add your secrets-key, access-key and default region = `eu-west-2`
 
-4. Apply Database Migrations(Optional, this is for only if you made changes to the model structure)
+5. Apply Database Migrations(Optional, this is for only if you made changes to the model structure)
    Run the following commands to apply migrations
    - `python manage.py makemigrations`
 
    - `python manage.py migrate`
 
-5. Start the Development Server
+6. Start the Development Server
    Start the Django development server with the specified port (optional), If you do not specify a port, the server will run on the default port 8000.
    - `python manage.py runserver <port>`
-
-## Run Locally Without Access to AWS Secrets Manager
-
-1. Create a PostgreSQL database.
-2. Load the dumped data with:
-```shell
-pg_restore -h localhost -U <username> -d <database_name> /path/to/dump_file.dump
-```
-3. Create a file `local_secrets.json` inside `health_pubs/configs` directory with the following format:
-
-    ```json
-    {
-        "dev/hpub/database": "{\"HPUB_POSTGRES_CONNECTION_STRING\":\"postgresql://username:password@localhost:5432/dbname\"}",
-        "hpub/postgres/connection/regex": "{\"POSTGRES_CONNECTION_REGEX\": \"postgresql://(?P<user>[^:]+):(?P<password>.+)@(?P<host>[^:]+):(?P<port>\\\\d+)/(?P<dbname>.+)$\"}",
-        "REDACTED": "{\"GOV_UK_NOTIFY_API_KEY\":\"sample-gov-uk-notify-api-key\"}",
-        "aps/api/key": "{\"APS_API_KEY\":\"sample-aps-api-key\"}",
-        "address/verify/api/key": "{\"OS_ADDRESS_VERIFICATION_API_KEY\":\"sample-address-verification-api-key\"}",
-        "address/verify/client/id": "{\"OS_ADDRESS_VERIFICATION_CLIENT_ID\":\"sample-client-id\"}",
-        "address/verify/client/scope": "{\"OS_ADDRESS_VERIFICATION_CLIENT_SCOPE\":\"sample-client-scope\"}",
-        "hpub-webapp/hpub-backend/": "{\"RELATIVE_PATH\":\"relative-path-placeholder\"}",
-        "hpub/email/template/id/gov/notify": "{\"GOV_UK_NOTIFY_EMAIL_TEMPLATE_ID\":\"sample-email-template-id\"}",
-        "hpub/sms/template/id/gov": "{\"GOV_UK_NOTIFY_SMS_TEMPLATE_ID\":\"sample-sms-template-id  \"}",
-        "hpub/notify/api/url": "{\"GOV_UK_NOTIFY_API_URL\":\"shttps://dev-notify-api.example.com\"}",
-        "hpub/aps/test/base/url": "{\"APS_TEST_BASE_URL\":\"shttps://dev-aps-test-base-url.example.com\"}",
-        "hpub/os/address/validation/base/url": "{\"OS_ADDRESS_VERIFICATION_BASE_URL\":\"https://dev-address-validation-base-url.example.com\"}",
-        "hpub/os/address/verification/token/url": "{\"OS_ADDRESS_VERIFICATION_TOKEN_URL\":\"https://dev-token-url.example.com\"}",
-        "hpub/contact/us/aps/email/address": "{\"CONTACT_US_APS_EMAIL_ADDRESS\":\"contact@dev-aps.example.com\"}",
-        "hpub/contact/us/template/id": "{\"CONTACT_US_TEMPLATE_ID\":\"sample-contact-us-template-id\"}",
-        "hpub/azure/b2c/client/id": "{\"AZURE_B2C_CLIENT_ID\":\"sample-azure-b2c-client-id\"}",
-        "hpub/azure/b2c/client/secret/id": "{\"AZURE_B2C_CLIENT_SECRET_ID\":\"sample-azure-b2c-client-secret\"}",
-        "hpub/azure/b2c/tenant/id": "{\"AZURE_B2C_TENANT_ID\":\"sample-tenant-id\"}",
-        "hpub/azure/b2c/tenant/name": "{\"AZURE_B2C_TENANT_NAME\":\"sample-tenant-name\"}" ,
-        "hpub/azure/b2c/policy/name": "{\"AZURE_B2C_POLICY_NAME\":\"sample-policy-name\"}",
-        "hpub/azure/b2c/jwks/uri": "{\"AZURE_B2C_JWKS_URI\":\"https://dev-jwks-uri.example.com"\"}",
-        "hpub/django/secret/key": "{\"DJANGO_SECRET_KEY\":\"sample-django-secret-key\"}",
-        "hpub/azure/b2c/issuer": "{\"AZURE_B2C_ISSUER\":\"https://dev-issuer.example.com"\"}",
-        "hpub/rsa/keys": "{\"RSA_PUBLIC_KEY\": \"-----BEGIN PUBLIC KEY-----\\n123\\n-----END PUBLIC KEY-----\", \"RSA_PRIVATE_KEY\": \"-----BEGIN RSA PRIVATE KEY-----\\n123\\n-----END RSA PRIVATE KEY-----\"}"
-    }
-    ```
-
-3. Activate env with
-```shell
-source /path/to/.env.dev
-```
-4. Run as normal with
-```shell
-python manage.py runserver <port>
-```
 
 ## Running the Application with Docker
 
@@ -97,9 +54,9 @@ python manage.py runserver <port>
 
    1. Ensure you have Docker installed on your machine.
    2. Build the Docker image for the project:
-      - `docker build -t hpub-backend .`
+      - `docker build -t hpub-webapp-backend .`
    3. Run the Docker container:
-      - `docker run -d -p 8000:8000 hpub-backend`
+      - `docker run -d -p 8000:8000 hpub-webapp-backend`
    4. The application will now be accessible at:
       - `<http://127.0.0.1:8000>`
 
@@ -160,7 +117,7 @@ To be able to deploy to Docker, you need to follow the below steps
 - git checkout user-management-backend-api
 - git pull
 - create a new branch  from user-management-backend-api `git checkout -b <branch_name>`
-- cd into `hpub-backend/`
+- cd into `hpub-webapp-backend/`
 - Ensure you have `DockerFile` in the root directory
 - Ensure you have `requirements.txt` in `backend-alpha/` folder
 - Run docker-compose -f docker-compose.yaml build, after successful build
@@ -176,7 +133,7 @@ To be able to deploy to Docker, you need to follow the below steps
 Below is a detailed explanation of the folder structure for the Health Publication Backend application. This Django-based web application leverages Wagtail (a Django-based CMS) to manage and serve various health publication content.
 
 ## Top-Level Directory: `health_pubs`
-**Path:** `\hpub-webapp\hpub-backend\health_pubs`
+**Path:** `\hpub-webapp-backend\health_pubs`
 
 ### Contents:
 - **`manage.py`**: The Django management script used to run the server, create database migrations, run tests, etc.
@@ -198,7 +155,7 @@ Below is a detailed explanation of the folder structure for the Health Publicati
 ---
 
 ## `health_pubs/health_pubs/`
-**Path:** `hpub-webapp\hpub-backend\health_pubs\health_pubs`
+**Path:** `\hpub-webapp-backend\health_pubs\health_pubs`
 
 This inner folder defines the core Django project module.
 
@@ -212,7 +169,7 @@ This inner folder defines the core Django project module.
 ---
 
 ## `health_pubs/configs/`
-**Path:** `\hpub-webapp\hpub-backend\health_pubs\configs`
+**Path:** `\hpub-webapp-backend\health_pubs\configs`
 
 Contains configuration-related files and utilities.
 
@@ -228,7 +185,7 @@ Centralized management of environment variables and configuration parameters for
 ---
 
 ## `health_pubs/core/`
-**Path:** `hpub-webapp\hpub-backend\health_pubs\core`
+**Path:** `\hpub-webapp-backend\health_pubs\core`
 
 Acts as the main container for the domain logic of the application. Each subdirectory represents a Django “app” or functional module.
 
@@ -260,7 +217,21 @@ Acts as the main container for the domain logic of the application. Each subdire
 17. **`vaccinations/`**: Manages vaccine-related publications.
 18. **`where_to_use/`**: Details places where a particular publication can be applied/ where it is intended.
 
-
+### How To Run Tests:
+1. Navigate to the test directory, 
+   Open a terminal and run:  
+   cd `health_pubs/test/` 
+2. Run a specific test file
+   Use the following command: 
+   `pytest <name_of_test_file> -v`
+   Example:
+   `pytest test_audiences.py -v`
+3. Run all tests in the directory
+   If you want to run all tests at once, execute:
+   `pytest -v`
+4. Run tests with coverage(Optional):
+   If you want to check test coverage, install `pytest-cov` using `pip` and run:
+   `pytest --cov=health_pubs`
 
 
 # API Documentation

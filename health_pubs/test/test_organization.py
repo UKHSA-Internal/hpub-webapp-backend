@@ -170,6 +170,7 @@ def test_update_organization_unit(mock_get_serializer, mock_org_objects):
         # Configure a dummy serializer.
         dummy_serializer = MagicMock()
         dummy_serializer.is_valid.return_value = True
+
         # When save() is called, update dummy_org.name and return dummy_org.
         def save_side_effect():
             dummy_org.name = update_data["name"]

@@ -174,8 +174,6 @@ def audience(db, parent_page):
 @pytest.fixture
 def parent_page(db):
     """Fixture to create a parent page for audiences."""
-    slugify(f"parent-page-{str(uuid.uuid4())}-{str(timezone.now())}")
-
     # Create or get parent page
     parent_page = get_or_create_parent_page("Audiences", "audiences")
 

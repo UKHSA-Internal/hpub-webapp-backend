@@ -20,7 +20,7 @@ from core.utils.token_generation_validation import (
     validate_token_refresh,
 )
 from django.contrib.contenttypes.models import ContentType
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ValidationError, ObjectDoesNotExist
 from django.core.validators import validate_email
 from django.shortcuts import get_object_or_404
 from django.http import JsonResponse
@@ -90,10 +90,9 @@ def validate_azure_b2c_token(token):
         unverified_header = jwt.get_unverified_header(token)
         token_kid = unverified_header.get("kid")
 
-        # Log the token's kid
-
         # Log all available kids in JWKS
-        [key["kid"] for key in jwks["keys"]]
+        available_kids = [key["kid"] for key in jwks["keys"]]
+        logger.info(f"Number of keys in JWKS: {len(available_kids)}")  # for debugging
 
         # Select the correct key based on kid
         rsa_key = {}
@@ -157,11 +156,7 @@ class UserSignUpView(APIView):
             "first_name": decoded_token.get("given_name", ""),
             "last_name": decoded_token.get("family_name", ""),
             "mobile_number": decoded_token.get("extension_MobileNumber", ""),
-            "email": (
-                decoded_token.get("email_address")
-                if "email_address" in decoded_token
-                else None
-            ),
+            "email": (decoded_token.get("email_address")),
             "role_name": decoded_token.get("extension_UserAppRole"),
         }
         logger.info("extracted user_info: %s", user_info)
@@ -330,7 +325,6 @@ class UserLoginView(APIView):
         if organization_ref:
             logger.info("Organization found: %s", organization_ref)
             logger.info("Organization name: %s", organization_ref.name)
-
             organization_name = organization_ref.name
         else:
             logger.info("No role found for organization_ref: %s", user.organization_ref)
@@ -547,18 +541,27 @@ class CustomPagination(PageNumberPagination):
     page_size = 20  # Set pagination to 20 items per page
 
     def get_paginated_response(self, data, status_code=200):
-        response = Response(
-            {
-                "links": {
-                    "next": self.get_next_link(),
-                    "previous": self.get_previous_link(),
+        try:
+            response = Response(
+                {
+                    "links": {
+                        "next": self.get_next_link(),
+                        "previous": self.get_previous_link(),
+                    },
+                    "count": self.page.paginator.count,
+                    "results": data,
                 },
-                "count": self.page.paginator.count,
-                "results": data,
-            }
-        )
-        response.status_code = status_code
-        return response
+                status=status_code,
+            )
+            return response
+        except AttributeError as e:
+            logger.error(f"Pagination error: {e}")
+            return Response({"error": "Pagination data is unavailable."}, status=500)
+        except Exception as e:
+            logger.error(f"Unexpected error in pagination: {e}")
+            return Response(
+                {"error": "An unexpected error occurred in pagination."}, status=500
+            )
 
 
 class UserListView(generics.ListAPIView):
@@ -570,9 +573,16 @@ class UserListView(generics.ListAPIView):
 
     def get(self, request, *args, **kwargs):
         """
-        Override the get method to provide custom behavior or additional filtering if needed.
+        Get a list of users with pagination.
         """
-        return super().get(request, *args, **kwargs)
+        try:
+            return super().get(request, *args, **kwargs)
+        except ObjectDoesNotExist:
+            logger.error("Requested user list does not exist.")
+            return JsonResponse({"error": "Users not found."}, status=404)
+        except Exception as e:
+            logger.error(f"Unexpected error in UserListView: {e}")
+            return JsonResponse({"error": "An unexpected error occurred."}, status=500)
 
 
 class UserDeleteAll(APIView):
@@ -870,7 +880,6 @@ class MigrateUsersAPIView(APIView):
 
     def _get_role_ref(self, role_id):
         try:
-
             return Role.objects.get(role_id=role_id)
         except Role.DoesNotExist:
             logger.warning("Role not found for id: %s", role_id)

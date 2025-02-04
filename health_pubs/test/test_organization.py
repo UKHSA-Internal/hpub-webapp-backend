@@ -13,6 +13,7 @@ from core.organizations.views import (
     OrganizationUpdateViewSet,
 )
 
+
 # ----------------------------
 # Bulk Create Organizations Unit Test (Valid Data)
 # ----------------------------

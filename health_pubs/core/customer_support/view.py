@@ -1,10 +1,12 @@
 import logging
+from datetime import datetime
 import uuid
 
 from core.utils.send_contact_us_notification_email import send_notification
 from django.contrib.contenttypes.models import ContentType
 from django.http import JsonResponse
 from django.utils.text import slugify
+from core.utils.custom_token_authentication import CustomTokenAuthentication
 from rest_framework import status, viewsets
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.permissions import AllowAny
@@ -18,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class CustomerSupportViewSet(viewsets.ModelViewSet):
-    authentication_classes = [SessionAuthentication]
+    authentication_classes = [SessionAuthentication, CustomTokenAuthentication]
     permission_classes = [AllowAny]
     queryset = CustomerSupport.objects.all()
     serializer_class = CustomerSupportSerializer
@@ -26,7 +28,7 @@ class CustomerSupportViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         # Extract title or use a default value
         title = request.data.get("title", "Customer Support")
-        slug = slugify(title) + "-" + str(uuid.uuid4())
+        slug = slugify(title + "-" + str(uuid.uuid4()) + "-" + str(datetime.now()))
 
         # Retrieve or create the parent page for customer support
         try:
@@ -56,8 +58,7 @@ class CustomerSupportViewSet(viewsets.ModelViewSet):
             data = serializer.validated_data
 
             # Check if the user is authenticated
-            if request.user.is_authenticated:
-
+            if request.user and request.user.is_authenticated:
                 # Get contact details from user information
                 contact_name = f"{request.user.first_name} {request.user.last_name}"
                 contact_email = request.user.email
@@ -87,29 +88,26 @@ class CustomerSupportViewSet(viewsets.ModelViewSet):
                 contact_email=contact_email,
             )
 
-            # try:
-            parent_page.add_child(instance=customer_support_instance)
-            customer_support_instance.save()
-            logger.info("CustomerSupport page created successfully.")
+            try:
+                parent_page.add_child(instance=customer_support_instance)
+                customer_support_instance.save()
+                logger.info("CustomerSupport page created successfully.")
 
-            # Call the send_notification function
-            notification_response = send_notification(
-                contact_name=contact_name,
-                contact_email=contact_email,
-                summary=data.get("summary"),
-                message=data.get("message", ""),
-            )
+                # Call the send_notification function
+                notification_response = send_notification(
+                    contact_name=contact_name,
+                    contact_email=contact_email,
+                    summary=data.get("summary"),
+                    message=data.get("message", ""),
+                )
 
-            # Log the notification response
-            logger.info(notification_response[0])
-
-            if notification_response[1] == 200:
+                # Log the notification response
+                logger.info(notification_response[0])
                 return JsonResponse(
                     CustomerSupportSerializer(customer_support_instance).data,
                     status=201,
                 )
-
-            else:
+            except Exception as e:
                 logger.error(f"Error adding customer support as child page: {str(e)}")
                 return Response(
                     {"error": "Failed to create customer support page."},

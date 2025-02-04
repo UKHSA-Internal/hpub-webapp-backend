@@ -215,27 +215,19 @@ class UserSignUpView(APIView):
                 organization_ref,
                 role,
             )
-        except IntegrityError as ie:
-            logger.error("Integrity error while creating user: %s", str(ie))
-            existing_user = User.objects.filter(email=email).first()
-            if existing_user:
-                return self._return_user(
-                    existing_user,
-                    email,
-                    role_name,
-                    message=USER_EXISTS_MSG,
-                    status_code=status.HTTP_200_OK,
-                )
-            return Response(
-                {"error": "Integrity error while creating user page"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-        except Exception as ex:
+        except (IntegrityError, Exception) as ex:
             error_str = str(ex)
-            if ("User with this Email already exists" in error_str) or (
-                "Page with this Path already exists" in error_str
+            if isinstance(ex, IntegrityError):
+                logger.error("Integrity error while creating user: %s", error_str)
+            else:
+                logger.error("Failed to create user: %s", error_str)
+
+            # If error indicates duplicate user, try to return the existing user.
+            if (
+                "User with this Email already exists" in error_str
+                or "Page with this Path already exists" in error_str
+                or isinstance(ex, IntegrityError)
             ):
-                logger.info("Duplicate detected during creation: %s", error_str)
                 existing_user = User.objects.filter(email=email).first()
                 if existing_user:
                     return self._return_user(
@@ -245,9 +237,14 @@ class UserSignUpView(APIView):
                         message=USER_EXISTS_MSG,
                         status_code=status.HTTP_200_OK,
                     )
-            logger.error("Failed to create user: %s", ex)
+
+            err_msg = (
+                "Integrity error while creating user page"
+                if isinstance(ex, IntegrityError)
+                else "Failed to create user page"
+            )
             return Response(
-                {"error": "Failed to create user page"},
+                {"error": err_msg},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 

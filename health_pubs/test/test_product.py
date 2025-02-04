@@ -173,6 +173,7 @@ class DummyProductSerializer:
 
 # --- Unit Test Examples ---
 
+
 # ----- Test: Bulk Upload Success -----
 @patch("core.products.views.pd.read_excel")
 @patch("core.products.views.Product.objects.filter")

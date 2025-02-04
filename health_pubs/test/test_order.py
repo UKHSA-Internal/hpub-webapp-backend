@@ -253,7 +253,6 @@ def test_create_for_regular_user_success(
         "django.contrib.contenttypes.models.ContentType.objects.get_for_model",
         return_value=MagicMock(),
     ):
-
         # --- Prepare payload ---
         payload = {
             "order_items": [{"product_code": "prod-2", "quantity": 2}],

@@ -46,7 +46,7 @@ def get_or_create_parent_page(title, slug):
         try:
             root_page = Page.objects.first()
             if not root_page:
-                raise Exception("No root page found to attach new pages.")
+                logger.exception("No root page found to attach new pages.")
             parent_page = Page(
                 title=title,
                 slug=slug,

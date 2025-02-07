@@ -1,7 +1,11 @@
 import os
+from venv import logger
 
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def upload_file_to_s3(file_name: str, bucket: str, object_name: str = None):
@@ -13,25 +17,25 @@ def upload_file_to_s3(file_name: str, bucket: str, object_name: str = None):
 
     # Check if the file exists
     if not os.path.exists(file_name):
-        logging.info(f"The file {file_name} does not exist.")
+        logger.info(f"The file {file_name} does not exist.")
         return False
 
     try:
         s3_client.upload_file(file_name, bucket, object_name)
     except FileNotFoundError:
-        logging.info(f"The file {file_name} was not found.")
+        logger.info(f"The file {file_name} was not found.")
         return False
     except NoCredentialsError:
-        logging.info("Credentials not available.")
+        logger.info("Credentials not available.")
         return False
     except PartialCredentialsError:
-        logging.info("Incomplete credentials provided.")
+        logger.info("Incomplete credentials provided.")
         return False
     except ClientError as e:
-        logging.info(f"Unexpected error: {e}")
+        logger.info(f"Unexpected error: {e}")
         return False
 
-    logging.info(f"File {file_name} uploaded to {bucket}/{object_name}.")
+    logger.info(f"File {file_name} uploaded to {bucket}/{object_name}.")
     return True
 
 

@@ -63,7 +63,6 @@ from .models import Product, ProductUpdate
 from .serializers import ProductSerializer, ProductUpdateSerializer
 from .signals import send_product_event
 
-# from .signals import send_product_deletion_event, send_product_event
 
 logger = logging.getLogger(__name__)
 

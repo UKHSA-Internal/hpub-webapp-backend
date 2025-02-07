@@ -48,7 +48,7 @@ class OrderViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["post"], url_path="admin")
     def create_for_admin(self, request, *args, **kwargs):
-        data = request.data
+        data = request.data.copy()
         items_data = data.pop("order_items", [])
         address_ref = data.pop("address_ref", None)
         user_data = data.pop("user_info", None)

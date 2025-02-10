@@ -181,6 +181,7 @@ class Config:
     @staticmethod
     def get_hpub_base_api_url():
         return Config.get_value("HPUB_FRONTEND_URL", is_secret=True)
+
     @staticmethod
     def get_hpub_event_bridge_source():
         return Config.get_value("HPUB_EVENT_BRIDGE_SOURCE", is_secret=True)

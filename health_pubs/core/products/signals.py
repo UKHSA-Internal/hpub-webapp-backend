@@ -171,7 +171,12 @@ def send_product_live_event(sender, instance, **kwargs):
     Signal to send a live product event if the status is 'live'.
     """
     if instance.status == "live":
-        send_product_event(instance, "live", config.get_hpub_event_bridge_detail_type_product_live, required_event_fields_live)
+        send_product_event(
+            instance,
+            "live",
+            config.get_hpub_event_bridge_detail_type_product_live,
+            required_event_fields_live,
+        )
 
 
 @receiver(post_save, sender=Product)

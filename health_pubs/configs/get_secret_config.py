@@ -204,7 +204,9 @@ class Config:
 
     @staticmethod
     def get_hpub_event_bridge_detail_type_product_archive():
-        return Config.get_value("HPUB_EVENT_BRIDGE_DETAIL_TYPE_PRODUCT_ARCHIVE", is_secret=True)
+        return Config.get_value(
+            "HPUB_EVENT_BRIDGE_DETAIL_TYPE_PRODUCT_ARCHIVE", is_secret=True
+        )
 
     @staticmethod
     def get_hpub_event_bridge_detail_type_product_withdrawn():

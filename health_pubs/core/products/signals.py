@@ -187,7 +187,10 @@ def send_product_archived_event(sender, instance, **kwargs):
     """
     if instance.status == "archived":
         send_product_event(
-            instance, "archived", config.get_hpub_event_bridge_detail_type_product_archive, required_event_fields_archived
+            instance,
+            "archived",
+            config.get_hpub_event_bridge_detail_type_product_archive,
+            required_event_fields_archived,
         )
 
 
@@ -199,5 +202,8 @@ def send_product_withdrawn_event(sender, instance, **kwargs):
     """
     if instance.status == "withdrawn":
         send_product_event(
-            instance, "withdrawn", config.get_hpub_event_bridge_detail_type_product_withdrawn, required_event_fields_withdrawn
+            instance,
+            "withdrawn",
+            config.get_hpub_event_bridge_detail_type_product_withdrawn,
+            required_event_fields_withdrawn,
         )

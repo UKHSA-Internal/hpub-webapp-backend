@@ -49,7 +49,7 @@ def get_secret_value(secret_id):
         error_response = {
             "Error": {
                 "Code": "SecretRetrievalError",
-                "Message": f'Error retrieving secret: {e.response["Error"]["Message"]}'
+                "Message": f'Error retrieving secret: {e.response["Error"]["Message"]}',
             }
         }
         raise ClientError(error_response, "GetSecretValue")

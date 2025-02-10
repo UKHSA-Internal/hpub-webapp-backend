@@ -157,7 +157,10 @@ def send_product_draft_event(sender, instance, **kwargs):
     """
     if instance.status == "draft":
         send_product_event(
-            instance, "draft", config.get_hpub_event_bridge_detail_type_product_draft, required_event_fields_draft
+            instance,
+            "draft",
+            config.get_hpub_event_bridge_detail_type_product_draft,
+            required_event_fields_draft,
         )
 
 

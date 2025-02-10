@@ -32,7 +32,7 @@ class Command(BaseCommand):
 
             # Assign the Role instance instead of a string
             user.role_ref = admin_role
-            user.save()
+            user.save(update_fields=["role_ref"])
 
             self.stdout.write(
                 self.style.SUCCESS(f"Successfully updated {email} to Admin.")

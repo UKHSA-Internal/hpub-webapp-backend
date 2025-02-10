@@ -46,7 +46,13 @@ def get_secret_value(secret_id):
             raise ValueError("SecretString and SecretBinary are undefined")
     except ClientError as e:
         logger.error(f'Error retrieving secret: {e.response["Error"]["Message"]}')
-        raise ClientError(f'Error retrieving secret: {e.response["Error"]["Message"]}')
+        error_response = {
+            "Error": {
+                "Code": "SecretRetrievalError",
+                "Message": f'Error retrieving secret: {e.response["Error"]["Message"]}'
+            }
+        }
+        raise ClientError(error_response, "GetSecretValue")
 
 
 #

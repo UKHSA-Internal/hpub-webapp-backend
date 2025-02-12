@@ -31,22 +31,18 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
+        if: ${{ env.RUN_UNIT_TESTS }}
         with:
           python-version: '3.11'
           cache: 'pip'
       
       - name: Unit tests
-        env:
-          RUN_TESTS: ${{ env.RUN_UNIT_TESTS }}
+        if: ${{ env.RUN_UNIT_TESTS }}
         run: |
-          if [[ "$RUN_UNIT_TESTS" == "true" ]]; then
-            cd health_pubs
-            python -m pip install --upgrade pip
-            pip install -r requirements.txt
-            pytest
-          else
-            echo "Skipping unit tests due to configuration"
-          fi
+          cd health_pubs
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pytest
     
 
       - name: Configure AWS credentials

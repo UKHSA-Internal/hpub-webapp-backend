@@ -1,0 +1,205 @@
+name: "Build, Test and Release"
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+
+permissions:
+  id-token: write
+  contents: write
+  actions: read
+
+env:
+  APP_NAME: ${{ vars.APP_NAME }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_NAMESPACE: ${{ vars.ECR_NAMESPACE }}
+  RUN_UNIT_TESTS: ${{ vars.RUN_UNIT_TESTS }}
+
+jobs:
+  build:
+    name: Build and test container image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      actions: read    
+    # Currently pushes to dev but should change to push to prod when account is set up.
+    # Even further on, this should push to a centralised ECR registry.
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        if: ${{ env.RUN_UNIT_TESTS == 'true' }}
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Unit tests
+        if: ${{ env.RUN_UNIT_TESTS == 'true '}}
+        run: |
+          cd health_pubs
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pytest
+    
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
+          role-session-name: build-${{ github.sha }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build container image
+        uses: docker/build-push-action@v6
+        env:
+            ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        with:
+          context: .
+          push: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ github.sha }}
+          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:latest
+          cache-to: type=inline
+
+  release:
+    name: Tag and release container image
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: dev
+    permissions:
+      contents: write
+      id-token: write
+      actions: read   
+    needs:
+        - build
+    outputs:
+      release_tag: ${{ steps.tag_bump.outputs.new_tag }}
+      app_image: ${{ steps.push.outputs.app_image }}
+      nginx_image: ${{ steps.push.outputs.nginx_image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ukhsa-collaboration/devops-github-actions/.github/actions/github-bump-tag@v0.8.0
+        id: tag_bump
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WITH_V: true
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+            # AWS_ACCOUNT_ID_ECR_REGISTRY is used for pulling from a shared ECR repository
+            role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
+            role-session-name: retag-image-${{ github.sha }}
+            aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Pull, retag, and push Application image for release
+        id: push
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker pull $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$IMAGE_TAG $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${{ steps.tag_bump.outputs.new_tag }}
+          docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${{ steps.tag_bump.outputs.new_tag }}
+          echo "app_image=$ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${{ steps.tag_bump.outputs.new_tag }}" >> $GITHUB_OUTPUT
+        
+  deploy:
+    name: Deploy build to ${{ matrix.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ matrix.environment }}
+    strategy:
+      max-parallel: 1
+      matrix:
+        environment: ["dev", "qat", "test", "prd"]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: write
+      id-token: write
+      actions: read
+    needs:
+      - release
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
+          role-session-name: deploy-${{ github.sha }}
+          aws-region: ${{ env.AWS_REGION }}
+
+    - name: Update Parameter Store with new value
+      env: 
+        NEW_TAG: ${{ needs.release.outputs.release_tag }}
+      run: |
+        aws ssm put-parameter --name "/hpub/$APP_NAME/image_tag" --type "String" --value "$NEW_TAG" --overwrite
+
+    - name: Download task definition
+      run: |
+        aws ecs describe-task-definition --task-definition aw-hpub-euw2-${{ matrix.environment }}-ecssvc-$APP_NAME --query taskDefinition > task-definition.json
+
+    - name: Modify Amazon ECS task definition with updated image URI
+      id: render-task-def
+      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      with:
+        task-definition: task-definition.json
+        container-name: app
+        image: ${{ needs.release.outputs.app_image }}
+    
+    - name: Deploy to Amazon ECS
+      uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+      with:
+        task-definition: ${{ steps.render-task-def.outputs.task-definition }}
+        service: aw-hpub-euw2-${{ matrix.environment }}-ecssvc-${{ env.APP_NAME }}
+        cluster: aw-hpub-euw2-${{ matrix.environment }}-ecscluster
+        wait-for-service-stability: true
+  
+    - name: Determine Base URL
+      id: url
+      env:
+        environment: ${{ matrix.environment }}
+      run: |
+        if [ "$environment" == "prd" ]; then
+          prefix=hpub
+        elif [ "$environment" == "qat" ]; then
+          prefix=hpub-qat
+        elif [ "$environment" == "test" ]; then
+          prefix=hpub-test
+        elif [ "$environment" == "dev" ]; then
+          prefix=hpub-dev
+        else
+          echo "Unknown environment. Unable to run tests."
+          exit 1
+        fi
+        echo prefix=$prefix >> $GITHUB_OUTPUT
+
+    - name: End-to-end tests
+      if: ${{ matrix.environment }} != "prd"
+      env:
+        BASE_URL: "https://${{ steps.url.outputs.prefix }}.test-and-trace.nhs.uk"
+      run: |
+        # No end-to-end testing in place yet
+        echo npx playwright test
+
+    - name: Post-Deployment Smoke Test
+      env:
+        environment_prefix: ${{ steps.url.outputs.prefix }}
+      shell: bash
+      run: |
+        response=$(curl -s -o /dev/null -w "%{http_code}" https://$environment_prefix.test-and-trace.nhs.uk)
+        if [ "$response" -ne 200 ]; then
+          echo "Post-Deployment tests failed!"
+          exit 1
+        fi

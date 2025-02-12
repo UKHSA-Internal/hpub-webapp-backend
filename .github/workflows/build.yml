@@ -10,16 +10,14 @@ permissions:
   contents: write
   actions: read
 
-env:
-  AWS_REGION: "eu-west-2"
-  APP_NAME: "backend"
-
 jobs:
   build:
     name: Build and test container image
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write
+      actions: read    
     # Currently pushes to dev but should change to push to prod when account is set up.
     # Even further on, this should push to a centralised ECR registry.
     environment: dev
@@ -32,12 +30,18 @@ jobs:
           cache: 'pip'
       
       - name: Unit tests
+        env:
+          RUN_TESTS: ${{ env.RUN_UNIT_TESTS }}
         run: |
-          # Unit tests are broken at the moment. This step will block in the future.
-          cd health_pubs
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pytest || exit 0
+          if [[ "$RUN_UNIT_TESTS" == "true" ]]; then
+            cd health_pubs
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+            pytest
+          else
+            echo "Skipping unit tests due to configuration"
+          fi
+    
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -60,8 +64,8 @@ jobs:
         with:
           context: .
           push: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
-          tags: ${{ env.ECR_REGISTRY }}/${{ env.APP_NAME }}:${{ github.sha }}
-          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.APP_NAME }}:latest
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ github.sha }}
+          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:latest
           cache-to: type=inline
 
   release:
@@ -69,6 +73,10 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment: dev
+    permissions:
+      contents: write
+      id-token: write
+      actions: read   
     needs:
         - build
     outputs:
@@ -87,7 +95,8 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-            role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID_DEV }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
+            # AWS_ACCOUNT_ID_ECR_REGISTRY is used for pulling from a shared ECR repository
+            role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
             role-session-name: retag-image-${{ github.sha }}
             aws-region: ${{ env.AWS_REGION }}
 
@@ -101,10 +110,10 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker pull $ECR_REGISTRY/$APP_NAME:$IMAGE_TAG
-          docker tag $ECR_REGISTRY/$APP_NAME:$IMAGE_TAG $ECR_REGISTRY/$APP_NAME:${{ steps.tag_bump.outputs.new_tag }}
-          docker push $ECR_REGISTRY/$APP_NAME:${{ steps.tag_bump.outputs.new_tag }}
-          echo "app_image=$ECR_REGISTRY/$APP_NAME:${{ steps.tag_bump.outputs.new_tag }}" >> $GITHUB_OUTPUT
+          docker pull $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$IMAGE_TAG $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${{ steps.tag_bump.outputs.new_tag }}
+          docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${{ steps.tag_bump.outputs.new_tag }}
+          echo "app_image=$ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${{ steps.tag_bump.outputs.new_tag }}" >> $GITHUB_OUTPUT
         
   deploy:
     name: Deploy build to ${{ matrix.environment }}
@@ -116,7 +125,9 @@ jobs:
         environment: ["dev", "qat", "test", "prd"]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:
-      contents: read
+      contents: write
+      id-token: write
+      actions: read
     needs:
       - release
     steps:
@@ -144,13 +155,13 @@ jobs:
         task-definition: task-definition.json
         container-name: app
         image: ${{ needs.release.outputs.app_image }}
-  
+    
     - name: Deploy to Amazon ECS
       uses: aws-actions/amazon-ecs-deploy-task-definition@v2
       with:
         task-definition: ${{ steps.render-task-def.outputs.task-definition }}
         service: aw-hpub-euw2-${{ matrix.environment }}-ecssvc-${{ env.APP_NAME }}
-        cluster: aw-hupu-euw2-${{ matrix.environment }}-ecscluster
+        cluster: aw-hpub-euw2-${{ matrix.environment }}-ecscluster
         wait-for-service-stability: true
   
     - name: Determine Base URL

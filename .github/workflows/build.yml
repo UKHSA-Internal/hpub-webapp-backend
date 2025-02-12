@@ -83,8 +83,6 @@ jobs:
         - build
     outputs:
       release_tag: ${{ steps.tag_bump.outputs.new_tag }}
-      app_image: ${{ steps.push.outputs.app_image }}
-      nginx_image: ${{ steps.push.outputs.nginx_image }}
     steps:
       - uses: actions/checkout@v4
 
@@ -115,7 +113,6 @@ jobs:
           docker pull $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$IMAGE_TAG
           docker tag $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$IMAGE_TAG $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${{ steps.tag_bump.outputs.new_tag }}
           docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${{ steps.tag_bump.outputs.new_tag }}
-          echo "app_image=$ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${{ steps.tag_bump.outputs.new_tag }}" >> $GITHUB_OUTPUT
         
   deploy:
     name: Deploy build to ${{ matrix.environment }}
@@ -156,7 +153,8 @@ jobs:
       with:
         task-definition: task-definition.json
         container-name: app
-        image: ${{ needs.release.outputs.app_image }}
+        # We have to construct this as Github Actions will refuse to pass the full URL from 'release' step as it contains an AWS account ID
+        image: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ needs.release.outputs.release_tag }}
     
     - name: Deploy to Amazon ECS
       uses: aws-actions/amazon-ecs-deploy-task-definition@v2

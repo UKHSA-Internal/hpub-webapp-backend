@@ -110,23 +110,46 @@ This project is a Wagtail-Django-based backend application for managing various 
    You can use tools like Postman, curl, or your web browser to send requests to the API.
 
 
-## Deploying the Backend API into ECR
+## Backend Deployment Pipeline
 
-To be able to deploy to Docker, you need to follow the below steps
+This repository contains the CI/CD pipeline for deploying the **Backend Service** using **GitHub Actions** and **AWS ECS**.
 
-- git checkout user-management-backend-api
-- git pull
-- create a new branch  from user-management-backend-api `git checkout -b <branch_name>`
-- cd into `hpub-webapp-backend/`
-- Ensure you have `DockerFile` in the root directory
-- Ensure you have `requirements.txt` in `backend-alpha/` folder
-- Run docker-compose -f docker-compose.yaml build, after successful build
-- Run the below steps to push to ECR:
+### Overview
 
-   - aws ecr get-login-password --region eu-west-2 | docker login --username AWS --password-stdin 897722687594.dkr.ecr.eu-west-2.amazonaws.com
-   - docker tag hpub-backend_web 897722687594.dkr.ecr.eu-west-2.amazonaws.com/hpub-image:auth-backend-test-env-version<version_number>
-   - docker push 897722687594.dkr.ecr.eu-west-2.amazonaws.com/hpub-image:auth-backend-test-env-version<version_number>
+The pipeline consists of **three main jobs**:
 
+1. **Build & Test** → Builds the container image and runs unit tests.
+2. **Release** → Tags and pushes the container image to **Amazon ECR**.
+3. **Deploy** → Updates the **ECS task definition** and deploys the latest image.
+
+### Pipeline Workflow
+
+### **1 Build & Test**
+This step ensures the application is built correctly and passes unit tests and is triggered on pushes to any branch with an open PR and on pushes to main.
+
+**Steps**:
+- Checkout repository
+- Set up Python
+- Run unit tests (currently non-blocking but will be enforced in the future)
+- Build the docker image and if in main, tag the Docker image with a temporary tag
+- Push image to Amazon ECR with the temporary tag
+
+### **2 Release**
+This step creates and pushes a new image tag for deployment and is only run on a push to main.
+
+**Steps**:
+- Checkout repository
+- Generate a new release tag
+- Pull the temporary tag, retag with semver tag, and push the new tag to ECR
+
+### **3 Deploy**
+This step deploys the latest version to AWS ECS. It will only run if the Release step has fun. It automatically runs for all environments (dev, qat, test, prd) if the previous environment deployment was succesful.
+
+**Steps**:
+- Update AWS Systems Manager Parameter Store with the latest tag to avoid conflicts with Terraform.
+- Update the ECS Task Definition to use the new image URI.
+- Updates the container image reference to the new tag in the ECR task definition.
+- Deploys the new task definition and checks performs a smoke test. In the future, this will require more extensive end-to-end-testing.
 
 # Health Publication Backend Folder Structure and Overview
 

@@ -1547,6 +1547,20 @@ class ProductSearchAdminView(APIView):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
+            # --- Apply sorting based on sort_by parameter ---
+            sort_by = request.GET.get("sort_by", "product_title")
+            valid_sort_fields = [
+                "product_title",
+                "created_at",
+                "updated_at",
+                "publish_date",
+                "version_number",
+            ]
+            if sort_by in valid_sort_fields:
+                products = products.order_by(sort_by)
+            else:
+                products = products.order_by("product_title")
+
             # Apply pagination
             paginator = self.pagination_class()
             paginated_products = paginator.paginate_queryset(products, request)
@@ -1759,6 +1773,19 @@ class ProductSearchUserView(APIView):
                     {"detail": str(ErrorMessage.PRODUCT_NOT_FOUND)},
                     status=status.HTTP_404_NOT_FOUND,
                 )
+            # --- Apply sorting based on sort_by parameter ---
+            sort_by = request.GET.get("sort_by", "product_title")
+            valid_sort_fields = [
+                "product_title",
+                "created_at",
+                "updated_at",
+                "publish_date",
+                "version_number",
+            ]
+            if sort_by in valid_sort_fields:
+                products = products.order_by(sort_by)
+            else:
+                products = products.order_by("product_title")
 
             # Apply pagination
             paginator = self.pagination_class()

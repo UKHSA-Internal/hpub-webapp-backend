@@ -9,8 +9,11 @@ from core.utils.check_order_required_fields_aps_decorator import (
 from django.db import transaction
 from django.db.models.signals import post_save
 from django.dispatch import receiver
+from configs.get_secret_config import Config
 
 from .models import Order
+
+config = Config()
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +60,10 @@ def send_event(order_instance):
             response = eventbridge.put_events(
                 Entries=[
                     {
-                        "Source": "hpub.backend",
-                        "DetailType": "OrderPlaced",
+                        "Source": config.get_hpub_event_bridge_source,
+                        "DetailType": config.get_hpub_event_bridge_detail_type_order_creation,
                         "Detail": json.dumps(event_detail),
-                        "EventBusName": "051826714322-Hpubeventbus",
+                        "EventBusName": config.get_hpub_event_bridge_bus_name,
                     }
                 ]
             )

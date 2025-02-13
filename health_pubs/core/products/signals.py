@@ -18,6 +18,9 @@ from .enums import (
     required_event_fields_withdrawn,
 )
 from .models import Product
+from configs.get_secret_config import Config
+
+config = Config()
 
 logger = logging.getLogger(__name__)
 
@@ -120,10 +123,10 @@ def send_product_event(product_instance, event_type, detail_type, required_field
             response = eventbridge.put_events(
                 Entries=[
                     {
-                        "Source": "hpub.backend",
+                        "Source": config.get_hpub_event_bridge_source,
                         "DetailType": detail_type,
                         "Detail": json.dumps(event_detail),
-                        "EventBusName": "051826714322-Hpubeventbus",
+                        "EventBusName": config.get_hpub_event_bridge_bus_name,
                     }
                 ]
             )
@@ -154,7 +157,10 @@ def send_product_draft_event(sender, instance, **kwargs):
     """
     if instance.status == "draft":
         send_product_event(
-            instance, "draft", "ProductDraft", required_event_fields_draft
+            instance,
+            "draft",
+            config.get_hpub_event_bridge_detail_type_product_draft,
+            required_event_fields_draft,
         )
 
 
@@ -165,7 +171,12 @@ def send_product_live_event(sender, instance, **kwargs):
     Signal to send a live product event if the status is 'live'.
     """
     if instance.status == "live":
-        send_product_event(instance, "live", "ProductLive", required_event_fields_live)
+        send_product_event(
+            instance,
+            "live",
+            config.get_hpub_event_bridge_detail_type_product_live,
+            required_event_fields_live,
+        )
 
 
 @receiver(post_save, sender=Product)
@@ -176,7 +187,10 @@ def send_product_archived_event(sender, instance, **kwargs):
     """
     if instance.status == "archived":
         send_product_event(
-            instance, "archived", "ProductArchived", required_event_fields_archived
+            instance,
+            "archived",
+            config.get_hpub_event_bridge_detail_type_product_archive,
+            required_event_fields_archived,
         )
 
 
@@ -188,5 +202,8 @@ def send_product_withdrawn_event(sender, instance, **kwargs):
     """
     if instance.status == "withdrawn":
         send_product_event(
-            instance, "withdrawn", "ProductWithdrawn", required_event_fields_withdrawn
+            instance,
+            "withdrawn",
+            config.get_hpub_event_bridge_detail_type_product_withdrawn,
+            required_event_fields_withdrawn,
         )

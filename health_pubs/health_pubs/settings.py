@@ -18,6 +18,7 @@ AZURE_B2C_TENANT_ID = config.get_azure_b2c_tenant_id()
 DJANGO_SECRET = config.get_django_secret_key()
 public_key = config.get_rsa_public_key()
 private_key = config.get_rsa_private_key()
+HPUB_FRONT_END_URL = config.get_hpub_base_api_url()
 
 # Quick-start development settings - unsuitable for production
 
@@ -33,7 +34,11 @@ DEBUG = True
 
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "testserver", "0.0.0.0", "*"]
 
-CORS_ALLOWED_ORIGINS = ["http://localhost:3000", "http://localhost:5173"]
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    HPUB_FRONT_END_URL,
+]
 
 CSRF_TRUSTED_ORIGINS = ["http://127.0.0.1:8085"]
 

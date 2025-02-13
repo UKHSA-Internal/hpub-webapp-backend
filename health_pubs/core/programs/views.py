@@ -197,43 +197,9 @@ class ProgramListViewSet(viewsets.ReadOnlyModelViewSet):
         List featured programs with the same filtering logic.
         """
         try:
-            # Step 1: Filter Featured Programs with Diseases or Vaccinations
-            featured_programs_with_diseases_or_vaccinations = Program.objects.filter(
-                Q(diseases__isnull=False) | Q(vaccinations__isnull=False),
-                is_featured=True,
-            ).distinct()
-
-            # Step 2: Further filter Programs where associated Diseases or Vaccinations are tied to a Product
-
-            # Subquery to check existence of Products linked via Diseases
-            products_qs_disease = Product.objects.filter(
-                program_id=OuterRef("pk"),
-                update_ref__diseases_ref__programs=OuterRef("pk"),
-            )
-
-            # Subquery to check existence of Products linked via Vaccinations
-            products_qs_vaccination = Product.objects.filter(
-                program_id=OuterRef("pk"),
-                update_ref__vaccination_ref__programs=OuterRef("pk"),
-            )
-
-            # Annotate Programs with boolean flags indicating the existence of related Products
-            featured_programs_final = (
-                featured_programs_with_diseases_or_vaccinations.annotate(
-                    has_related_product_disease=Exists(products_qs_disease),
-                    has_related_product_vaccination=Exists(products_qs_vaccination),
-                )
-                .filter(
-                    Q(has_related_product_disease=True)
-                    | Q(has_related_product_vaccination=True)
-                )
-                .distinct()
-            )
-
-            # Serialize the filtered Programs
-            serializer = self.get_serializer(featured_programs_final, many=True)
+            featured_programs = self.get_filtered_programs(is_featured=True)
+            serializer = self.get_serializer(featured_programs, many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
-
         except Exception as e:
             logger.exception("Error fetching featured programs")
             return Response(
@@ -251,41 +217,8 @@ class ProgramListViewSet(viewsets.ReadOnlyModelViewSet):
         and those diseases or vaccinations are tied to at least one product.
         """
         try:
-            # Step 1: Filter Programs with Diseases or Vaccinations
-            programs_with_diseases_or_vaccinations = Program.objects.filter(
-                Q(diseases__isnull=False) | Q(vaccinations__isnull=False)
-            ).distinct()
-
-            # Step 2: Further filter Programs where associated Diseases or Vaccinations are tied to a Product
-
-            # Subquery to check existence of Products linked via Diseases
-            products_qs_disease = Product.objects.filter(
-                program_id=OuterRef("pk"),
-                update_ref__diseases_ref__programs=OuterRef("pk"),
-            )
-
-            # Subquery to check existence of Products linked via Vaccinations
-            products_qs_vaccination = Product.objects.filter(
-                program_id=OuterRef("pk"),
-                update_ref__vaccination_ref__programs=OuterRef("pk"),
-            )
-
-            # Annotate Programs with boolean flags indicating the existence of related Products
-            programs_final = (
-                programs_with_diseases_or_vaccinations.annotate(
-                    has_related_product_disease=Exists(products_qs_disease),
-                    has_related_product_vaccination=Exists(products_qs_vaccination),
-                )
-                .filter(
-                    Q(has_related_product_disease=True)
-                    | Q(has_related_product_vaccination=True)
-                )
-                .distinct()
-            )
-
-            # Serialize the filtered Programs
-            serializer = self.get_serializer(programs_final, many=True)
-
+            programs = self.get_filtered_programs()
+            serializer = self.get_serializer(programs, many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
 
         except Exception as e:

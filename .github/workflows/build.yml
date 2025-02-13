@@ -196,7 +196,7 @@ jobs:
         environment_prefix: ${{ steps.url.outputs.prefix }}
       shell: bash
       run: |
-        response=$(curl -s -o /dev/null -w "%{http_code}" https://$environment_prefix.test-and-trace.nhs.uk)
+        response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" https://$environment_prefix.test-and-trace.nhs.uk/)
         if [ "$response" -ne 200 ]; then
           echo "Post-Deployment tests failed!"
           exit 1

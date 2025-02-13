@@ -2231,7 +2231,7 @@ class AdminProductFilterView(APIView):
             if status_filter:
                 query &= Q(status__in=status_filter)
             if product_code:
-                query &= Q(product_code__icontains=product_code)
+                query &= Q(product_code_no_dashes__icontains=product_code)
 
             # Fetch matching products
             products = Product.objects.filter(query)

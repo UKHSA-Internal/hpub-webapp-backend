@@ -714,6 +714,24 @@ class ProductAdminListView(APIView):
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
 
+            # --- Optional: Apply sorting if 'sort_by' parameter is provided ---
+            sort_by = request.GET.get("sort_by")
+            if sort_by:
+                valid_sort_fields = [
+                    "product_title",
+                    "-product_title",
+                    "created_at",
+                    "-created_at",
+                    "updated_at",
+                    "-updated_at",
+                    "publish_date",
+                    "-publish_date",
+                ]
+                if sort_by in valid_sort_fields:
+                    products = products.order_by(sort_by)
+                else:
+                    logger.warning("Invalid sort_by parameter provided: %s", sort_by)
+
             paginator = CustomPagination()
             paginated_products = paginator.paginate_queryset(products, request)
             # for debugging
@@ -861,6 +879,24 @@ class ProductUsersListView(APIView):
                     ErrorMessage.PRODUCT_NOT_FOUND,
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
+
+            # --- Optional: Apply sorting if 'sort_by' parameter is provided ---
+            sort_by = request.GET.get("sort_by")
+            if sort_by:
+                valid_sort_fields = [
+                    "product_title",
+                    "-product_title",
+                    "created_at",
+                    "-created_at",
+                    "updated_at",
+                    "-updated_at",
+                    "publish_date",
+                    "-publish_date",
+                ]
+                if sort_by in valid_sort_fields:
+                    products = products.order_by(sort_by)
+                else:
+                    logger.warning("Invalid sort_by parameter provided: %s", sort_by)
 
             # Initialize custom pagination
             paginator = CustomPagination()

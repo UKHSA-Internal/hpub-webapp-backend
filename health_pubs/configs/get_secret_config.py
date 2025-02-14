@@ -235,7 +235,13 @@ class Config:
     @staticmethod
     def get_rsa_private_key():
         """Retrieve the RSA private key from AWS Secrets Manager."""
-        secret_data = get_secret_value("hpub/rsa/keys")
+        # Retrieve the secret ID from your configuration (from .env.dev)
+        secret_id = Config.get_non_secret_value("RSA_KEYS_SECRET_ID")
+        if not secret_id:
+            logger.error("RSA_KEYS_SECRET_ID is not set in the environment.")
+            raise EnvironmentError("RSA_KEYS_SECRET_ID is not set in the environment.")
+        secret_data = get_secret_value(secret_id)
+
         # Parse the JSON to extract the private key value
         private_key_data = json.loads(secret_data)
         return private_key_data["RSA_PRIVATE_KEY"]
@@ -243,7 +249,12 @@ class Config:
     @staticmethod
     def get_rsa_public_key():
         """Retrieve the RSA public key from AWS Secrets Manager."""
-        secret_data = get_secret_value("hpub/rsa/keys")
+        # Retrieve the secret ID from your configuration (from .env.dev)
+        secret_id = Config.get_non_secret_value("RSA_KEYS_SECRET_ID")
+        if not secret_id:
+            logger.error("RSA_KEYS_SECRET_ID is not set in the environment.")
+            raise EnvironmentError("RSA_KEYS_SECRET_ID is not set in the environment.")
+        secret_data = get_secret_value(secret_id)
         # Parse the JSON to extract the public key value
         public_key_data = json.loads(secret_data)
         return public_key_data["RSA_PUBLIC_KEY"]

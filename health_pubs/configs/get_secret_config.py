@@ -225,6 +225,10 @@ class Config:
         return Config.get_value("DJANGO_SECRET_KEY", is_secret=True)
 
     @staticmethod
+    def get_redis_secret_value():
+        return Config.get_value("REDIS_SECRET_VALUE", is_secret=True)
+
+    @staticmethod
     def get_postgres_connection_regex():
         """Retrieve PostgreSQL connection regex from secrets manager."""
         pattern = Config.get_value("POSTGRES_CONNECTION_REGEX", is_secret=True)

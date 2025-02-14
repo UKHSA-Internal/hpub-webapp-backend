@@ -27,7 +27,8 @@ from core.utils.custom_token_authentication import CustomTokenAuthentication
 from core.utils.extract_file_metadata import get_file_metadata
 from core.utils.generate_s3_presigned_url import generate_presigned_urls
 
-# from core.utils.get_product_similarity import find_similar_products
+from django.utils.decorators import method_decorator
+from django.views.decorators.cache import cache_page
 from core.utils.product_recommendation_system import get_recommended_products
 from core.vaccinations.models import Vaccination
 from core.vaccinations.serializers import VaccinationSerializer
@@ -863,6 +864,7 @@ class ProductAdminListView(APIView):
             )
 
 
+@method_decorator(cache_page(60 * 15), name="dispatch")
 class ProductUsersListView(APIView):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
@@ -1230,82 +1232,6 @@ class ProductDetailDelete(View):
         except Exception:
             logger.exception(
                 f"An unexpected error occurred while archiving the product with product_code: {decoded_product_code}"
-            )
-            return handle_error(
-                ErrorCode.INTERNAL_SERVER_ERROR,
-                ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=500,
-            )
-
-
-# previous, please check if this is still valid
-# class ProductDetailPageDelete(View):
-# please remove if not.
-class ProductDeleteAll(View):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
-
-    def delete(self, request, product_code, *args, **kwargs):
-
-        decoded_product_code = unquote(product_code)
-        logger.info(
-            f"Attempting to delete product with product_code: {decoded_product_code}"
-        )
-        try:
-            product = Product.objects.filter(
-                product_code__startswith=decoded_product_code
-            ).first()
-            logger.info("deleted_product", product)
-
-            if not product:
-                logger.warning(
-                    f"No product found with product_code: {decoded_product_code}"
-                )
-                return handle_error(
-                    ErrorCode.PRODUCT_NOT_FOUND,
-                    ErrorMessage.PRODUCT_NOT_FOUND,
-                    status_code=HTTP_404_NOT_FOUND,
-                )
-
-            # Allow deletion only if product status is 'draft' or 'live'
-            if product.status not in ["draft", "live"]:
-                logger.warning(
-                    f"Cannot delete product {decoded_product_code} as it is not in draft or live status."
-                )
-                return handle_error(
-                    ErrorCode.INVALID_DATA,
-                    ErrorMessage.INVALID_DATA,
-                    status_code=HTTP_403_FORBIDDEN,
-                )
-
-            # Permanently delete the product from the database
-            product.delete()
-            logger.info(
-                f"Product with product_code {decoded_product_code} deleted successfully."
-            )
-
-            return JsonResponse(
-                {"message": "Product deleted successfully."},
-                status=HTTP_204_NO_CONTENT,
-            )
-
-        except DatabaseError:
-            logger.exception("Database error occurred while deleting product.")
-            return handle_error(
-                ErrorCode.DATABASE_ERROR,
-                ErrorMessage.DATABASE_ERROR,
-                status_code=500,
-            )
-        except TimeoutError:
-            logger.exception("Timeout error occurred while deleting product.")
-            return handle_error(
-                ErrorCode.TIMEOUT_ERROR,
-                ErrorMessage.TIMEOUT_ERROR,
-                status_code=504,
-            )
-        except Exception:
-            logger.exception(
-                f"An unexpected error occurred while deleting the product with product_code: {decoded_product_code}"
             )
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,

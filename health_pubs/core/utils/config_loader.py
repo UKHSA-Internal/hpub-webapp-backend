@@ -10,7 +10,7 @@ def load_environment():
     """
     # Get the environment type, defaulting to DEV if not set
     env = os.environ.get("ENVIRONMENT", "DEV").upper()
-    allowed_envs = {"TEST", "DEV", "UAT", "PROD"}
+    allowed_envs = {"TEST", "DEV", "UAT", "PRD"}
     if env not in allowed_envs:
         raise ValueError(
             f"Unsupported ENVIRONMENT '{env}'. Supported values are: {allowed_envs}"

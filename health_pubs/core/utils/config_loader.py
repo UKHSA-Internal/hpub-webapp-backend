@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 def load_environment():
     """
     Load environment variables from the appropriate .env file based on the ENVIRONMENT variable.
-    Supported environments: TEST, DEV, UAT, PROD.
+    Supported environments: TEST, DEV, UAT, PRD.
     Defaults to DEV if not provided.
     """
     # Get the environment type, defaulting to DEV if not set

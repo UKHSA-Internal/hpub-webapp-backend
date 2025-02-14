@@ -726,6 +726,8 @@ class ProductAdminListView(APIView):
                     "-updated_at",
                     "publish_date",
                     "-publish_date",
+                    "version_number",
+                    "-version_number",
                 ]
                 if sort_by in valid_sort_fields:
                     products = products.order_by(sort_by)
@@ -892,6 +894,8 @@ class ProductUsersListView(APIView):
                     "-updated_at",
                     "publish_date",
                     "-publish_date",
+                    "version_number",
+                    "-version_number",
                 ]
                 if sort_by in valid_sort_fields:
                     products = products.order_by(sort_by)
@@ -1587,11 +1591,17 @@ class ProductSearchAdminView(APIView):
             sort_by = request.GET.get("sort_by", "product_title")
             valid_sort_fields = [
                 "product_title",
+                "-product_title",
                 "created_at",
+                "-created_at",
                 "updated_at",
+                "-updated_at",
                 "publish_date",
+                "-publish_date",
                 "version_number",
+                "-version_number",
             ]
+
             if sort_by in valid_sort_fields:
                 products = products.order_by(sort_by)
             else:
@@ -1813,10 +1823,15 @@ class ProductSearchUserView(APIView):
             sort_by = request.GET.get("sort_by", "product_title")
             valid_sort_fields = [
                 "product_title",
+                "-product_title",
                 "created_at",
+                "-created_at",
                 "updated_at",
+                "-updated_at",
                 "publish_date",
+                "-publish_date",
                 "version_number",
+                "-version_number",
             ]
             if sort_by in valid_sort_fields:
                 products = products.order_by(sort_by)
@@ -2086,10 +2101,15 @@ class UsersProductFilterView(APIView):
             # Sort the products
             valid_sort_fields = [
                 "product_title",
+                "-product_title",
                 "created_at",
+                "-created_at",
                 "updated_at",
+                "-updated_at",
                 "publish_date",
+                "-publish_date",
                 "version_number",
+                "-version_number",
             ]
             if sort_by in valid_sort_fields:
                 products = products.order_by(sort_by)
@@ -2303,12 +2323,14 @@ class AdminProductFilterView(APIView):
             valid_sort_fields = [
                 "product_title",
                 "-product_title",
-                "updated_at",
-                "-updated_at",
                 "created_at",
                 "-created_at",
+                "updated_at",
+                "-updated_at",
                 "publish_date",
                 "-publish_date",
+                "version_number",
+                "-version_number",
             ]
             products = (
                 products.order_by(sort_by)

@@ -15,6 +15,8 @@ load_environment()
 
 logger = logging.getLogger(__name__)
 
+RSA_KEYS_SECRET_ID_ERROR_MSG = "RSA_KEYS_SECRET_ID is not set in the environment."
+
 
 class Config:
     """Class to retrieve and parse database connection information and other configurations."""
@@ -238,8 +240,8 @@ class Config:
         # Retrieve the secret ID from your configuration (from .env.dev)
         secret_id = Config.get_non_secret_value("RSA_KEYS_SECRET_ID")
         if not secret_id:
-            logger.error("RSA_KEYS_SECRET_ID is not set in the environment.")
-            raise EnvironmentError("RSA_KEYS_SECRET_ID is not set in the environment.")
+            logger.error(RSA_KEYS_SECRET_ID_ERROR_MSG)
+            raise EnvironmentError(RSA_KEYS_SECRET_ID_ERROR_MSG)
         secret_data = get_secret_value(secret_id)
 
         # Parse the JSON to extract the private key value
@@ -252,8 +254,8 @@ class Config:
         # Retrieve the secret ID from your configuration (from .env.dev)
         secret_id = Config.get_non_secret_value("RSA_KEYS_SECRET_ID")
         if not secret_id:
-            logger.error("RSA_KEYS_SECRET_ID is not set in the environment.")
-            raise EnvironmentError("RSA_KEYS_SECRET_ID is not set in the environment.")
+            logger.error(RSA_KEYS_SECRET_ID_ERROR_MSG)
+            raise EnvironmentError(RSA_KEYS_SECRET_ID_ERROR_MSG)
         secret_data = get_secret_value(secret_id)
         # Parse the JSON to extract the public key value
         public_key_data = json.loads(secret_data)

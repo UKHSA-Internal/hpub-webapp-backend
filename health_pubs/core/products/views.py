@@ -71,6 +71,7 @@ PRODUCT_CODE_PATTERN = r"^[A-Za-z0-9_-]+$"
 # Constants for log messages
 LOG_MSG_S3_URL_EXTRACTION = "Extracted S3 URLs for presigned URL generation: %s"
 UNEXPECTED_ERROR_MSG = "An unexpected error occurred."
+INTERNAL_ERROR_MSG = "An unexpected error occurred while searching for products."
 
 
 def get_bcp47_language_code(language_name):
@@ -208,35 +209,62 @@ def get_next_version_number(program_id, product_key, iso_language_code):
         return 1  # Start with version 001
 
 
+def _extract_urls_from_downloads(product_downloads):
+    """Helper to extract s3_bucket_url values from a product_downloads dict."""
+    urls = []
+    # Extract main_download_url
+    main_download = product_downloads.get("main_download_url")
+    if isinstance(main_download, dict):
+        s3_url = main_download.get("s3_bucket_url")
+        if s3_url:
+            urls.append(s3_url)
+
+    # Extract other download types
+    for key in ["web_download_url", "print_download_url", "transcript_url"]:
+        downloads = product_downloads.get(key, [])
+        if isinstance(downloads, list):
+            for item in downloads:
+                if isinstance(item, dict):
+                    s3_url = item.get("s3_bucket_url")
+                    if s3_url:
+                        urls.append(s3_url)
+    return urls
+
+
+def _update_downloads_with_presigned(product_downloads, presigned_urls):
+    """Helper to update product_downloads dict with presigned URLs.
+
+    Returns True if any update was performed.
+    """
+    updated = False
+    # Update main_download_url
+    main_download = product_downloads.get("main_download_url")
+    if isinstance(main_download, dict):
+        s3_url = main_download.get("s3_bucket_url", "")
+        if s3_url in presigned_urls:
+            main_download["URL"] = presigned_urls[s3_url]
+            updated = True
+
+    # Update additional download types
+    for key in ["web_download_url", "print_download_url", "transcript_url"]:
+        downloads = product_downloads.get(key, [])
+        if isinstance(downloads, list):
+            for item in downloads:
+                s3_url = item.get("s3_bucket_url", "")
+                if s3_url in presigned_urls:
+                    item["URL"] = presigned_urls[s3_url]
+                    updated = True
+    return updated
+
+
 def extract_s3_urls(products_data):
     """Extract S3 URLs from products data for presigned URL generation."""
     all_download_urls = []
     for product in products_data:
-        update_refs = product.get("update_ref", {})
-        # for debugging
-        # logger.info('update_refs: %s', update_refs)
-
+        update_refs = product.get("update_ref")
         if isinstance(update_refs, dict):
             product_downloads = update_refs.get("product_downloads", {})
-            # for debugging
-            # logger.info('product_downloads: %s', product_downloads)
-
-            # Check all download types (main, web, print, transcript)
-            if "main_download_url" in product_downloads:
-                main_download = product_downloads.get("main_download_url", {})
-                if isinstance(main_download, dict) and "s3_bucket_url" in main_download:
-                    all_download_urls.append(main_download["s3_bucket_url"])
-
-            for download_type in [
-                "web_download_url",
-                "print_download_url",
-                "transcript_url",
-            ]:
-                downloads = product_downloads.get(download_type, [])
-                if isinstance(downloads, list):
-                    for item in downloads:
-                        if isinstance(item, dict) and "s3_bucket_url" in item:
-                            all_download_urls.append(item["s3_bucket_url"])
+            all_download_urls.extend(_extract_urls_from_downloads(product_downloads))
         else:
             logger.warning(
                 "Expected update_ref to be a dictionary but got %s",
@@ -248,38 +276,71 @@ def extract_s3_urls(products_data):
 def update_product_urls(products_data, presigned_urls):
     """Update product URLs with presigned URLs in the serialized data."""
     for product in products_data:
-        update_refs = product.get("update_ref", {})
-        # for debugging
-        # logger.info('update_refs: %s', update_refs)
+        update_refs = product.get("update_ref")
         if isinstance(update_refs, dict):
             product_downloads = update_refs.get("product_downloads", {})
-            # for debugging
-            # logger.info('product_downloads: %s', product_downloads)
-
-            # Update the URL for main_download_url
-            if "main_download_url" in product_downloads:
-                main_download = product_downloads.get("main_download_url", {})
-                s3_url = main_download.get("s3_bucket_url", "") if main_download else ""
-                if s3_url in presigned_urls:
-                    main_download["URL"] = presigned_urls[s3_url]
-
-            # Update URLs for web_download_url, print_download_url, transcript_url
-            for download_type in [
-                "web_download_url",
-                "print_download_url",
-                "transcript_url",
-            ]:
-                downloads = product_downloads.get(download_type, [])
-                if isinstance(downloads, list):
-                    for item in downloads:
-                        s3_url = item.get("s3_bucket_url", "")
-                        if s3_url in presigned_urls:
-                            item["URL"] = presigned_urls[s3_url]
+            _update_downloads_with_presigned(product_downloads, presigned_urls)
         else:
             logger.warning(
                 "Expected update_ref to be a dictionary but got %s",
                 type(update_refs).__name__,
             )
+
+
+def _collect_download_urls(products):
+    """Collect all download URLs from products for presigned URL generation."""
+    all_download_urls = []
+    for product in products:
+        product_update = product.update_ref  # Assuming update_ref is an attribute
+        if product_update:
+            product_downloads = product_update.product_downloads
+            all_download_urls.extend(_extract_urls_from_downloads(product_downloads))
+    return all_download_urls
+
+
+def _update_product_downloads_with_presigned_urls(product_data, presigned_urls):
+    """Update product download URLs with presigned URLs."""
+    for product in product_data:
+        logger.info("Updating Product: %s", product.product_id)
+
+        # Fetch the product instance
+        product_instance = Product.objects.filter(product_id=product.product_id).first()
+        if product_instance and product_instance.update_ref:
+            update_refs = product_instance.update_ref
+            product_downloads = update_refs.product_downloads
+            if _update_downloads_with_presigned(product_downloads, presigned_urls):
+                update_refs.save()
+        else:
+            logger.warning(
+                "No product_instance or update_ref found for product_id: %s",
+                product.product_id,
+            )
+
+
+def _prepare_response_data(products, serializer, product_code, product_title):
+    matched_titles = list(products.values_list("product_title", flat=True))
+    matched_codes = list(products.values_list("product_code", flat=True))
+    response_data = {
+        "matched_product_titles": matched_titles if product_title else None,
+        "matched_product_codes": matched_codes if product_code else None,
+        "product_info": list(serializer.data),
+    }
+    return response_data
+
+
+def get_product(product_code: str) -> Optional[Product]:
+    """Fetch the latest version of the product by its product code.
+    Returns None if the product is not found.
+    """
+    try:
+        product = (
+            Product.objects.filter(product_code__startswith=product_code)
+            .order_by("-version_number")
+            .first()
+        )
+        return product
+    except Product.DoesNotExist:
+        return None
 
 
 def handle_exceptions(exception):
@@ -331,117 +392,6 @@ def _handle_timeout_error():
         ErrorMessage.TIMEOUT_ERROR,
         status_code=status.HTTP_504_GATEWAY_TIMEOUT,
     )
-
-
-def _prepare_response_data(products, serializer, product_code, product_title):
-    matched_titles = list(products.values_list("product_title", flat=True))
-    matched_codes = list(products.values_list("product_code", flat=True))
-    response_data = {
-        "matched_product_titles": matched_titles if product_title else None,
-        "matched_product_codes": matched_codes if product_code else None,
-        "product_info": list(serializer.data),
-    }
-    return response_data
-
-
-def _collect_download_urls(products):
-    """Collect all download URLs from products for presigned URL generation."""
-    all_download_urls = []
-    for product in products:
-        product_update = product.update_ref  # Assuming update_ref is a related field
-        if product_update:
-            product_downloads = product_update.product_downloads
-            # Check main download URL
-            if (
-                isinstance(product_downloads, dict)
-                and "main_download_url" in product_downloads
-            ):
-                main_download = product_downloads.get("main_download_url", {})
-                if "s3_bucket_url" in main_download:
-                    all_download_urls.append(main_download["s3_bucket_url"])
-
-            # Check additional download types
-            for download_type in [
-                "web_download_url",
-                "print_download_url",
-                "transcript_url",
-            ]:
-                downloads = product_downloads.get(download_type, [])
-                if isinstance(downloads, list):
-                    for item in downloads:
-                        if isinstance(item, dict) and "s3_bucket_url" in item:
-                            all_download_urls.append(item["s3_bucket_url"])
-    return all_download_urls
-
-
-def _update_product_downloads_with_presigned_urls(product_data, presigned_urls):
-    """Update product download URLs with presigned URLs."""
-    for product in product_data:
-        logger.info("Updating Product: %s", product.product_id)
-
-        # Fetch the product from the database
-        product_instance = Product.objects.filter(product_id=product.product_id).first()
-
-        if (
-            product_instance and product_instance.update_ref
-        ):  # Ensure update_ref is not None
-            update_refs = product_instance.update_ref
-
-            # Now update_refs will refer to the ProductUpdate instance
-            product_downloads = update_refs.product_downloads  # Access directly
-
-            # Update main_download_url
-            if "main_download_url" in product_downloads:
-                main_download = product_downloads[
-                    "main_download_url"
-                ]  # Access directly
-                s3_url = main_download["s3_bucket_url"]  # Access directly
-                logger.info("Original main_download_url: %s", s3_url)
-
-                # Always replace with new presigned URL if exists
-                if s3_url in presigned_urls:
-                    new_url = presigned_urls[s3_url]
-                    logger.info("Replacing with new presigned URL: %s", new_url)
-                    main_download["URL"] = new_url
-                    # Save the update back to the database
-                    update_refs.save()
-
-            # Update other download types
-            for download_type in [
-                "web_download_url",
-                "print_download_url",
-                "transcript_url",
-            ]:
-                if download_type in product_downloads:
-                    downloads = product_downloads[download_type]  # Access directly
-                    if isinstance(downloads, list):
-                        for item in downloads:
-                            s3_url = item["s3_bucket_url"]  # Access directly
-                            logger.info("Original %s: %s", download_type, s3_url)
-
-                            # Always attempt to replace with new presigned URL
-                            if s3_url in presigned_urls:
-                                new_url = presigned_urls[s3_url]
-                                logger.info(
-                                    "Replacing %s with new presigned URL: %s",
-                                    download_type,
-                                    new_url,
-                                )
-                                item["URL"] = new_url
-                            else:
-                                logger.info(
-                                    "No replacement found for %s: %s",
-                                    download_type,
-                                    s3_url,
-                                )
-
-            # Save the changes to the product downloads back to the database
-            update_refs.save()
-        else:
-            logger.warning(
-                "No product_instance or update_ref found for product_id: %s",
-                product.product_id,
-            )
 
 
 class CustomPagination(PageNumberPagination):
@@ -1330,7 +1280,7 @@ class ProductStatusUpdateView(View):
             return _handle_invalid_query_param()
 
         try:
-            product = self.get_product(decoded_product_code)
+            product = get_product(decoded_product_code)
             if not product:
                 return handle_error(
                     ErrorCode.PRODUCT_NOT_FOUND,
@@ -1414,14 +1364,6 @@ class ProductStatusUpdateView(View):
         """
         allowed_next_statuses = self.ALLOWED_TRANSITIONS.get(current_status, [])
         return new_status not in allowed_next_statuses
-
-    def get_product(self, product_code: str) -> Product:
-        """Retrieve the latest version of the product by its product code."""
-        return (
-            Product.objects.filter(product_code__startswith=product_code)
-            .order_by("-version_number")
-            .first()
-        )
 
     def get_status_from_request(self, request) -> str:
         """Extract the new status from the request body."""
@@ -1571,9 +1513,7 @@ class ProductSearchAdminView(APIView):
         except ValidationError:
             return _handle_invalid_query_param()
         except Exception:
-            logger.exception(
-                "An unexpected error occurred while searching for products."
-            )
+            logger.exception(INTERNAL_ERROR_MSG)
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,
@@ -1737,9 +1677,7 @@ class ProductSearchUserView(APIView):
         except ValidationError:
             return _handle_invalid_query_param()
         except Exception:
-            logger.exception(
-                "An unexpected error occurred while searching for products."
-            )
+            logger.exception(INTERNAL_ERROR_MSG)
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,
@@ -1884,9 +1822,7 @@ class UsersProductFilterView(APIView):
         except ValidationError:
             return _handle_invalid_query_param()
         except Exception:
-            logger.exception(
-                "An unexpected error occurred while searching for products."
-            )
+            logger.exception(INTERNAL_ERROR_MSG)
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,
@@ -1992,9 +1928,7 @@ class AdminProductFilterView(APIView):
         except ValidationError:
             return _handle_invalid_query_param()
         except Exception:
-            logger.exception(
-                "An unexpected error occurred while searching for products."
-            )
+            logger.exception(INTERNAL_ERROR_MSG)
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,
@@ -2135,7 +2069,7 @@ class ProductPatchView(View):
         logger.info(f"Updating product with product_code: {decoded_product_code}")
 
         try:
-            product = self.get_product(decoded_product_code)
+            product = get_product(decoded_product_code)
             if not product:
                 logger.warning(
                     f"No product found with product_code: {decoded_product_code}"
@@ -2234,20 +2168,6 @@ class ProductPatchView(View):
                 ErrorMessage.INTERNAL_SERVER_ERROR,
                 status_code=500,
             )
-
-    def get_product(self, product_code: str) -> Optional[Product]:
-        """Fetch the latest version of the product by its product code.
-        Returns None if the product is not found.
-        """
-        try:
-            product = (
-                Product.objects.filter(product_code__startswith=product_code)
-                .order_by("-version_number")
-                .first()
-            )
-            return product
-        except Product.DoesNotExist:
-            return None
 
     def process_file_urls(self, product_type: str, product_downloads: dict) -> dict:
         """Process file URLs for the product based on the product type and downloads."""

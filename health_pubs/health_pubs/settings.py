@@ -19,7 +19,7 @@ DJANGO_SECRET = config.get_django_secret_key()
 public_key = config.get_rsa_public_key()
 private_key = config.get_rsa_private_key()
 HPUB_FRONT_END_URL = config.get_hpub_base_api_url()
-REDIS_SECRET = config.get_redis_secret_value()
+
 
 # Quick-start development settings - unsuitable for production
 

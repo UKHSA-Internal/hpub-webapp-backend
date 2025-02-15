@@ -2027,25 +2027,6 @@ class ProductUpdateView(View):
                 status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-    def handle_error(
-        self, error_code: str, error_message: str, status_code: int
-    ) -> JsonResponse:
-        """
-        Handle errors by returning a JSON response with the given error code, message, and status code.
-
-        Args:
-            error_code (str): The error code representing the type of error.
-            error_message (str): A message describing the error.
-            status_code (int): The HTTP status code to be returned.
-
-        Returns:
-            JsonResponse: A JSON response with the error details.
-        """
-        return JsonResponse(
-            {"error_code": error_code, "error_message": error_message},
-            status=status_code,
-        )
-
 
 class ProductPatchView(View):
     authentication_classes = [CustomTokenAuthentication]

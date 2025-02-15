@@ -35,6 +35,8 @@ class ErrorCode(Enum):
     USER_REF_REQUIRED = "USER_REF_REQUIRED"
     PAGE_CREATION_ERROR = "PAGE_CREATION_ERROR"
     USER_INFO_REQUIRED = "USER_INFO_REQUIRED"
+    MISSING_ORDER_FROM_DATE = "MISSING_ORDER_FROM_DATE"
+    ATTRIBUTE_ERROR = "An attribute error occured."
 
     def __str__(self):
         return self.value
@@ -77,6 +79,13 @@ class ErrorMessage(Enum):
         "An error occurred while creating or retrieving the parent page."
     )
     USER_INFO_REQUIRED = "User delivery information is required."
+    MISSING_ORDER_FROM_DATE = "order_from_date must be provided when available_from_choice is 'specific_date'."
+    ATTRIBUTE_ERROR = (
+        "An error occurred while processing the update. Please check the data provided.",
+    )
+    LANGUAGE_ID_DOES_NOT_EXIST = "Language ID does not exist."
+    PROGRAM_NAME_DOES_NOT_EXIST = "Program name does not exist."
+    INVALID_PROGRAM_OR_LANGUAGE = "Invalid program or language."
 
     @staticmethod
     def product_not_live(product_code):

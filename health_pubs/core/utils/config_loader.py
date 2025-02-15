@@ -5,12 +5,12 @@ from dotenv import load_dotenv
 def load_environment():
     """
     Load environment variables from the appropriate .env file based on the ENVIRONMENT variable.
-    Supported environments: TEST, DEV, UAT, PROD.
+    Supported environments: TEST, DEV, UAT, PRD.
     Defaults to DEV if not provided.
     """
     # Get the environment type, defaulting to DEV if not set
     env = os.environ.get("ENVIRONMENT", "DEV").upper()
-    allowed_envs = {"TEST", "DEV", "UAT", "PROD"}
+    allowed_envs = {"TEST", "DEV", "UAT", "PRD"}
     if env not in allowed_envs:
         raise ValueError(
             f"Unsupported ENVIRONMENT '{env}'. Supported values are: {allowed_envs}"

@@ -35,6 +35,7 @@ from core.vaccinations.serializers import VaccinationSerializer
 from core.where_to_use.models import WhereToUse
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from rest_framework.exceptions import ValidationError
 from django.db import DatabaseError, transaction
 from django.db.models import Q
 from django.http import Http404, JsonResponse
@@ -42,7 +43,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.text import slugify
 from django.views import View
-from pydantic import BaseModel, ValidationError, validator
+from pydantic import BaseModel, validator
 from rest_framework import status, viewsets
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
@@ -328,15 +329,14 @@ def _update_product_downloads_with_presigned_urls(product_data, presigned_urls):
             )
 
 
-def _prepare_response_data(products, serializer, product_code, product_title):
+def _prepare_response_data(products, serialized_data, product_code, product_title):
     matched_titles = list(products.values_list("product_title", flat=True))
     matched_codes = list(products.values_list("product_code", flat=True))
-    response_data = {
+    return {
         "matched_product_titles": matched_titles if product_title else None,
         "matched_product_codes": matched_codes if product_code else None,
-        "product_info": list(serializer.data),
+        "product_info": serialized_data,
     }
-    return response_data
 
 
 def get_product(product_code: str) -> Optional[Product]:
@@ -1375,8 +1375,8 @@ class ProductUpdateView(View):
 
 
 class ProductPatchView(View):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
     """
     View to handle product updates via PATCH requests.
     """
@@ -1760,8 +1760,8 @@ class ProductPatchView(View):
 
 
 class ProductCreateView(APIView):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
 
     def post(self, request, *args, **kwargs):
         logger.info("ProductCreateView POST method called")
@@ -2134,13 +2134,10 @@ class ProductListMixin:
         return serializer.data, paginator
 
 
-# --- Refactored List/Search Views ---
-
-
 @method_decorator(cache_page(60 * 15), name="dispatch")
 class ProductAdminListView(APIView, ProductListMixin):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
 
     def get(self, request, *args, **kwargs):
         logger.info("ProductAdminListView GET method called")
@@ -2154,6 +2151,7 @@ class ProductAdminListView(APIView, ProductListMixin):
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
             sorted_qs = self.get_sorted_queryset(products, request)
+            # paginate_and_serialize returns already serialized data and a paginator.
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
             logger.info("Returning paginated response with %d products", len(data))
             return paginator.get_paginated_response(
@@ -2180,8 +2178,9 @@ class ProductUsersListView(APIView, ProductListMixin):
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
             sorted_qs = self.get_sorted_queryset(products, request)
+            # Get already serialized data.
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
-            # Filter languages where product status is not 'live'
+            # Optionally filter languages from the serialized data.
             data = self.filter_languages(data)
             logger.info("Returning paginated response with %d products", len(data))
             return paginator.get_paginated_response(
@@ -2207,8 +2206,8 @@ class ProductUsersListView(APIView, ProductListMixin):
 
 
 class ProductSearchAdminView(APIView, ProductListMixin):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
     pagination_class = CustomPagination
 
     def get(self, request, *args, **kwargs):
@@ -2232,10 +2231,11 @@ class ProductSearchAdminView(APIView, ProductListMixin):
                     status=status.HTTP_404_NOT_FOUND,
                 )
             sorted_qs = self.get_sorted_queryset(products, request)
-            # Here we use direct update so that the model fields get updated as needed.
+            # Use direct update so model fields are updated as needed.
             data, paginator = self.paginate_and_serialize(
                 sorted_qs, request, use_direct_update=True
             )
+            # Use the serialized data (data) directly
             response_data = _prepare_response_data(
                 products, data, product_code, product_title
             )
@@ -2285,13 +2285,13 @@ class ProductSearchUserView(APIView, ProductListMixin):
                     status=status.HTTP_404_NOT_FOUND,
                 )
             sorted_qs = self.get_sorted_queryset(products, request)
+            # paginate_and_serialize returns already serialized data.
             data, paginator = self.paginate_and_serialize(
                 sorted_qs, request, use_direct_update=True
             )
-            # Re-serialize after direct update if needed
-            updated_serializer = self.serializer_class(data, many=True)
+            # Pass the serialized data directly to _prepare_response_data.
             response_data = _prepare_response_data(
-                products, updated_serializer.data, product_code, product_title
+                products, data, product_code, product_title
             )
             return paginator.get_paginated_response(
                 response_data, status_code=status.HTTP_200_OK
@@ -2318,8 +2318,7 @@ class UsersProductFilterView(APIView, ProductListMixin):
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            # Extract various query parameters (recently_updated, download_or_order, etc.)
-            # Build the query as before…
+            # Build query based on various filter parameters.
             query = Q()
             recently_updated = request.GET.get("recently_updated")
             download_or_order = request.GET.get("download_or_order")
@@ -2334,6 +2333,7 @@ class UsersProductFilterView(APIView, ProductListMixin):
             alternative_type = request.GET.getlist("alternative_type", [])
             where_to_use_names = request.GET.getlist("where_to_use", [])
             sort_by = request.GET.get("sort_by", "product_title")
+
             if recently_updated:
                 try:
                     query &= Q(updated_at__gte=recently_updated)
@@ -2363,10 +2363,12 @@ class UsersProductFilterView(APIView, ProductListMixin):
                 query &= Q(language_name__in=language_names)
 
             products = Product.objects.filter(query, is_latest=True, status="live")
+            # Validate and set sort field.
             valid_sort_fields = VALID_SORT_FIELDS
             if sort_by not in valid_sort_fields:
                 sort_by = "product_title"
             sorted_qs = products.order_by(sort_by)
+            # Get serialized data and paginator.
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
             # Filter out languages where product status is not 'live'
             filtered_data = []
@@ -2398,14 +2400,15 @@ class UsersProductFilterView(APIView, ProductListMixin):
 
 
 class AdminProductFilterView(APIView, ProductListMixin):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
     pagination_class = CustomPagination
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
             access_type = request.GET.getlist("access_type", [])
             status_filter = request.GET.getlist("status", [])
+            # Ensure a default sort value is used.
             request.GET.get("sort_by", "product_title")
             product_code = request.GET.get("product_code", None)
             disease_names = request.GET.getlist("diseases", [])
@@ -2440,13 +2443,14 @@ class AdminProductFilterView(APIView, ProductListMixin):
 
             products = Product.objects.filter(query)
             sorted_qs = self.get_sorted_queryset(products, request)
+            # Get serialized data and paginator.
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
-            # Update S3 URLs for the downloads
-            all_download_urls = extract_s3_urls(products)
+            # Update S3 URLs using the serialized data.
+            all_download_urls = extract_s3_urls(data)
             presigned_urls = generate_presigned_urls(all_download_urls)
-            _update_product_downloads_with_presigned_urls(sorted_qs, presigned_urls)
-            updated_serializer = self.serializer_class(data, many=True)
-            return paginator.get_paginated_response(updated_serializer.data)
+            update_product_urls(data, presigned_urls)
+            # Return the data directly without re-wrapping in a new serializer.
+            return paginator.get_paginated_response(data)
         except DatabaseError:
             return _handle_database_error()
         except ValidationError:

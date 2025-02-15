@@ -226,22 +226,19 @@ def get_next_version_number(program_id, product_key, iso_language_code):
 def _extract_urls_from_downloads(product_downloads):
     """Helper to extract s3_bucket_url values from a product_downloads dict."""
     urls = []
-    # Extract main_download_url
     main_download = product_downloads.get("main_download_url")
     if isinstance(main_download, dict):
         s3_url = main_download.get("s3_bucket_url")
         if s3_url:
             urls.append(s3_url)
 
-    # Extract other download types
-    for key in ["web_download_url", "print_download_url", "transcript_url"]:
-        downloads = product_downloads.get(key, [])
-        if isinstance(downloads, list):
-            for item in downloads:
-                if isinstance(item, dict):
-                    s3_url = item.get("s3_bucket_url")
-                    if s3_url:
-                        urls.append(s3_url)
+    # Use a list comprehension to extract s3_bucket_url values from other download types.
+    urls.extend(
+        item.get("s3_bucket_url")
+        for key in ("web_download_url", "print_download_url", "transcript_url")
+        for item in product_downloads.get(key, [])
+        if isinstance(item, dict) and item.get("s3_bucket_url")
+    )
     return urls
 
 

@@ -73,6 +73,20 @@ LOG_MSG_S3_URL_EXTRACTION = "Extracted S3 URLs for presigned URL generation: %s"
 UNEXPECTED_ERROR_MSG = "An unexpected error occurred."
 INTERNAL_ERROR_MSG = "An unexpected error occurred while searching for products."
 
+# Global constant for valid sort fields
+VALID_SORT_FIELDS = [
+    "product_title",
+    "-product_title",
+    "created_at",
+    "-created_at",
+    "updated_at",
+    "-updated_at",
+    "publish_date",
+    "-publish_date",
+    "version_number",
+    "-version_number",
+]
+
 
 def get_bcp47_language_code(language_name):
     try:
@@ -882,158 +896,6 @@ class ProductViewSet(viewsets.ViewSet):
         return root_page
 
 
-@method_decorator(cache_page(60 * 15), name="dispatch")
-class ProductAdminListView(APIView):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
-
-    def get(self, request, *args, **kwargs):
-        logger.info("ProductAdminListView GET method called")
-        try:
-            products = Product.objects.filter()
-            # for debugging
-            # logger.info("Number of products retrieved: %d", products.count())
-
-            if not products.exists():
-                logger.warning(ErrorMessage.PRODUCT_NOT_FOUND)
-                return handle_error(
-                    ErrorCode.PRODUCT_NOT_FOUND,
-                    ErrorMessage.PRODUCT_NOT_FOUND,
-                    status_code=status.HTTP_404_NOT_FOUND,
-                )
-
-            # --- Optional: Apply sorting if 'sort_by' parameter is provided ---
-            sort_by = request.GET.get("sort_by")
-            if sort_by:
-                valid_sort_fields = [
-                    "product_title",
-                    "-product_title",
-                    "created_at",
-                    "-created_at",
-                    "updated_at",
-                    "-updated_at",
-                    "publish_date",
-                    "-publish_date",
-                    "version_number",
-                    "-version_number",
-                ]
-                if sort_by in valid_sort_fields:
-                    products = products.order_by(sort_by)
-                else:
-                    logger.warning("Invalid sort_by parameter provided: %s", sort_by)
-
-            paginator = CustomPagination()
-            paginated_products = paginator.paginate_queryset(products, request)
-            # for debugging
-            # logger.info("Number of paginated products: %d", len(paginated_products))
-
-            # Serialize the paginated products
-            serializer = ProductSerializer(paginated_products, many=True)
-
-            # Extract S3 URLs for presigned URL generation
-            all_download_urls = extract_s3_urls(serializer.data)
-
-            # Generate presigned URLs in a batch process
-            presigned_urls = generate_presigned_urls(all_download_urls)
-
-            # Update product URLs with the new presigned URLs
-            update_product_urls(serializer.data, presigned_urls)
-
-            logger.info(
-                "Returning paginated response with %d products", len(serializer.data)
-            )
-            return paginator.get_paginated_response(
-                serializer.data, status_code=status.HTTP_200_OK
-            )
-
-        except (DatabaseError, TimeoutError, Exception) as e:
-            return handle_exceptions(e)
-
-
-@method_decorator(cache_page(60 * 15), name="dispatch")
-class ProductUsersListView(APIView):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
-
-    def get(self, request, *args, **kwargs):
-        logger.info("ProductUsersListView GET method called")
-        try:
-            # Get only published products where `is_latest` is True and status is 'live'
-            # products = Product.objects.filter(is_latest=True, status="live")
-            products = Product.objects.filter(status="live")
-
-            if not products.exists():
-                logger.warning("No published products found.")
-                return handle_error(
-                    ErrorCode.PRODUCT_NOT_FOUND,
-                    ErrorMessage.PRODUCT_NOT_FOUND,
-                    status_code=status.HTTP_404_NOT_FOUND,
-                )
-
-            # --- Optional: Apply sorting if 'sort_by' parameter is provided ---
-            sort_by = request.GET.get("sort_by")
-            if sort_by:
-                valid_sort_fields = [
-                    "product_title",
-                    "-product_title",
-                    "created_at",
-                    "-created_at",
-                    "updated_at",
-                    "-updated_at",
-                    "publish_date",
-                    "-publish_date",
-                    "version_number",
-                    "-version_number",
-                ]
-                if sort_by in valid_sort_fields:
-                    products = products.order_by(sort_by)
-                else:
-                    logger.warning("Invalid sort_by parameter provided: %s", sort_by)
-
-            # Initialize custom pagination
-            paginator = CustomPagination()
-            paginated_products = paginator.paginate_queryset(products, request)
-            serializer = ProductSerializer(paginated_products, many=True)
-
-            # Extract S3 URLs for presigned URL generation
-            all_download_urls = extract_s3_urls(serializer.data)
-
-            # Generate presigned URLs in a batch process
-            presigned_urls = generate_presigned_urls(all_download_urls)
-
-            # Update product URLs with the new presigned URLs
-            update_product_urls(serializer.data, presigned_urls)
-
-            # Filter out languages where the product status is not 'live'
-            filtered_data = self.filter_languages(serializer.data)
-
-            logger.info(
-                "Returning paginated response with %d products", len(filtered_data)
-            )
-            return paginator.get_paginated_response(
-                filtered_data, status_code=status.HTTP_200_OK
-            )
-
-        except (DatabaseError, TimeoutError, Exception) as e:
-            return handle_exceptions(e)
-
-    def filter_languages(self, products_data):
-        """Filter out languages where the product status is not 'live'."""
-        filtered_data = []
-        for product in products_data:
-            existing_languages = product.get("existing_languages", [])
-            filtered_languages = [
-                lang
-                for lang in existing_languages
-                if Product.objects.filter(
-                    product_code=lang["product_url"].split("/")[-1], status="live"
-                ).exists()
-            ]
-            product["existing_languages"] = filtered_languages
-            filtered_data.append(product)
-        return filtered_data
-
-
 class ProductDetailView(View):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
@@ -1421,519 +1283,6 @@ class ProductStatusUpdateView(View):
                         missing_fields.append(field)
 
         return missing_fields
-
-
-class ProductSearchAdminView(APIView):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
-    pagination_class = CustomPagination
-
-    def get(self, request, *args, **kwargs):
-        try:
-            # Extract and validate query parameters
-            product_code = request.GET.get("product_code")
-            product_title = request.GET.get("product_title")
-
-            if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
-                return _handle_invalid_query_param()
-
-            if product_title and not isinstance(product_title, str):
-                return _handle_invalid_query_param()
-
-            # Build the query
-            query = Q()
-            if product_code:
-                query &= Q(product_code_no_dashes__icontains=product_code)
-            if product_title:
-                query &= Q(product_title__icontains=product_title)
-
-            # Fetch matching products
-            products = Product.objects.filter(query)
-            if not products.exists():
-                return Response(
-                    {"detail": ErrorMessage.PRODUCT_NOT_FOUND},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
-
-            # --- Apply sorting based on sort_by parameter ---
-            sort_by = request.GET.get("sort_by", "product_title")
-            valid_sort_fields = [
-                "product_title",
-                "-product_title",
-                "created_at",
-                "-created_at",
-                "updated_at",
-                "-updated_at",
-                "publish_date",
-                "-publish_date",
-                "version_number",
-                "-version_number",
-            ]
-
-            if sort_by in valid_sort_fields:
-                products = products.order_by(sort_by)
-            else:
-                products = products.order_by("product_title")
-
-            # Apply pagination
-            paginator = self.pagination_class()
-            paginated_products = paginator.paginate_queryset(products, request)
-
-            # Serialize product information
-            serializer = ProductSerializer(paginated_products, many=True)
-
-            # Prepare the response data
-            response_data = _prepare_response_data(
-                products, serializer, product_code, product_title
-            )
-
-            # Generate presigned URLs for all downloadable product references
-            all_download_urls = _collect_download_urls(products)
-            logger.info(LOG_MSG_S3_URL_EXTRACTION, all_download_urls)
-
-            # Generate new presigned URLs
-            presigned_urls = generate_presigned_urls(all_download_urls)
-            logger.info("Generated presigned URLs: %s", presigned_urls)
-
-            # Update product download URLs with presigned URLs
-            self._update_product_download_urls(paginated_products, presigned_urls)
-
-            # Get recommended products based on the search results
-            recommended_products = get_recommended_products(products)
-            response_data["recommended_products"] = recommended_products
-
-            return paginator.get_paginated_response(
-                response_data, status_code=status.HTTP_200_OK
-            )
-
-        except DatabaseError:
-            return _handle_database_error()
-        except TimeoutError:
-            return _handle_timeout_error()
-        except ValidationError:
-            return _handle_invalid_query_param()
-        except Exception:
-            logger.exception(INTERNAL_ERROR_MSG)
-            return handle_error(
-                ErrorCode.INTERNAL_SERVER_ERROR,
-                ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-    def _update_product_download_urls(self, product_data, presigned_urls):
-        """Update product download URLs with presigned URLs."""
-        for product in product_data:
-            logger.info("Updating Product: %s", product.product_id)
-
-            # Fetch the product from the database
-            product_instance = Product.objects.filter(
-                product_id=product.product_id
-            ).first()
-
-            if (
-                product_instance and product_instance.update_ref
-            ):  # Ensure update_ref is not None
-                update_refs = product_instance.update_ref
-                product_downloads = update_refs.product_downloads  # Access directly
-
-                # Update main_download_url
-                if "main_download_url" in product_downloads:
-                    # Access directly
-                    main_download = product_downloads["main_download_url"]
-                    s3_url = main_download["s3_bucket_url"]  # Access directly
-                    logger.info("Original main_download_url: %s", s3_url)
-
-                    # Always replace with new presigned URL if exists
-                    if s3_url in presigned_urls:
-                        new_url = presigned_urls[s3_url]
-                        logger.info("Replacing with new presigned URL: %s", new_url)
-                        main_download["URL"] = new_url
-                        # Save the update back to the database
-                        update_refs.save()
-
-                # Update other download types
-                for download_type in [
-                    "web_download_url",
-                    "print_download_url",
-                    "transcript_url",
-                ]:
-                    if download_type in product_downloads:
-                        # Access directly
-                        downloads = product_downloads[download_type]
-                        if isinstance(downloads, list):
-                            for item in downloads:
-                                # Access directly
-                                s3_url = item["s3_bucket_url"]
-                                logger.info("Original %s: %s", download_type, s3_url)
-
-                                # Always attempt to replace with new presigned URL
-                                if s3_url in presigned_urls:
-                                    new_url = presigned_urls[s3_url]
-                                    logger.info(
-                                        "Replacing %s with new presigned URL: %s",
-                                        download_type,
-                                        new_url,
-                                    )
-                                    item["URL"] = new_url
-                                else:
-                                    logger.info(
-                                        "No replacement found for %s: %s",
-                                        download_type,
-                                        s3_url,
-                                    )
-
-                # Save the changes to the product downloads back to the database
-                update_refs.save()
-            else:
-                logger.warning(
-                    "No product_instance or update_ref found for product_id: %s",
-                    product.product_id,
-                )
-
-
-class ProductSearchUserView(APIView):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
-    pagination_class = CustomPagination
-
-    def get(self, request, *args, **kwargs):
-        try:
-            # Extract and validate query parameters
-            product_code = request.GET.get("product_code")
-            product_title = request.GET.get("product_title")
-
-            if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
-                return _handle_invalid_query_param()
-
-            if product_title and not isinstance(product_title, str):
-                return _handle_invalid_query_param()
-
-            # Build the query
-            query = Q(is_latest=True, status="live")
-            if product_code:
-                query &= Q(product_code_no_dashes__icontains=product_code)
-            if product_title:
-                query &= Q(product_title__icontains=product_title)
-
-            # Fetch matching products
-            products = Product.objects.filter(query)
-            if not products.exists():
-                return Response(
-                    {"detail": str(ErrorMessage.PRODUCT_NOT_FOUND)},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
-            # --- Apply sorting based on sort_by parameter ---
-            sort_by = request.GET.get("sort_by", "product_title")
-            valid_sort_fields = [
-                "product_title",
-                "-product_title",
-                "created_at",
-                "-created_at",
-                "updated_at",
-                "-updated_at",
-                "publish_date",
-                "-publish_date",
-                "version_number",
-                "-version_number",
-            ]
-            if sort_by in valid_sort_fields:
-                products = products.order_by(sort_by)
-            else:
-                products = products.order_by("product_title")
-
-            # Apply pagination
-            paginator = self.pagination_class()
-            paginated_products = paginator.paginate_queryset(products, request)
-
-            # Collect all URLs for presigned URL generation
-            all_download_urls = _collect_download_urls(paginated_products)
-            logger.info(LOG_MSG_S3_URL_EXTRACTION, all_download_urls)
-
-            # Generate new presigned URLs
-            presigned_urls = generate_presigned_urls(all_download_urls)
-            logger.info("Generated presigned URLs: %s", presigned_urls)
-
-            # Update product download URLs with new presigned URLs
-            _update_product_downloads_with_presigned_urls(
-                paginated_products, presigned_urls
-            )
-
-            # Re-serialize the updated products after URL updates
-            updated_serializer = ProductSerializer(paginated_products, many=True)
-
-            # Prepare response data
-            response_data = _prepare_response_data(
-                products, updated_serializer, product_code, product_title
-            )
-
-            return paginator.get_paginated_response(
-                response_data, status_code=status.HTTP_200_OK
-            )
-
-        except DatabaseError:
-            return _handle_database_error()
-        except TimeoutError:
-            return _handle_timeout_error()
-        except ValidationError:
-            return _handle_invalid_query_param()
-        except Exception:
-            logger.exception(INTERNAL_ERROR_MSG)
-            return handle_error(
-                ErrorCode.INTERNAL_SERVER_ERROR,
-                ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-
-class UsersProductFilterView(APIView):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
-    pagination_class = CustomPagination
-
-    def get(self, request, *args, **kwargs) -> Response:
-        """
-        Retrieve filtered products based on query parameters.
-        Args:
-            request (HttpRequest): The HTTP request object containing query parameters.
-        Returns:
-            Response: A JSON response containing the filtered products.
-        """
-        try:
-            # Extract query parameters
-            recently_updated = request.GET.get("recently_updated", None)
-            download_or_order = request.GET.get("download_or_order", None)
-            download_only = request.GET.get("download_only", None)
-            order_only = request.GET.get("order_only", None)
-            audience_names = request.GET.getlist("audiences", [])
-            program_names = request.GET.getlist("program_names", [])
-            disease_names = request.GET.getlist("diseases", [])
-            vaccination_names = request.GET.getlist("vaccinations", [])
-            product_types = request.GET.getlist("product_type", [])
-            language_names = request.GET.getlist("languages", [])
-            alternative_type = request.GET.getlist("alternative_type", [])
-            where_to_use_names = request.GET.getlist("where_to_use", [])
-            sort_by = request.GET.get("sort_by", "product_title")
-
-            # Build the query
-            query = Q()
-
-            # Apply filters to the query
-            if recently_updated:
-                try:
-                    query &= Q(updated_at__gte=recently_updated)
-                except ValueError:
-                    return _handle_invalid_query_param()
-
-            if download_only and download_only.lower() == "true":
-                query &= Q(tag__in=["download_only"])
-            elif download_or_order and download_or_order.lower() == "true":
-                query &= Q(tag__in=["download_and_order"])
-            elif order_only and order_only.lower() == "true":
-                query &= Q(tag__in=["order_only"])
-
-            if audience_names:
-                query &= Q(update_ref__audience_ref__name__in=audience_names)
-
-            if disease_names:
-                query &= Q(update_ref__diseases_ref__name__in=disease_names)
-
-            if vaccination_names:
-                query &= Q(update_ref__vaccination_ref__name__in=vaccination_names)
-
-            if program_names:
-                query &= Q(program_name__in=program_names)
-
-            if where_to_use_names:
-                query &= Q(update_ref__where_to_use_ref__name__in=where_to_use_names)
-
-            if alternative_type:
-                query &= Q(update_ref__alternative_type__in=alternative_type)
-
-            if product_types:
-                query &= Q(update_ref__product_type__in=product_types)
-
-            if language_names:
-                query &= Q(language_name__in=language_names)
-
-            # Fetch matching products where is_latest=True and status='live'
-            products = Product.objects.filter(query, is_latest=True, status="live")
-
-            # Sort the products
-            valid_sort_fields = [
-                "product_title",
-                "-product_title",
-                "created_at",
-                "-created_at",
-                "updated_at",
-                "-updated_at",
-                "publish_date",
-                "-publish_date",
-                "version_number",
-                "-version_number",
-            ]
-            if sort_by in valid_sort_fields:
-                products = products.order_by(sort_by)
-            else:
-                products = products.order_by("product_title")
-
-            # Apply pagination
-            paginator = self.pagination_class()
-            paginated_products = paginator.paginate_queryset(products, request)
-
-            # Collect all URLs for presigned URL generation
-            all_download_urls = _collect_download_urls(paginated_products)
-            logger.info(
-                "Extracted download URLs for presigned URL generation: %s",
-                all_download_urls,
-            )
-
-            # Generate new presigned URLs
-            presigned_urls = generate_presigned_urls(all_download_urls)
-            logger.info("Generated presigned URLs: %s", presigned_urls)
-
-            # Update product download URLs with presigned URLs
-            _update_product_downloads_with_presigned_urls(
-                paginated_products, presigned_urls
-            )
-
-            # Serialize the products
-            serializer = ProductSerializer(paginated_products, many=True)
-
-            # Filter out languages from `existing_languages` where the product status is not 'live'
-            filtered_data = []
-            for product in serializer.data:
-                existing_languages = product.get("existing_languages", [])
-                filtered_languages = [
-                    lang
-                    for lang in existing_languages
-                    if Product.objects.filter(
-                        product_code=lang["product_url"].split("/")[-1], status="live"
-                    ).exists()
-                ]
-                product["existing_languages"] = filtered_languages
-                filtered_data.append(product)
-
-            return paginator.get_paginated_response(filtered_data)
-
-        except DatabaseError:
-            return _handle_database_error()
-        except TimeoutError:
-            return _handle_timeout_error()
-        except ValidationError:
-            return _handle_invalid_query_param()
-        except Exception:
-            logger.exception(INTERNAL_ERROR_MSG)
-            return handle_error(
-                ErrorCode.INTERNAL_SERVER_ERROR,
-                ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-
-class AdminProductFilterView(APIView):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
-    pagination_class = CustomPagination
-
-    def get(self, request, *args, **kwargs) -> Response:
-        """
-        Retrieve filtered products based on admin query parameters.
-        """
-        try:
-            # Extract query parameters
-            access_type = request.GET.getlist("access_type", [])
-            status_filter = request.GET.getlist("status", [])
-            sort_by = request.GET.get("sort_by", "product_title")
-            product_code = request.GET.get("product_code", None)
-            disease_names = request.GET.getlist("diseases", [])
-            vaccination_names = request.GET.getlist("vaccinations", [])
-            audience_names = request.GET.getlist("audiences", [])
-            language_names = request.GET.getlist("languages", [])
-            alternative_type = request.GET.getlist("alternative_type", [])
-            where_to_use_names = request.GET.getlist("where_to_use", [])
-            product_types = request.GET.getlist("product_type", [])
-
-            # Build the query
-            query = Q()
-            if disease_names:
-                query &= Q(update_ref__diseases_ref__name__in=disease_names)
-            if vaccination_names:
-                query &= Q(update_ref__vaccination_ref__name__in=vaccination_names)
-            if audience_names:
-                query &= Q(update_ref__audience_ref__name__in=audience_names)
-            if where_to_use_names:
-                query &= Q(update_ref__where_to_use_ref__name__in=where_to_use_names)
-            if alternative_type:
-                query &= Q(update_ref__alternative_type__in=alternative_type)
-            if product_types:
-                query &= Q(update_ref__product_type__in=product_types)
-            if language_names:
-                query &= Q(language_name__in=language_names)
-            if access_type:
-                query &= Q(tag__in=access_type)
-            if status_filter:
-                query &= Q(status__in=status_filter)
-            if product_code:
-                query &= Q(product_code_no_dashes__icontains=product_code)
-
-            # Fetch matching products
-            products = Product.objects.filter(query)
-
-            # Sort the products
-            valid_sort_fields = [
-                "product_title",
-                "-product_title",
-                "created_at",
-                "-created_at",
-                "updated_at",
-                "-updated_at",
-                "publish_date",
-                "-publish_date",
-                "version_number",
-                "-version_number",
-            ]
-            products = (
-                products.order_by(sort_by)
-                if sort_by in valid_sort_fields
-                else products.order_by("product_title")
-            )
-
-            # Apply pagination
-            paginator = self.pagination_class()
-            paginated_products = paginator.paginate_queryset(products, request)
-
-            # Collect all URLs for presigned URL generation
-            all_download_urls = _collect_download_urls(products)
-            logger.info(
-                "Extracted download URLs for presigned URL generation: %s",
-                all_download_urls,
-            )
-
-            # Generate new presigned URLs
-            presigned_urls = generate_presigned_urls(all_download_urls)
-            logger.info("Generated presigned URLs: %s", presigned_urls)
-
-            # Update product download URLs with presigned URLs
-            _update_product_downloads_with_presigned_urls(
-                paginated_products, presigned_urls
-            )
-
-            # Serialize the data
-            updated_serializer = ProductSerializer(paginated_products, many=True)
-
-            return paginator.get_paginated_response(updated_serializer.data)
-
-        except DatabaseError:
-            return _handle_database_error()
-        except ValidationError:
-            return _handle_invalid_query_param()
-        except Exception:
-            logger.exception(INTERNAL_ERROR_MSG)
-            return handle_error(
-                ErrorCode.INTERNAL_SERVER_ERROR,
-                ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
 
 
 class ProductUpdateView(View):
@@ -2762,86 +2111,400 @@ class ProductCreateView(APIView):
             return None
 
 
-class ProgramProductsView(APIView):
-    """
-    API view to retrieve products related to a specific program,
-    filtered by associated diseases and vaccinations.
-    """
+class ProductListMixin:
+    serializer_class = ProductSerializer
 
+    def get_sorted_queryset(self, queryset, request):
+        sort_by = request.GET.get("sort_by")
+        if sort_by and sort_by in VALID_SORT_FIELDS:
+            return queryset.order_by(sort_by)
+        return queryset
+
+    def paginate_and_serialize(
+        self, queryset, request, serializer_class=None, use_direct_update=False
+    ):
+        serializer_class = serializer_class or self.serializer_class
+        paginator = CustomPagination()
+        paginated = paginator.paginate_queryset(queryset, request)
+        serializer = serializer_class(paginated, many=True)
+        all_download_urls = extract_s3_urls(serializer.data)
+        presigned_urls = generate_presigned_urls(all_download_urls)
+        if use_direct_update:
+            _update_product_downloads_with_presigned_urls(paginated, presigned_urls)
+            serializer = serializer_class(paginated, many=True)
+        else:
+            update_product_urls(serializer.data, presigned_urls)
+        return serializer.data, paginator
+
+
+# --- Refactored List/Search Views ---
+
+
+@method_decorator(cache_page(60 * 15), name="dispatch")
+class ProductAdminListView(APIView, ProductListMixin):
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request, *args, **kwargs):
+        logger.info("ProductAdminListView GET method called")
+        try:
+            products = Product.objects.all()
+            if not products.exists():
+                logger.warning(ErrorMessage.PRODUCT_NOT_FOUND)
+                return handle_error(
+                    ErrorCode.PRODUCT_NOT_FOUND,
+                    ErrorMessage.PRODUCT_NOT_FOUND,
+                    status_code=status.HTTP_404_NOT_FOUND,
+                )
+            sorted_qs = self.get_sorted_queryset(products, request)
+            data, paginator = self.paginate_and_serialize(sorted_qs, request)
+            logger.info("Returning paginated response with %d products", len(data))
+            return paginator.get_paginated_response(
+                data, status_code=status.HTTP_200_OK
+            )
+        except (DatabaseError, TimeoutError, Exception) as e:
+            return handle_exceptions(e)
+
+
+@method_decorator(cache_page(60 * 15), name="dispatch")
+class ProductUsersListView(APIView, ProductListMixin):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        logger.info("ProductUsersListView GET method called")
+        try:
+            products = Product.objects.filter(status="live")
+            if not products.exists():
+                logger.warning("No published products found.")
+                return handle_error(
+                    ErrorCode.PRODUCT_NOT_FOUND,
+                    ErrorMessage.PRODUCT_NOT_FOUND,
+                    status_code=status.HTTP_404_NOT_FOUND,
+                )
+            sorted_qs = self.get_sorted_queryset(products, request)
+            data, paginator = self.paginate_and_serialize(sorted_qs, request)
+            # Filter languages where product status is not 'live'
+            data = self.filter_languages(data)
+            logger.info("Returning paginated response with %d products", len(data))
+            return paginator.get_paginated_response(
+                data, status_code=status.HTTP_200_OK
+            )
+        except (DatabaseError, TimeoutError, Exception) as e:
+            return handle_exceptions(e)
+
+    def filter_languages(self, products_data):
+        filtered_data = []
+        for product in products_data:
+            existing_languages = product.get("existing_languages", [])
+            filtered_languages = [
+                lang
+                for lang in existing_languages
+                if Product.objects.filter(
+                    product_code=lang["product_url"].split("/")[-1], status="live"
+                ).exists()
+            ]
+            product["existing_languages"] = filtered_languages
+            filtered_data.append(product)
+        return filtered_data
+
+
+class ProductSearchAdminView(APIView, ProductListMixin):
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    pagination_class = CustomPagination
+
+    def get(self, request, *args, **kwargs):
+        try:
+            product_code = request.GET.get("product_code")
+            product_title = request.GET.get("product_title")
+            if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
+                return _handle_invalid_query_param()
+            if product_title and not isinstance(product_title, str):
+                return _handle_invalid_query_param()
+
+            query = Q()
+            if product_code:
+                query &= Q(product_code_no_dashes__icontains=product_code)
+            if product_title:
+                query &= Q(product_title__icontains=product_title)
+            products = Product.objects.filter(query)
+            if not products.exists():
+                return Response(
+                    {"detail": ErrorMessage.PRODUCT_NOT_FOUND},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            sorted_qs = self.get_sorted_queryset(products, request)
+            # Here we use direct update so that the model fields get updated as needed.
+            data, paginator = self.paginate_and_serialize(
+                sorted_qs, request, use_direct_update=True
+            )
+            response_data = _prepare_response_data(
+                products, data, product_code, product_title
+            )
+            recommended_products = get_recommended_products(products)
+            response_data["recommended_products"] = recommended_products
+            return paginator.get_paginated_response(
+                response_data, status_code=status.HTTP_200_OK
+            )
+        except DatabaseError:
+            return _handle_database_error()
+        except TimeoutError:
+            return _handle_timeout_error()
+        except ValidationError:
+            return _handle_invalid_query_param()
+        except Exception:
+            logger.exception(INTERNAL_ERROR_MSG)
+            return handle_error(
+                ErrorCode.INTERNAL_SERVER_ERROR,
+                ErrorMessage.INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class ProductSearchUserView(APIView, ProductListMixin):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+    pagination_class = CustomPagination
+
+    def get(self, request, *args, **kwargs):
+        try:
+            product_code = request.GET.get("product_code")
+            product_title = request.GET.get("product_title")
+            if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
+                return _handle_invalid_query_param()
+            if product_title and not isinstance(product_title, str):
+                return _handle_invalid_query_param()
+
+            query = Q(is_latest=True, status="live")
+            if product_code:
+                query &= Q(product_code_no_dashes__icontains=product_code)
+            if product_title:
+                query &= Q(product_title__icontains=product_title)
+            products = Product.objects.filter(query)
+            if not products.exists():
+                return Response(
+                    {"detail": str(ErrorMessage.PRODUCT_NOT_FOUND)},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            sorted_qs = self.get_sorted_queryset(products, request)
+            data, paginator = self.paginate_and_serialize(
+                sorted_qs, request, use_direct_update=True
+            )
+            # Re-serialize after direct update if needed
+            updated_serializer = self.serializer_class(data, many=True)
+            response_data = _prepare_response_data(
+                products, updated_serializer.data, product_code, product_title
+            )
+            return paginator.get_paginated_response(
+                response_data, status_code=status.HTTP_200_OK
+            )
+        except DatabaseError:
+            return _handle_database_error()
+        except TimeoutError:
+            return _handle_timeout_error()
+        except ValidationError:
+            return _handle_invalid_query_param()
+        except Exception:
+            logger.exception(INTERNAL_ERROR_MSG)
+            return handle_error(
+                ErrorCode.INTERNAL_SERVER_ERROR,
+                ErrorMessage.INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class UsersProductFilterView(APIView, ProductListMixin):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+    pagination_class = CustomPagination
+
+    def get(self, request, *args, **kwargs) -> Response:
+        try:
+            # Extract various query parameters (recently_updated, download_or_order, etc.)
+            # Build the query as before…
+            query = Q()
+            recently_updated = request.GET.get("recently_updated")
+            download_or_order = request.GET.get("download_or_order")
+            download_only = request.GET.get("download_only")
+            order_only = request.GET.get("order_only")
+            audience_names = request.GET.getlist("audiences", [])
+            program_names = request.GET.getlist("program_names", [])
+            disease_names = request.GET.getlist("diseases", [])
+            vaccination_names = request.GET.getlist("vaccinations", [])
+            product_types = request.GET.getlist("product_type", [])
+            language_names = request.GET.getlist("languages", [])
+            alternative_type = request.GET.getlist("alternative_type", [])
+            where_to_use_names = request.GET.getlist("where_to_use", [])
+            sort_by = request.GET.get("sort_by", "product_title")
+            if recently_updated:
+                try:
+                    query &= Q(updated_at__gte=recently_updated)
+                except ValueError:
+                    return _handle_invalid_query_param()
+            if download_only and download_only.lower() == "true":
+                query &= Q(tag__in=["download_only"])
+            elif download_or_order and download_or_order.lower() == "true":
+                query &= Q(tag__in=["download_and_order"])
+            elif order_only and order_only.lower() == "true":
+                query &= Q(tag__in=["order_only"])
+            if audience_names:
+                query &= Q(update_ref__audience_ref__name__in=audience_names)
+            if disease_names:
+                query &= Q(update_ref__diseases_ref__name__in=disease_names)
+            if vaccination_names:
+                query &= Q(update_ref__vaccination_ref__name__in=vaccination_names)
+            if program_names:
+                query &= Q(program_name__in=program_names)
+            if where_to_use_names:
+                query &= Q(update_ref__where_to_use_ref__name__in=where_to_use_names)
+            if alternative_type:
+                query &= Q(update_ref__alternative_type__in=alternative_type)
+            if product_types:
+                query &= Q(update_ref__product_type__in=product_types)
+            if language_names:
+                query &= Q(language_name__in=language_names)
+
+            products = Product.objects.filter(query, is_latest=True, status="live")
+            valid_sort_fields = VALID_SORT_FIELDS
+            if sort_by not in valid_sort_fields:
+                sort_by = "product_title"
+            sorted_qs = products.order_by(sort_by)
+            data, paginator = self.paginate_and_serialize(sorted_qs, request)
+            # Filter out languages where product status is not 'live'
+            filtered_data = []
+            for product in data:
+                existing_languages = product.get("existing_languages", [])
+                filtered_languages = [
+                    lang
+                    for lang in existing_languages
+                    if Product.objects.filter(
+                        product_code=lang["product_url"].split("/")[-1], status="live"
+                    ).exists()
+                ]
+                product["existing_languages"] = filtered_languages
+                filtered_data.append(product)
+            return paginator.get_paginated_response(filtered_data)
+        except DatabaseError:
+            return _handle_database_error()
+        except TimeoutError:
+            return _handle_timeout_error()
+        except ValidationError:
+            return _handle_invalid_query_param()
+        except Exception:
+            logger.exception(INTERNAL_ERROR_MSG)
+            return handle_error(
+                ErrorCode.INTERNAL_SERVER_ERROR,
+                ErrorMessage.INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class AdminProductFilterView(APIView, ProductListMixin):
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    pagination_class = CustomPagination
+
+    def get(self, request, *args, **kwargs) -> Response:
+        try:
+            access_type = request.GET.getlist("access_type", [])
+            status_filter = request.GET.getlist("status", [])
+            request.GET.get("sort_by", "product_title")
+            product_code = request.GET.get("product_code", None)
+            disease_names = request.GET.getlist("diseases", [])
+            vaccination_names = request.GET.getlist("vaccinations", [])
+            audience_names = request.GET.getlist("audiences", [])
+            language_names = request.GET.getlist("languages", [])
+            alternative_type = request.GET.getlist("alternative_type", [])
+            where_to_use_names = request.GET.getlist("where_to_use", [])
+            product_types = request.GET.getlist("product_type", [])
+
+            query = Q()
+            if disease_names:
+                query &= Q(update_ref__diseases_ref__name__in=disease_names)
+            if vaccination_names:
+                query &= Q(update_ref__vaccination_ref__name__in=vaccination_names)
+            if audience_names:
+                query &= Q(update_ref__audience_ref__name__in=audience_names)
+            if where_to_use_names:
+                query &= Q(update_ref__where_to_use_ref__name__in=where_to_use_names)
+            if alternative_type:
+                query &= Q(update_ref__alternative_type__in=alternative_type)
+            if product_types:
+                query &= Q(update_ref__product_type__in=product_types)
+            if language_names:
+                query &= Q(language_name__in=language_names)
+            if access_type:
+                query &= Q(tag__in=access_type)
+            if status_filter:
+                query &= Q(status__in=status_filter)
+            if product_code:
+                query &= Q(product_code_no_dashes__icontains=product_code)
+
+            products = Product.objects.filter(query)
+            sorted_qs = self.get_sorted_queryset(products, request)
+            data, paginator = self.paginate_and_serialize(sorted_qs, request)
+            # Update S3 URLs for the downloads
+            all_download_urls = extract_s3_urls(products)
+            presigned_urls = generate_presigned_urls(all_download_urls)
+            _update_product_downloads_with_presigned_urls(sorted_qs, presigned_urls)
+            updated_serializer = self.serializer_class(data, many=True)
+            return paginator.get_paginated_response(updated_serializer.data)
+        except DatabaseError:
+            return _handle_database_error()
+        except ValidationError:
+            return _handle_invalid_query_param()
+        except Exception:
+            logger.exception(INTERNAL_ERROR_MSG)
+            return handle_error(
+                ErrorCode.INTERNAL_SERVER_ERROR,
+                ErrorMessage.INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class ProgramProductsView(APIView, ProductListMixin):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
     def get(self, request, program_id):
-        """
-        Handle GET requests to retrieve filtered products, diseases, and vaccinations
-        related to the specified program.
-        """
         try:
-            # Fetch the program; return 404 if not found
             program = get_object_or_404(Program, pk=program_id)
-
-            # Retrieve diseases and vaccinations associated with the program
             diseases = Disease.objects.filter(programs=program)
             vaccinations = Vaccination.objects.filter(programs=program)
-
-            # Construct Q objects for diseases and vaccinations
             diseases_q = Q(update_ref__diseases_ref__in=diseases)
             vaccinations_q = Q(update_ref__vaccination_ref__in=vaccinations)
-
-            # Combine Q objects using OR to include products related to either or both
             products = Product.objects.filter(
                 Q(program_id=program) & (diseases_q | vaccinations_q)
             ).distinct()
-
-            # Optimize query with prefetch_related if relationships exist
-            # Adjust 'update_ref' and related fields based on your actual model relations
             products = products.prefetch_related(
                 "update_ref__diseases_ref", "update_ref__vaccination_ref"
             )
-
-            # Initialize custom pagination
-            paginator = CustomPagination()
-            paginated_products = paginator.paginate_queryset(products, request)
-
-            # Serialize the paginated products
-            product_serializer = ProductSerializer(paginated_products, many=True)
-
-            # Extract S3 URLs for presigned URL generation
-            all_download_urls = extract_s3_urls(product_serializer.data)
-
-            # Generate presigned URLs in a batch process
+            sorted_qs = self.get_sorted_queryset(products, request)
+            data, paginator = self.paginate_and_serialize(sorted_qs, request)
+            all_download_urls = extract_s3_urls(data)
             presigned_urls = generate_presigned_urls(all_download_urls)
-
-            # Update product URLs with the new presigned URLs
-            update_product_urls(product_serializer.data, presigned_urls)
-
-            # Serialize diseases and vaccinations for frontend filtering
+            update_product_urls(data, presigned_urls)
+            product_serializer = self.serializer_class(data, many=True)
             disease_serializer = DiseaseSerializer(diseases, many=True)
             vaccination_serializer = VaccinationSerializer(vaccinations, many=True)
-
-            # Construct the response data
             response_data = {
                 "products": product_serializer.data,
                 "diseases": disease_serializer.data,
                 "vaccinations": vaccination_serializer.data,
             }
-
-            # Return the paginated response with HTTP 200 status
             return paginator.get_paginated_response(
                 response_data, status_code=status.HTTP_200_OK
             )
-
         except Http404:
-            # Handle case where program is not found
             return Response(
-                {"detail": "Program not found."}, status=status.HTTP_404_NOT_FOUND
+                {"detail": "Program not found."},
+                status=status.HTTP_404_NOT_FOUND,
             )
         except Exception as e:
-            # Log the exception with stack trace for debugging
             logger.exception(
                 "An error occurred while fetching program products: %s", str(e)
             )
-            # Return a generic error message to the client
             return Response(
                 {"detail": UNEXPECTED_ERROR_MSG},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,

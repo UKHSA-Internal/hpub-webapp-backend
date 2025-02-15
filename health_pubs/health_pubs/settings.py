@@ -7,11 +7,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 from configs.get_secret_config import Config
 
 config = Config()
-DB_NAME = "hpub_db"
-DB_HOST = "localhost"
-DB_USER = "root"
-DB_PASSWORD = "oFa4:~FMp~)oyl7>0XfJ73LbLVma"
-DB_PORT = "5432"
+DB_NAME = config.DB_NAME
+DB_HOST = config.DB_HOST
+DB_USER = config.DB_USER
+DB_PASSWORD = config.DB_PASSWORD
+DB_PORT = config.DB_PORT
 AZURE_B2C_CLIENT_ID = config.get_azure_b2c_client_id()
 AZURE_B2C_SECRET_ID = config.get_azure_b2c_secret_id()
 AZURE_B2C_TENANT_ID = config.get_azure_b2c_tenant_id()

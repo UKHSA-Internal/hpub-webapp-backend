@@ -2481,17 +2481,17 @@ class ProgramProductsView(APIView, ProductListMixin):
                 "update_ref__diseases_ref", "update_ref__vaccination_ref"
             )
             sorted_qs = self.get_sorted_queryset(products, request)
+            # This returns already serialized data along with the paginator.
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
             all_download_urls = extract_s3_urls(data)
             presigned_urls = generate_presigned_urls(all_download_urls)
             update_product_urls(data, presigned_urls)
-            product_serializer = self.serializer_class(data, many=True)
-            disease_serializer = DiseaseSerializer(diseases, many=True)
-            vaccination_serializer = VaccinationSerializer(vaccinations, many=True)
+
+            # Use the serialized data 'data' directly
             response_data = {
-                "products": product_serializer.data,
-                "diseases": disease_serializer.data,
-                "vaccinations": vaccination_serializer.data,
+                "products": data,
+                "diseases": DiseaseSerializer(diseases, many=True).data,
+                "vaccinations": VaccinationSerializer(vaccinations, many=True).data,
             }
             return paginator.get_paginated_response(
                 response_data, status_code=status.HTTP_200_OK

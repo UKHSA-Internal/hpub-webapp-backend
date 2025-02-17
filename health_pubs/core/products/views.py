@@ -1485,7 +1485,7 @@ class ProductPatchView(View):
             logger.error(f"Attribute error: {str(e)}")
             return handle_error(
                 ErrorCode.ATTRIBUTE_ERROR,
-                ErrorMessage.ATTRIBUTE_ERROR,
+                ErrorMessage.ATTRIBUTE_ERROR[0],
                 status_code=400,
             )
         except Exception as e:

@@ -121,7 +121,7 @@ jobs:
     strategy:
       max-parallel: 1
       matrix:
-        environment: ["dev", "qat", "test", "prd"]
+        environment: ["dev", "test", "uat"]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:
       contents: write
@@ -171,8 +171,8 @@ jobs:
       run: |
         if [ "$environment" == "prd" ]; then
           prefix=hpub
-        elif [ "$environment" == "qat" ]; then
-          prefix=hpub-qat
+        elif [ "$environment" == "uat" ]; then
+          prefix=hpub-uat
         elif [ "$environment" == "test" ]; then
           prefix=hpub-test
         elif [ "$environment" == "dev" ]; then

@@ -10,16 +10,14 @@ sys.path.append(
 )
 
 from generate_s3_presigned_url import generate_presigned_urls
-from configs.get_secret_config import Config
+import config
 
 # --------------------------
 # Configuration
 # --------------------------
-config = Config()
-
 # AWS S3 configuration
-BUCKET_NAME = "hpub-publications-media-dev"
-s3_client = boto3.client("s3")
+BUCKET_NAME = config.MEDIA_S3_BUCKET_NAME
+s3_client = boto3.client("s3", endpoint_url=config.AWS_ENDPOINT_URL_S3)
 
 # PostgreSQL DB configuration
 PG_HOST = config.DB_HOST

@@ -1,6 +1,7 @@
 import logging
 from typing import Dict, List
 from urllib.parse import urlparse
+import config
 
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError, PartialCredentialsError
@@ -11,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 def generate_presigned_urls(urls: List[str], expiration: int = 3600) -> Dict[str, str]:
     """Generate pre-signed URLs for a list of S3 object URLs and return as a dictionary."""
-    s3_client = boto3.client("s3")
+    s3_client = boto3.client("s3",endpoint_url=config.AWS_ENDPOINT_URL_S3)
     presigned_urls = {}
 
     for url in urls:
@@ -19,6 +20,7 @@ def generate_presigned_urls(urls: List[str], expiration: int = 3600) -> Dict[str
         parsed_url = urlparse(url)
 
         # Handle bucket names based on different S3 URL formats
+        # This would need to be changed to handle localstack
         if "amazonaws.com" in parsed_url.netloc:
             # Standard S3 URL
             bucket_name = parsed_url.netloc.split(".")[0]

@@ -3,8 +3,8 @@ import uuid
 
 import jwt
 from core.users.models import InvalidatedToken
-from django.conf import settings
 from django.utils import timezone
+from config import PUBLIC_KEY, PRIVATE_KEY
 
 
 def validate_token(token, token_type="access", user=None):
@@ -14,7 +14,7 @@ def validate_token(token, token_type="access", user=None):
         raise ValueError("Token has been invalidated for this user")
 
     try:
-        payload = jwt.decode(token, settings.PUBLIC_KEY, algorithms=["RS256"])
+        payload = jwt.decode(token, PUBLIC_KEY, algorithms=["RS256"])
         if payload["type"] != token_type:
             raise ValueError("Incorrect token type")
         return payload
@@ -31,7 +31,7 @@ def validate_token_refresh(token, token_type="refresh", user=None):
         raise ValueError("Token has been invalidated for this user")
 
     try:
-        payload = jwt.decode(token, settings.PUBLIC_KEY, algorithms=["RS256"])
+        payload = jwt.decode(token, PUBLIC_KEY, algorithms=["RS256"])
         if payload["type"] != token_type:
             raise ValueError("Incorrect token type")
         return payload
@@ -52,7 +52,7 @@ def generate_short_term_token(user_id, email, role_name):
         "exp": timezone.now() + timedelta(minutes=30),
         "iat": timezone.now(),
     }
-    return jwt.encode(payload, settings.PRIVATE_KEY, algorithm="RS256")
+    return jwt.encode(payload, PRIVATE_KEY, algorithm="RS256")
 
 
 def generate_long_term_token(user_id, email, role_name):
@@ -66,7 +66,7 @@ def generate_long_term_token(user_id, email, role_name):
         "exp": timezone.now() + timedelta(days=1),
         "iat": timezone.now(),
     }
-    return jwt.encode(payload, settings.PRIVATE_KEY, algorithm="RS256")
+    return jwt.encode(payload, PRIVATE_KEY, algorithm="RS256")
 
 
 #

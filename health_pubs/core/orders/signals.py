@@ -2,6 +2,7 @@ import json
 import logging
 
 import boto3
+import config
 from botocore.exceptions import NoRegionError, NoCredentialsError
 from core.utils.check_order_required_fields_aps_decorator import (
     check_required_order_fields,
@@ -9,17 +10,14 @@ from core.utils.check_order_required_fields_aps_decorator import (
 from django.db import transaction
 from django.db.models.signals import post_save
 from django.dispatch import receiver
-from configs.get_secret_config import Config
 
 from .models import Order
-
-config = Config()
 
 logger = logging.getLogger(__name__)
 
 # Check if AWS access is available
 try:
-    eventbridge = boto3.client("events")
+    eventbridge = boto3.client("events", endpoint_url=config.AWS_ENDPOINT_URL_EVENTBRIDGE)
     aws_access = True
 except (NoRegionError, NoCredentialsError) as e:
     logger.warning(f"AWS access is unavailable: {e}")
@@ -60,10 +58,10 @@ def send_event(order_instance):
             response = eventbridge.put_events(
                 Entries=[
                     {
-                        "Source": config.get_hpub_event_bridge_source,
-                        "DetailType": config.get_hpub_event_bridge_detail_type_order_creation,
+                        "Source": config.HPUB_EVENT_BRIDGE_SOURCE,
+                        "DetailType": config.HPUB_EVENT_BRIDGE_DETAIL_TYPE_ORDER_CREATION,
                         "Detail": json.dumps(event_detail),
-                        "EventBusName": config.get_hpub_event_bridge_bus_name,
+                        "EventBusName": config.HPUB_EVENT_BRIDGE_BUS_NAME,
                     }
                 ]
             )

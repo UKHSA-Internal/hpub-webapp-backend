@@ -8,29 +8,20 @@ sys.path.append(
 import logging
 
 import requests
-from configs.get_secret_config import Config
+import config
 
 # Load the configuration module
 
 logger = logging.getLogger(__name__)
 
-config = Config()
-
-base_url = config.get_address_verify_base_url()
-api_key = config.get_address_verify_api_key()
-client_id = config.get_address_verify_client_id()
-client_scope = config.get_address_verify_client_scope()
-token_url = config.get_address_verify_token_url()
-
-
 def get_oauth_token():
     data = {
         "grant_type": "client_credentials",
-        "client_id": client_id,
-        "client_secret": api_key,
-        "scope": client_scope,
+        "client_id": config.OS_ADDRESS_VERIFICATION_CLIENT_ID,
+        "client_secret": config.OS_ADDRESS_VERIFICATION_API_KEY,
+        "scope": config.OS_ADDRESS_VERIFICATION_CLIENT_SCOPE,
     }
-    response = requests.post(token_url, data=data)
+    response = requests.post(config.OS_ADDRESS_VERIFICATION_TOKEN_URL, data=data)
     response.raise_for_status()  # This will raise an error if the request fails
     token = response.json().get("access_token")
 
@@ -55,7 +46,7 @@ def verify_address(address_instance):
         "User-Agent": "PythonDevApplication",
     }
 
-    match_address_url = f"{base_url}/matchAddress"
+    match_address_url = f"{config.HPUB_FRONTEND_URL}/matchAddress"
     match_response = requests.post(
         match_address_url, json=match_address_payload, headers=headers
     )

@@ -8,7 +8,6 @@ from core.organizations.models import Organization
 from core.users.permissions import IsAdminUser
 import jwt
 import requests
-from configs.get_secret_config import Config
 from core.establishments.models import Establishment
 from core.roles.models import Role
 from core.utils.convert_jwks_token_pem import get_pem_from_jwks
@@ -47,8 +46,6 @@ sys.path.append(
 
 # Setup logger
 logger = logging.getLogger(__name__)
-
-config = Config()
 
 # Constants
 USER_EXISTS_MSG = "User already exists"

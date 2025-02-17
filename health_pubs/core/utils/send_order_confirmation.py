@@ -3,7 +3,7 @@ import os
 import sys
 
 import requests
-from configs.get_secret_config import Config
+import config
 from notifications_python_client.notifications import NotificationsAPIClient
 
 sys.path.append(
@@ -13,9 +13,6 @@ sys.path.append(
 # Load the configuration module
 
 logger = logging.getLogger(__name__)
-
-gov_notify_config = Config()
-
 
 def send_notification(
     notification_type,
@@ -30,13 +27,13 @@ def send_notification(
 ):
     try:
         # GOV.UK Notify API credentials
-        api_key = gov_notify_config.get_gov_uk_notify_api_key()
+        api_key = config.GOV_UK_NOTIFY_API_KE
 
         # Use existing methods to get the template ID
         if notification_type == "email":
-            template_id = gov_notify_config.get_gov_uk_notify_email_template_id()
+            template_id = config.GOV_UK_NOTIFY_EMAIL_TEMPLATE_ID
         elif notification_type == "sms":
-            template_id = gov_notify_config.get_gov_uk_notify_sms_template_id()
+            template_id = config.GOV_UK_NOTIFY_SMS_TEMPLATE_ID
         else:
             raise ValueError("Unsupported notification type.")
 

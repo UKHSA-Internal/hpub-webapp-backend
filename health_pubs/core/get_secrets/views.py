@@ -16,8 +16,6 @@ import pathlib
 
 target_path = pathlib.Path(os.path.abspath(__file__)).parents[2]
 sys.path.append(target_path)
-from configs.config import get_secret_value
-
 import logging
 
 # Configure logging

@@ -7,28 +7,25 @@ sys.path.append(
 import logging
 
 import requests
-from configs.get_secret_config import Config
+import config
 from notifications_python_client.notifications import NotificationsAPIClient
 
 # Load the configuration module
 
 logger = logging.getLogger(__name__)
 
-gov_notify_config = Config()
-
-
 def send_notification(contact_name, contact_email, summary, message):
     try:
         # GOV.UK Notify API credentials
-        api_key = gov_notify_config.get_gov_uk_notify_api_key()
+        api_key = config.GOV_UK_NOTIFY_API_KEY
 
         contact_email_address = (
-            gov_notify_config.get_gov_uk_notify_contact_us_email_address()
+            config.CONTACT_US_APS_EMAIL_ADDRESS
         )
         # logging.info("contact_email_address", contact_email_address)
 
         # Retrieve the email template ID
-        template_id = gov_notify_config.get_gov_uk_notify_contact_us_email_template_id()
+        template_id = config.CONTACT_US_TEMPLATE_ID
         # logging.info("TEMPLATE_ID", template_id)
 
         # Check if required values are available

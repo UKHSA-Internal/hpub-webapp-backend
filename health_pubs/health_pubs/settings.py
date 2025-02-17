@@ -1,50 +1,23 @@
 import sys
 from pathlib import Path
+import config
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-from configs.get_secret_config import Config
-
-config = Config()
-DB_NAME = config.DB_NAME
-DB_HOST = config.DB_HOST
-DB_USER = config.DB_USER
-DB_PASSWORD = config.DB_PASSWORD
-DB_PORT = config.DB_PORT
-AZURE_B2C_CLIENT_ID = config.get_azure_b2c_client_id()
-AZURE_B2C_SECRET_ID = config.get_azure_b2c_secret_id()
-AZURE_B2C_TENANT_ID = config.get_azure_b2c_tenant_id()
-DJANGO_SECRET = config.get_django_secret_key()
-public_key = config.get_rsa_public_key()
-private_key = config.get_rsa_private_key()
-HPUB_FRONT_END_URL = config.get_hpub_base_api_url()
-
-# Quick-start development settings - unsuitable for production
-
-
-SECRET_KEY = DJANGO_SECRET
-
-PUBLIC_KEY = public_key
-PRIVATE_KEY = private_key
-
-
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
-
-ALLOWED_HOSTS = ["localhost", "127.0.0.1", "testserver", "0.0.0.0", "*"]
+ALLOWED_HOSTS = [config.HPUB_FRONTEND_URL, 'http://localhost:8080', '*']
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:5173",
-    HPUB_FRONT_END_URL,
+    config.HPUB_FRONTEND_URL,
 ]
+
+SECRET_KEY = config.SECRET_KEY
 
 CSRF_TRUSTED_ORIGINS = ["http://127.0.0.1:8085"]
 
 CSRF_COOKIE_SECURE = False
-
-
 # Application definition
 
 INSTALLED_APPS = [
@@ -153,11 +126,11 @@ WSGI_APPLICATION = "health_pubs.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": DB_NAME,
-        "USER": DB_USER,
-        "PASSWORD": DB_PASSWORD,
-        "HOST": DB_HOST,
-        "PORT": DB_PORT,
+        "NAME": config.DB_NAME,
+        "USER": config.DB_USER,
+        "PASSWORD": config.DB_PASSWORD,
+        "HOST": config.DB_HOST,
+        "PORT": config.DB_PORT,
     }
 }
 

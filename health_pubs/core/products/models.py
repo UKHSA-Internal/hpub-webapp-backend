@@ -5,7 +5,7 @@ import uuid
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
-from configs.get_secret_config import Config
+import config
 from core.audiences.models import Audience
 from core.diseases.models import Disease
 from core.languages.models import LanguagePage
@@ -318,12 +318,11 @@ class Product(Page):
 
     @property
     def existing_languages(self):
-        config = Config()
         related_products = Product.objects.filter(
             program_id=self.program_id, product_key=self.product_key, is_latest=True
         ).exclude(language_id=self.language_id, product_title=self.product_title)
 
-        domain_name = config.get_hpub_base_api_url()
+        domain_name = config.HPUB_FRONTEND_URL
         existing_languages = []
         for product in related_products:
             product_url = (

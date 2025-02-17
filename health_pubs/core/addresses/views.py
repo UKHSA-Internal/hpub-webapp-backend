@@ -5,7 +5,7 @@ import uuid
 
 import pandas as pd
 import requests
-from configs.get_secret_config import Config
+import config
 from core.errors.enums import ErrorCode, ErrorMessage
 from core.users.models import User
 from core.users.permissions import IsAdminOrRegisteredUser
@@ -56,14 +56,13 @@ class AddressViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsAdminOrRegisteredUser]
     queryset = Address.objects.all()
     serializer_class = AddressSerializer
-    config = Config()
     pagination_class = CustomPagination
 
     # Initialize base_url in the constructor
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.base_url = self.config.get_address_verify_base_url()
+        self.base_url = config.BASE_URL
 
     def create(self, request, *args, **kwargs):
         data = request.data

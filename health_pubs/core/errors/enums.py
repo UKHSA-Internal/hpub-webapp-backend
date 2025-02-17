@@ -81,8 +81,9 @@ class ErrorMessage(Enum):
     USER_INFO_REQUIRED = "User delivery information is required."
     MISSING_ORDER_FROM_DATE = "order_from_date must be provided when available_from_choice is 'specific_date'."
     ATTRIBUTE_ERROR = (
-        "An error occurred while processing the update. Please check the data provided.",
+        "An error occurred while processing the update. Please check the data provided."
     )
+
     LANGUAGE_ID_DOES_NOT_EXIST = "Language ID does not exist."
     PROGRAM_NAME_DOES_NOT_EXIST = "Program name does not exist."
     INVALID_PROGRAM_OR_LANGUAGE = "Invalid program or language."

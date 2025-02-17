@@ -36,14 +36,16 @@ def get_frontend_secrets(request):
     secrets_map = {
         "VITE_APP_PORT": "hpub/frontend/app/port",
         "VITE_API_TARGET": "hpub/api/target",
-        "VITE_MSAL_CLIENT_ID": "hpub/azure/b2c/client/id",
+        "VITE_MSAL_CLIENT_ID": "aw-hpub-euw2-dev-secret-azure_b2c_client_id",
         "VITE_MSAL_AUTHORITY": "hpub/azure/b2c/authority",
         "VITE_MSAL_REDIRECT_URI": "hpub/azure/b2c/redirect/uri",
         "VITE_MSAL_POST_LOGOUT_REDIRECT_URI": "hpub/azure/b2c/postlogout/redirect/uri",
         "VITE_MSAL_KNOWN_AUTHORITIES": "hpub/azure/b2c/known/authorities",
-        "VITE_MSAL_LOGIN_REQUEST_SCOPES": "hpub/azure/b2c/scope",
+        "VITE_MSAL_LOGIN_REQUEST_SCOPES": "hpub/azure/b2c/scopes",
         "VITE_MSAL_LOGIN_REQUEST_PROMPT": "hpub/azure/b2c/login/request/prompt",
+        "VITE_MSAL_SIGNUP_REQUEST_PROMPT": "hpub/azure/b2c/signup/request/prompt",
         "VITE_API_BASE_URL": "hpub/frontend/base/url",
+        "VITE_BUCKET_NAME": "aw-hpub-euw2-dev-secret-hpub_bucket_name",
     }
 
     response_data = {}

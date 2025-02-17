@@ -38,7 +38,7 @@ services:
   localstack:
     image: localstack/localstack:4.1.1
     environment:
-      - SERVICES=s3,secretsmanager,eventbridge
+      - SERVICES=s3,secretsmanager,events
       - HOSTNAME=localstack
       - DEBUG=1
     ports:

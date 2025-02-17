@@ -64,7 +64,7 @@ from .enums import required_event_fields_archived
 from .models import Product, ProductUpdate
 from .serializers import ProductSerializer, ProductUpdateSerializer
 from .signals import send_product_event
-
+from django.core.serializers.json import DjangoJSONEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -548,7 +548,7 @@ class ProductViewSet(viewsets.ViewSet):
 
                         # Handle date conversion
                         created_date = self.convert_created_date(row["created"])
-                        print("program_id", row["programme_id"])
+                        logger.info("program_id %s", row["programme_id"])
 
                         # Fetch related data if 'programme_id' exists
                         program = None
@@ -558,14 +558,12 @@ class ProductViewSet(viewsets.ViewSet):
                                 if pd.notna(row["programme_id"])
                                 else None
                             )
-                            print("PROGRAM_ID", program_id)
+                            logger.info("PROGRAM_ID %s", program_id)
 
                             try:
                                 program = Program.objects.filter(
                                     program_id=program_id
                                 ).first()
-                                print("PROGRAM_INSTANCE", program)
-                                print("PROGRAMME_NAME", program.programme_name)
                             except Program.DoesNotExist:
                                 logger.warning(
                                     f"Row {index + 1}: Program with id {row['programme_id']} does not exist."
@@ -682,10 +680,10 @@ class ProductViewSet(viewsets.ViewSet):
                             Disease, "disease_id", row.get("disease_id")
                         )
 
-                        print("where_to_use_names", where_to_use_names)
-                        print("disease_names", disease_names)
-                        print("audience_names", audience_names)
-                        print("vaccination_names", vaccination_names)
+                        logger.info("where_to_use_names: %s", where_to_use_names)
+                        logger.info("disease_names: %s", disease_names)
+                        logger.info("audience_names: %s", audience_names)
+                        logger.info("vaccination_names: %s", vaccination_names)
                         product_update.diseases_ref.set(disease_instances)
 
                         # Save to persist Many-to-Many relationships
@@ -1097,7 +1095,7 @@ class ProductDeleteAll(View):
 
             return JsonResponse(
                 {"message": f"Deleted {deleted_count1} products successfully."},
-                status=204,  # HTTP_204_NO_CONTENT
+                status=204,
             )
 
         except DatabaseError:
@@ -1485,7 +1483,7 @@ class ProductPatchView(View):
             logger.error(f"Attribute error: {str(e)}")
             return handle_error(
                 ErrorCode.ATTRIBUTE_ERROR,
-                ErrorMessage.ATTRIBUTE_ERROR[0],
+                ErrorMessage.ATTRIBUTE_ERROR,
                 status_code=400,
             )
         except Exception as e:
@@ -1498,6 +1496,15 @@ class ProductPatchView(View):
 
     def process_file_urls(self, product_type: str, product_downloads: dict) -> dict:
         """Process file URLs for the product based on the product type and downloads."""
+        # Ensure product_downloads is a dictionary
+        import json
+
+        if isinstance(product_downloads, str):
+            try:
+                product_downloads = json.loads(product_downloads)
+            except json.JSONDecodeError:
+                raise ValidationError("Invalid JSON format for product_downloads")
+
         self.validate_required_downloads(product_type, product_downloads)
         file_urls = self.initialize_file_urls(product_downloads)
         file_urls = self.validate_file_extensions(file_urls)
@@ -1611,6 +1618,7 @@ class ProductPatchView(View):
 
         # Get metadata for all presigned URLs.
         metadata_list = get_file_metadata(list(presigned_urls.values()))
+
         metadata_dict = {metadata["URL"]: metadata for metadata in metadata_list}
 
         # Map metadata and pre-signed URLs back to file URLs.
@@ -1663,7 +1671,7 @@ class ProductPatchView(View):
                 "order_referral_email_address", ""
             ),
             "stock_owner_email_address": data.get("stock_owner_email_address"),
-            "product_downloads": file_urls,
+            "product_downloads": json.dumps(file_urls, cls=DjangoJSONEncoder),
             "title": "Product_Update Title",
             "slug": slugify("product-update" + str(datetime.datetime.now())),
         }
@@ -1677,6 +1685,9 @@ class ProductPatchView(View):
             logger.info("Creating a new ProductUpdate instance.")
             parent_page = product.get_parent()
             product_update = ProductUpdate(**product_update_data)
+            logger.info(
+                f"Product_update product_downloads before save (create): {product_update.product_downloads}"
+            )  # Log product_downloads before save
             parent_page.add_child(instance=product_update)
             product_update.save_revision().publish()
             product.update_ref = product_update

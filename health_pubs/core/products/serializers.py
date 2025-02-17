@@ -1,5 +1,5 @@
 import uuid
-
+import json
 from core.audiences.serializers import AudienceSerializer
 from core.diseases.serializers import DiseaseSerializer
 from core.languages.models import LanguagePage
@@ -220,21 +220,31 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
         return data
 
     def get_product_downloads(self, obj):
-        # Assuming obj.product_downloads is a dictionary with keys like 'main_download_url', 'web_download_url', etc.
+        """Ensure product_downloads is a dictionary before accessing it."""
+        try:
+            # Deserialize only if it's a string
+            downloads = (
+                json.loads(obj.product_downloads)
+                if isinstance(obj.product_downloads, str)
+                else obj.product_downloads
+            )
+        except json.JSONDecodeError:
+            downloads = {}
+
         return {
-            "main_download_url": obj.product_downloads.get("main_download_url"),
-            "video_url": obj.product_downloads.get("video_url"),
+            "main_download_url": downloads.get("main_download_url"),
+            "video_url": downloads.get("video_url"),
             "web_download_url": [
                 FileMetadataSerializer(m).data
-                for m in obj.product_downloads.get("web_download_url", [])
+                for m in downloads.get("web_download_url", [])
             ],
             "print_download_url": [
                 FileMetadataSerializer(m).data
-                for m in obj.product_downloads.get("print_download_url", [])
+                for m in downloads.get("print_download_url", [])
             ],
             "transcript_url": [
                 FileMetadataSerializer(m).data
-                for m in obj.product_downloads.get("transcript_url", [])
+                for m in downloads.get("transcript_url", [])
             ],
         }
 

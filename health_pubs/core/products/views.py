@@ -27,8 +27,6 @@ from core.utils.custom_token_authentication import CustomTokenAuthentication
 from core.utils.extract_file_metadata import get_file_metadata
 from core.utils.generate_s3_presigned_url import generate_presigned_urls
 
-from django.utils.decorators import method_decorator
-from django.views.decorators.cache import cache_page
 from core.utils.product_recommendation_system import get_recommended_products
 from core.vaccinations.models import Vaccination
 from core.vaccinations.serializers import VaccinationSerializer
@@ -249,22 +247,23 @@ def _update_downloads_with_presigned(product_downloads, presigned_urls):
     Returns True if any update was performed.
     """
     updated = False
-    # Update main_download_url
-    main_download = product_downloads.get("main_download_url")
-    if isinstance(main_download, dict):
-        s3_url = main_download.get("s3_bucket_url", "")
-        if s3_url in presigned_urls:
-            main_download["URL"] = presigned_urls[s3_url]
-            updated = True
-
-    # Update additional download types
-    for key in ["web_download_url", "print_download_url", "transcript_url"]:
-        downloads = product_downloads.get(key, [])
-        if isinstance(downloads, list):
-            for item in downloads:
-                s3_url = item.get("s3_bucket_url", "")
-                if s3_url in presigned_urls:
-                    item["URL"] = presigned_urls[s3_url]
+    for key in [
+        "main_download_url",
+        "web_download_url",
+        "print_download_url",
+        "transcript_url",
+    ]:
+        items = product_downloads.get(key)
+        if isinstance(items, dict):
+            s3_url = items.get("s3_bucket_url")
+            if s3_url and (presigned_url := presigned_urls.get(s3_url)):
+                items["URL"] = presigned_url
+                updated = True
+        elif isinstance(items, list):
+            for item in items:
+                s3_url = item.get("s3_bucket_url")
+                if s3_url and (presigned_url := presigned_urls.get(s3_url)):
+                    item["URL"] = presigned_url
                     updated = True
     return updated
 
@@ -297,17 +296,6 @@ def update_product_urls(products_data, presigned_urls):
                 "Expected update_ref to be a dictionary but got %s",
                 type(update_refs).__name__,
             )
-
-
-def _collect_download_urls(products):
-    """Collect all download URLs from products for presigned URL generation."""
-    all_download_urls = []
-    for product in products:
-        product_update = product.update_ref  # Assuming update_ref is an attribute
-        if product_update:
-            product_downloads = product_update.product_downloads
-            all_download_urls.extend(_extract_urls_from_downloads(product_downloads))
-    return all_download_urls
 
 
 def _update_product_downloads_with_presigned_urls(product_data, presigned_urls):
@@ -1771,8 +1759,8 @@ class ProductPatchView(View):
 
 
 class ProductCreateView(APIView):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
 
     def post(self, request, *args, **kwargs):
         logger.info("ProductCreateView POST method called")
@@ -2145,10 +2133,9 @@ class ProductListMixin:
         return serializer.data, paginator
 
 
-@method_decorator(cache_page(60 * 15), name="dispatch")
 class ProductAdminListView(APIView, ProductListMixin):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get(self, request, *args, **kwargs):
         logger.info("ProductAdminListView GET method called")
@@ -2172,7 +2159,6 @@ class ProductAdminListView(APIView, ProductListMixin):
             return handle_exceptions(e)
 
 
-@method_decorator(cache_page(60 * 15), name="dispatch")
 class ProductUsersListView(APIView, ProductListMixin):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
@@ -2217,8 +2203,8 @@ class ProductUsersListView(APIView, ProductListMixin):
 
 
 class ProductSearchAdminView(APIView, ProductListMixin):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
     pagination_class = CustomPagination
 
     def get(self, request, *args, **kwargs):
@@ -2322,7 +2308,7 @@ class ProductSearchUserView(APIView, ProductListMixin):
             )
 
 
-class UsersProductFilterView(APIView, ProductListMixin):
+class ProductUsersFilterView(APIView, ProductListMixin):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
     pagination_class = CustomPagination
@@ -2410,9 +2396,9 @@ class UsersProductFilterView(APIView, ProductListMixin):
             )
 
 
-class AdminProductFilterView(APIView, ProductListMixin):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+class ProductAdminFilterView(APIView, ProductListMixin):
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
     pagination_class = CustomPagination
 
     def get(self, request, *args, **kwargs) -> Response:

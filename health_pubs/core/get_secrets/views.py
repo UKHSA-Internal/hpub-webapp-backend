@@ -14,6 +14,14 @@ import sys
 import os
 import pathlib
 
+# Dynamically determine the environment
+env = os.environ.get("ENVIRONMENT", "DEV").upper()
+allowed_envs = {"TEST", "DEV", "UAT", "PRD"}
+if env not in allowed_envs:
+    env = "DEV"
+env = env.lower()
+
+# Adjust path to configuration based on environment
 target_path = pathlib.Path(os.path.abspath(__file__)).parents[2]
 sys.path.append(target_path)
 from configs.config import get_secret_value
@@ -34,18 +42,18 @@ def get_frontend_secrets(request):
     and return them as JSON for the frontend to ingest.
     """
     secrets_map = {
-        "VITE_APP_PORT": "hpub/frontend/app/port",
-        "VITE_API_TARGET": "hpub/api/target",
-        "VITE_MSAL_CLIENT_ID": "aw-hpub-euw2-dev-secret-azure_b2c_client_id",
-        "VITE_MSAL_AUTHORITY": "hpub/azure/b2c/authority",
-        "VITE_MSAL_REDIRECT_URI": "hpub/azure/b2c/redirect/uri",
-        "VITE_MSAL_POST_LOGOUT_REDIRECT_URI": "hpub/azure/b2c/postlogout/redirect/uri",
-        "VITE_MSAL_KNOWN_AUTHORITIES": "hpub/azure/b2c/known/authorities",
-        "VITE_MSAL_LOGIN_REQUEST_SCOPES": "hpub/azure/b2c/scopes",
-        "VITE_MSAL_LOGIN_REQUEST_PROMPT": "hpub/azure/b2c/login/request/prompt",
-        "VITE_MSAL_SIGNUP_REQUEST_PROMPT": "hpub/azure/b2c/signup/request/prompt",
-        "VITE_API_BASE_URL": "hpub/frontend/base/url",
-        "VITE_BUCKET_NAME": "aw-hpub-euw2-dev-secret-hpub_bucket_name",
+        "VITE_APP_PORT": f"hpub/frontend/app/port",
+        "VITE_API_TARGET": f"hpub/api/target",
+        "VITE_MSAL_CLIENT_ID": f"aw-hpub-euw2-{env}-secret-azure_b2c_client_id",
+        "VITE_MSAL_AUTHORITY": f"hpub/azure/b2c/authority",
+        "VITE_MSAL_REDIRECT_URI": f"hpub/azure/b2c/redirect/uri",
+        "VITE_MSAL_POST_LOGOUT_REDIRECT_URI": f"hpub/azure/b2c/postlogout/redirect/uri",
+        "VITE_MSAL_KNOWN_AUTHORITIES": f"hpub/azure/b2c/known/authorities",
+        "VITE_MSAL_LOGIN_REQUEST_SCOPES": f"hpub/azure/b2c/scopes",
+        "VITE_MSAL_LOGIN_REQUEST_PROMPT": f"hpub/azure/b2c/login/request/prompt",
+        "VITE_MSAL_SIGNUP_REQUEST_PROMPT": f"hpub/azure/b2c/signup/request/prompt",
+        "VITE_API_BASE_URL": f"hpub/frontend/base/url",
+        "VITE_BUCKET_NAME": f"aw-hpub-euw2-{env}-secret-hpub_bucket_name",
     }
 
     response_data = {}

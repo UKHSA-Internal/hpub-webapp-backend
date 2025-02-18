@@ -1,4 +1,3 @@
-import json
 from rest_framework.decorators import (
     api_view,
     permission_classes,
@@ -10,21 +9,22 @@ from rest_framework.permissions import AllowAny
 from rest_framework.authentication import SessionAuthentication
 
 from django.views.decorators.http import require_http_methods
+
+
 import sys
+
 import os
+
 import pathlib
 
-# Dynamically determine the environment
-env = os.environ.get("ENVIRONMENT", "DEV").upper()
-allowed_envs = {"TEST", "DEV", "UAT", "PRD"}
-if env not in allowed_envs:
-    env = "DEV"
-env = env.lower()
 
 # Adjust path to configuration based on environment
+
 target_path = pathlib.Path(os.path.abspath(__file__)).parents[2]
+
 sys.path.append(target_path)
-from configs.config import get_secret_value
+
+from configs.get_secret_config import Config
 
 import logging
 
@@ -38,37 +38,37 @@ logger = logging.getLogger(__name__)
 @permission_classes([AllowAny])
 def get_frontend_secrets(request):
     """
-    Retrieve front-end specific secrets from AWS Secrets Manager
+    Retrieve front-end specific secrets from environment variables or AWS Secrets Manager
     and return them as JSON for the frontend to ingest.
     """
     secrets_map = {
-        "VITE_APP_PORT": f"hpub/frontend/app/port",
-        "VITE_API_TARGET": f"hpub/api/target",
-        "VITE_MSAL_CLIENT_ID": f"aw-hpub-euw2-{env}-secret-azure_b2c_client_id",
-        "VITE_MSAL_AUTHORITY": f"hpub/azure/b2c/authority",
-        "VITE_MSAL_REDIRECT_URI": f"hpub/azure/b2c/redirect/uri",
-        "VITE_MSAL_POST_LOGOUT_REDIRECT_URI": f"hpub/azure/b2c/postlogout/redirect/uri",
-        "VITE_MSAL_KNOWN_AUTHORITIES": f"hpub/azure/b2c/known/authorities",
-        "VITE_MSAL_LOGIN_REQUEST_SCOPES": f"hpub/azure/b2c/scopes",
-        "VITE_MSAL_LOGIN_REQUEST_PROMPT": f"hpub/azure/b2c/login/request/prompt",
-        "VITE_MSAL_SIGNUP_REQUEST_PROMPT": f"hpub/azure/b2c/signup/request/prompt",
-        "VITE_API_BASE_URL": f"hpub/frontend/base/url",
-        "VITE_BUCKET_NAME": f"aw-hpub-euw2-{env}-secret-hpub_bucket_name",
+        "VITE_APP_PORT": "VITE_APP_PORT",
+        "VITE_API_TARGET": "VITE_API_TARGET",
+        "VITE_MSAL_CLIENT_ID": "AZURE_B2C_CLIENT_ID",
+        "VITE_MSAL_AUTHORITY": "AZURE_B2C_ISSUER",
+        "VITE_MSAL_REDIRECT_URI": "VITE_MSAL_REDIRECT_URI",
+        "VITE_MSAL_POST_LOGOUT_REDIRECT_URI": "VITE_MSAL_POST_LOGOUT_REDIRECT_URI",
+        "VITE_MSAL_KNOWN_AUTHORITIES": "AZURE_B2C_TENANT_NAME",
+        "VITE_MSAL_LOGIN_REQUEST_SCOPES": "VITE_MSAL_LOGIN_REQUEST_SCOPES",
+        "VITE_API_BASE_URL": "VITE_API_BASE_URL",
+        "VITE_BUCKET_NAME": "VITE_BUCKET_NAME",
     }
 
     response_data = {}
+    config = Config()  # Instantiate Config here to ensure it's fresh for each request
     try:
-        for frontend_var, secret_key in secrets_map.items():
-            secret_value = get_secret_value(secret_key)
-            secret_json = json.loads(secret_value)
+        for frontend_var, env_var_key in secrets_map.items():
+            try:
+                secret_value = config.get_non_secret_value(env_var_key)
+                response_data[frontend_var] = secret_value
+                logger.debug(
+                    f"Successfully retrieved value for {frontend_var} from environment."
+                )
 
-            if isinstance(secret_json, dict) and len(secret_json) == 1:
-                value = next(iter(secret_json.values()))
-                response_data[frontend_var] = value
-                logger.debug(f"Successfully retrieved secret for {frontend_var}")
-            else:
-                logger.warning(f"Unexpected secret format for key: {secret_key}")
-                response_data[frontend_var] = None  # Handle as appropriate
+            except EnvironmentError as e:
+                logger.warning(f"Environment variable {env_var_key} not found: {e}")
+                response_data[frontend_var] = None  # Or handle default value as needed
+
     except Exception as e:
         logger.exception(f"Error occurred while retrieving frontend secrets: {str(e)}")
         return Response(

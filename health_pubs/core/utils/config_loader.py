@@ -1,30 +1,20 @@
 import os
+
 from dotenv import load_dotenv
 
 
 def load_environment():
     """
-    Load environment variables from the appropriate .env file based on the ENVIRONMENT variable.
-    Supported environments: TEST, DEV, UAT, PRD.
-    Defaults to DEV if not provided.
+    Load environment variables from a .env file located in the project's root directory.
     """
-    # Get the environment type, defaulting to DEV if not set
-    env = os.environ.get("ENVIRONMENT", "DEV").upper()
-    allowed_envs = {"TEST", "DEV", "UAT", "PRD"}
-    if env not in allowed_envs:
-        raise ValueError(
-            f"Unsupported ENVIRONMENT '{env}'. Supported values are: {allowed_envs}"
-        )
-
     # Get the directory of the current file
     current_file_dir = os.path.dirname(os.path.abspath(__file__))
 
     # Move two directories up from the current file's directory to reach the project root
     base_dir = os.path.abspath(os.path.join(current_file_dir, "../../"))
 
-    # Construct the path to the environment file (e.g., .env.dev, .env.test, etc.)
-    env_file_name = f".env.{env.lower()}"
-    env_path = os.path.join(base_dir, "configs", env_file_name)
+    # Construct the path to the .env file
+    env_path = os.path.join(base_dir, "configs", ".env")
 
-    # Load the environment variables from the selected file
+    # Load environment variables from the .env file
     load_dotenv(dotenv_path=env_path)

@@ -27,8 +27,7 @@ from core.utils.custom_token_authentication import CustomTokenAuthentication
 from core.utils.extract_file_metadata import get_file_metadata
 from core.utils.generate_s3_presigned_url import generate_presigned_urls
 
-from django.utils.decorators import method_decorator
-from django.views.decorators.cache import cache_page
+
 from core.utils.product_recommendation_system import get_recommended_products
 from core.vaccinations.models import Vaccination
 from core.vaccinations.serializers import VaccinationSerializer
@@ -2145,7 +2144,6 @@ class ProductListMixin:
         return serializer.data, paginator
 
 
-@method_decorator(cache_page(60 * 15), name="dispatch")
 class ProductAdminListView(APIView, ProductListMixin):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
@@ -2172,7 +2170,6 @@ class ProductAdminListView(APIView, ProductListMixin):
             return handle_exceptions(e)
 
 
-@method_decorator(cache_page(60 * 15), name="dispatch")
 class ProductUsersListView(APIView, ProductListMixin):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]

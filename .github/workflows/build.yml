@@ -28,7 +28,7 @@ jobs:
     # Even further on, this should push to a centralised ECR registry.
     environment: dev
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         if: ${{ env.RUN_UNIT_TESTS == 'true' }}

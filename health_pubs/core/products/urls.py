@@ -2,7 +2,7 @@ from django.urls import path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
-    AdminProductFilterView,
+    ProductAdminFilterView,
     ProductAdminListView,
     ProductCreateView,
     ProductDeleteAll,
@@ -16,7 +16,7 @@ from .views import (
     ProductUsersListView,
     ProductViewSet,
     ProgramProductsView,
-    UsersProductFilterView,
+    ProductUsersFilterView,
 )
 
 router = DefaultRouter()
@@ -50,8 +50,8 @@ urlpatterns = [
     ),
     path("search/admin", ProductSearchAdminView.as_view(), name="product-search-admin"),
     path("search/user", ProductSearchUserView.as_view(), name="product-search-user"),
-    path("user_filter", UsersProductFilterView.as_view(), name="user-product-filter"),
-    path("admin_filter", AdminProductFilterView.as_view(), name="admin-product-filter"),
+    path("user_filter", ProductUsersFilterView.as_view(), name="user-product-filter"),
+    path("admin_filter", ProductAdminFilterView.as_view(), name="admin-product-filter"),
     path(
         "<str:program_id>/products",
         ProgramProductsView.as_view(),

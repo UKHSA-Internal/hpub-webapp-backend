@@ -7,27 +7,22 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 from configs.get_secret_config import Config
 
 config = Config()
-DB_NAME = config.DB_NAME
-DB_HOST = config.DB_HOST
-DB_USER = config.DB_USER
-DB_PASSWORD = config.DB_PASSWORD
-DB_PORT = config.DB_PORT
+DB_NAME = config.get_db_name()
+DB_HOST = config.get_db_host()
+DB_USER = config.get_db_user()
+DB_PASSWORD = config.get_db_password()
+DB_PORT = config.get_db_port()
 AZURE_B2C_CLIENT_ID = config.get_azure_b2c_client_id()
 AZURE_B2C_SECRET_ID = config.get_azure_b2c_secret_id()
 AZURE_B2C_TENANT_ID = config.get_azure_b2c_tenant_id()
 DJANGO_SECRET = config.get_django_secret_key()
-public_key = config.get_rsa_public_key()
-private_key = config.get_rsa_private_key()
-HPUB_FRONT_END_URL = config.get_hpub_base_api_url()
-
+PUBLIC_KEY = config.get_rsa_public_key()
+PRIVATE_KEY = config.get_rsa_private_key()
+HPUB_FRONTEND_URL = config.get_hpub_base_api_url()
 # Quick-start development settings - unsuitable for production
 
 
 SECRET_KEY = DJANGO_SECRET
-
-PUBLIC_KEY = public_key
-PRIVATE_KEY = private_key
-
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
@@ -37,7 +32,7 @@ ALLOWED_HOSTS = ["localhost", "127.0.0.1", "testserver", "0.0.0.0", "*"]
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:5173",
-    HPUB_FRONT_END_URL,
+    HPUB_FRONTEND_URL,
 ]
 
 CSRF_TRUSTED_ORIGINS = ["http://127.0.0.1:8085"]

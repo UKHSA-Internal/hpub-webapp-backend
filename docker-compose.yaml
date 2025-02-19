@@ -29,6 +29,7 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: health_pubs.settings
       AWS_DEFAULT_REGION: eu-west-2
+      ENVIRONMENT: ${ENVIRONMENT}
     ports:
       - "8080:8000"
     volumes:

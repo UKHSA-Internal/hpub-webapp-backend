@@ -52,6 +52,8 @@ def get_frontend_secrets(request):
         "VITE_MSAL_LOGIN_REQUEST_SCOPES": "VITE_MSAL_LOGIN_REQUEST_SCOPES",
         "VITE_API_BASE_URL": "VITE_API_BASE_URL",
         "VITE_BUCKET_NAME": "VITE_BUCKET_NAME",
+        "VITE_AWS_ACCESS_KEY": "VITE_AWS_ACCESS_KEY",
+        "VITE_AWS_SECRET_KEY": "VITE_AWS_SECRET_KEY",
     }
 
     response_data = {}

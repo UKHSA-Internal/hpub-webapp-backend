@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 import os
@@ -60,7 +61,7 @@ class Config:
             return get_secret_value(key)
 
     @staticmethod
-    def _parse_json(json_string: str, key: str or None = None) -> str:
+    def _parse_json(json_string: str, key: Optional[str] = None) -> str:
         """Parse the JSON string and extract the value."""
         try:
             # Convert the JSON string into a Python dictionary
@@ -226,14 +227,29 @@ class Config:
         return Config.get_value("DJANGO_SECRET_KEY", is_secret=False)
 
     @staticmethod
+    def _decode_rsa_key(encoded_key: str) -> str:
+        """
+        Decodes a Base64-encoded RSA key back to PEM format.
+        """
+        try:
+            decoded_key = base64.b64decode(encoded_key).decode("utf-8")
+            logger.debug("RSA key decoded successfully.")
+            return decoded_key
+        except Exception as e:
+            logger.error(f"Failed to decode RSA key: {e}")
+            raise
+
+    @staticmethod
     def get_rsa_private_key():
-        """Retrieve the RSA private key from AWS Secrets Manager."""
-        return Config.get_value("RSA_PRIVATE_KEY", is_secret=False)
+        """Retrieve and decode the RSA private key from environment variables."""
+        encoded_key = Config.get_value("RSA_PRIVATE_KEY", is_secret=False)
+        return Config._decode_rsa_key(encoded_key)
 
     @staticmethod
     def get_rsa_public_key():
-        """Retrieve the RSA public key from AWS Secrets Manager."""
-        return Config.get_value("RSA_PUBLIC_KEY", is_secret=False)
+        """Retrieve and decode the RSA public key from environment variables."""
+        encoded_key = Config.get_value("RSA_PUBLIC_KEY", is_secret=False)
+        return Config._decode_rsa_key(encoded_key)
 
     @staticmethod
     def get_db_port():

@@ -7,11 +7,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 from configs.get_secret_config import Config
 
 config = Config()
-DB_NAME = config.DB_NAME
-DB_HOST = config.DB_HOST
-DB_USER = config.DB_USER
-DB_PASSWORD = config.DB_PASSWORD
-DB_PORT = config.DB_PORT
+DB_NAME = config.get_db_name()
+DB_HOST = config.get_db_host()
+DB_USER = config.get_db_user()
+DB_PASSWORD = config.get_db_password()
+DB_PORT = config.get_db_port()
 AZURE_B2C_CLIENT_ID = config.get_azure_b2c_client_id()
 AZURE_B2C_SECRET_ID = config.get_azure_b2c_secret_id()
 AZURE_B2C_TENANT_ID = config.get_azure_b2c_tenant_id()
@@ -19,6 +19,7 @@ DJANGO_SECRET = config.get_django_secret_key()
 public_key = config.get_rsa_public_key()
 private_key = config.get_rsa_private_key()
 HPUB_FRONT_END_URL = config.get_hpub_base_api_url()
+
 
 # Quick-start development settings - unsuitable for production
 
@@ -165,12 +166,12 @@ DATABASES = {
 #  NOTE: This will be used once I have the AWS Config for the setup
 # Cache Configuration
 # CACHES = {
-#     'default': {
-#         'BACKEND': 'django_redis.cache.RedisCache',
-#         'LOCATION': get_secret_value('REDIS_URL', 'redis://localhost:6379/1'),
-#         'OPTIONS': {
-#             'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-#         }
+#     "default": {
+#         "BACKEND": "django_redis.cache.RedisCache",
+#         "LOCATION": "redis://localhost:6379/1",
+#         "OPTIONS": {
+#             "CLIENT_CLASS": "django_redis.client.DefaultClient",
+#         },
 #     }
 # }
 

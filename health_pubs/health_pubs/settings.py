@@ -19,6 +19,8 @@ DJANGO_SECRET = config.get_django_secret_key()
 public_key = config.get_rsa_public_key()
 private_key = config.get_rsa_private_key()
 HPUB_FRONT_END_URL = config.get_hpub_base_api_url()
+AWS_REGION = "eu-west-2"
+AWS_BUCKET_NAME = config.get_hpub_s3_bucket_name()
 
 
 # Quick-start development settings - unsuitable for production

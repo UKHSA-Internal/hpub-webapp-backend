@@ -60,10 +60,12 @@ def send_event(order_instance):
             response = eventbridge.put_events(
                 Entries=[
                     {
-                        "Source": config.get_hpub_event_bridge_source,
-                        "DetailType": config.get_hpub_event_bridge_detail_type_order_creation,
+                        "Source": str(config.get_hpub_event_bridge_source()),
+                        "DetailType": str(
+                            config.get_hpub_event_bridge_detail_type_order_creation()
+                        ),
                         "Detail": json.dumps(event_detail),
-                        "EventBusName": config.get_hpub_event_bridge_bus_name,
+                        "EventBusName": str(config.get_hpub_event_bridge_bus_name()),
                     }
                 ]
             )

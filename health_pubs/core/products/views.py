@@ -1678,7 +1678,7 @@ class ProductPatchView(View):
     def get_or_create_product_update(
         self, product: Product, product_update_data: dict
     ) -> ProductUpdate:
-        """Fetch or create a ProductUpdate instance and save it."""
+        """Fetch or create a ProductUpdate instance and update the product without triggering extra signals."""
         product_update = product.update_ref
         if not product_update:
             logger.info("Creating a new ProductUpdate instance.")
@@ -1689,13 +1689,12 @@ class ProductPatchView(View):
             )  # Log product_downloads before save
             parent_page.add_child(instance=product_update)
             product_update.save_revision().publish()
-            product.update_ref = product_update
+            Product.objects.filter(pk=product.pk).update(update_ref=product_update)
         else:
             logger.info("Updating existing ProductUpdate instance.")
             for key, value in product_update_data.items():
                 setattr(product_update, key, value)
-        product_update.save()
-        product.save()
+            product_update.save()
         return product_update
 
     def update_order_limits(self, product: Product, order_limits: list):

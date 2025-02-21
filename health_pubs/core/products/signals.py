@@ -123,10 +123,10 @@ def send_product_event(product_instance, event_type, detail_type, required_field
             response = eventbridge.put_events(
                 Entries=[
                     {
-                        "Source": config.get_hpub_event_bridge_source,
-                        "DetailType": detail_type,
+                        "Source": str(config.get_hpub_event_bridge_source()),
+                        "DetailType": str(detail_type),
                         "Detail": json.dumps(event_detail),
-                        "EventBusName": config.get_hpub_event_bridge_bus_name,
+                        "EventBusName": str(config.get_hpub_event_bridge_bus_name()),
                     }
                 ]
             )
@@ -159,7 +159,7 @@ def send_product_draft_event(sender, instance, **kwargs):
         send_product_event(
             instance,
             "draft",
-            config.get_hpub_event_bridge_detail_type_product_draft,
+            config.get_hpub_event_bridge_detail_type_product_draft(),
             required_event_fields_draft,
         )
 
@@ -174,7 +174,7 @@ def send_product_live_event(sender, instance, **kwargs):
         send_product_event(
             instance,
             "live",
-            config.get_hpub_event_bridge_detail_type_product_live,
+            config.get_hpub_event_bridge_detail_type_product_live(),
             required_event_fields_live,
         )
 
@@ -189,7 +189,7 @@ def send_product_archived_event(sender, instance, **kwargs):
         send_product_event(
             instance,
             "archived",
-            config.get_hpub_event_bridge_detail_type_product_archive,
+            config.get_hpub_event_bridge_detail_type_product_archive(),
             required_event_fields_archived,
         )
 
@@ -204,6 +204,6 @@ def send_product_withdrawn_event(sender, instance, **kwargs):
         send_product_event(
             instance,
             "withdrawn",
-            config.get_hpub_event_bridge_detail_type_product_withdrawn,
+            config.get_hpub_event_bridge_detail_type_product_withdrawn(),
             required_event_fields_withdrawn,
         )

@@ -331,15 +331,20 @@ def get_product(product_code: str) -> Optional[Product]:
     """Fetch the latest version of the product by its product code.
     Returns None if the product is not found.
     """
-    try:
-        product = (
-            Product.objects.filter(product_code__startswith=product_code)
-            .order_by("-version_number")
-            .first()
+    product = (
+        Product.objects.filter(product_code__startswith=product_code)
+        .order_by("-version_number")
+        .first()
+    )
+
+    if not product:
+        return handle_error(
+            ErrorCode.PRODUCT_NOT_FOUND,
+            ErrorMessage.PRODUCT_NOT_FOUND,
+            status.HTTP_404_NOT_FOUND,
         )
-        return product
-    except Product.DoesNotExist:
-        return None
+
+    return product
 
 
 def handle_exceptions(exception):
@@ -548,21 +553,19 @@ class ProductViewSet(viewsets.ViewSet):
                             )
                             logger.info("PROGRAM_ID %s", program_id)
 
-                            try:
-                                program = Program.objects.filter(
-                                    program_id=program_id
-                                ).first()
-                            except Program.DoesNotExist:
-                                logger.warning(
-                                    f"Row {index + 1}: Program with id {row['programme_id']} does not exist."
-                                )
-                                skipped_rows.append(
-                                    {
-                                        "row": index + 1,
-                                        "error": f"Program with id {row['programme_id']} does not exist.",
-                                    }
-                                )
-                                continue
+                        program = Program.objects.filter(program_id=program_id).first()
+
+                        if not program:
+                            logger.warning(
+                                f"Row {index + 1}: Program with id {row['programme_id']} does not exist."
+                            )
+                            skipped_rows.append(
+                                {
+                                    "row": index + 1,
+                                    "error": f"Program with id {row['programme_id']} does not exist.",
+                                }
+                            )
+                            continue
 
                         # Fetch language data
                         try:

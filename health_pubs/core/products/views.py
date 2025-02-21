@@ -254,17 +254,29 @@ def _update_downloads_with_presigned(product_downloads, presigned_urls):
         "transcript_url",
     ]:
         items = product_downloads.get(key)
-        if isinstance(items, dict):
-            s3_url = items.get("s3_bucket_url")
-            if s3_url and (presigned_url := presigned_urls.get(s3_url)):
-                items["URL"] = presigned_url
-                updated = True
-        elif isinstance(items, list):
-            for item in items:
-                s3_url = item.get("s3_bucket_url")
-                if s3_url and (presigned_url := presigned_urls.get(s3_url)):
-                    item["URL"] = presigned_url
-                    updated = True
+        if items:
+            updated |= _update_items_with_presigned(items, presigned_urls)
+    return updated
+
+
+def _update_items_with_presigned(items, presigned_urls):
+    """Helper to update individual items with presigned URLs."""
+    updated = False
+    if isinstance(items, dict):
+        updated |= _update_dict_item(items, presigned_urls)
+    elif isinstance(items, list):
+        for item in items:
+            updated |= _update_dict_item(item, presigned_urls)
+    return updated
+
+
+def _update_dict_item(item, presigned_urls):
+    """Update a single dictionary item with a presigned URL if applicable."""
+    updated = False
+    s3_url = item.get("s3_bucket_url")
+    if s3_url and (presigned_url := presigned_urls.get(s3_url)):
+        item["URL"] = presigned_url
+        updated = True
     return updated
 
 

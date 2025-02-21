@@ -27,7 +27,6 @@ from core.utils.custom_token_authentication import CustomTokenAuthentication
 from core.utils.extract_file_metadata import get_file_metadata
 from core.utils.generate_s3_presigned_url import generate_presigned_urls
 
-
 from core.utils.product_recommendation_system import get_recommended_products
 from core.vaccinations.models import Vaccination
 from core.vaccinations.serializers import VaccinationSerializer
@@ -248,23 +247,36 @@ def _update_downloads_with_presigned(product_downloads, presigned_urls):
     Returns True if any update was performed.
     """
     updated = False
-    # Update main_download_url
-    main_download = product_downloads.get("main_download_url")
-    if isinstance(main_download, dict):
-        s3_url = main_download.get("s3_bucket_url", "")
-        if s3_url in presigned_urls:
-            main_download["URL"] = presigned_urls[s3_url]
-            updated = True
+    for key in [
+        "main_download_url",
+        "web_download_url",
+        "print_download_url",
+        "transcript_url",
+    ]:
+        items = product_downloads.get(key)
+        if items:
+            updated |= _update_items_with_presigned(items, presigned_urls)
+    return updated
 
-    # Update additional download types
-    for key in ["web_download_url", "print_download_url", "transcript_url"]:
-        downloads = product_downloads.get(key, [])
-        if isinstance(downloads, list):
-            for item in downloads:
-                s3_url = item.get("s3_bucket_url", "")
-                if s3_url in presigned_urls:
-                    item["URL"] = presigned_urls[s3_url]
-                    updated = True
+
+def _update_items_with_presigned(items, presigned_urls):
+    """Helper to update individual items with presigned URLs."""
+    updated = False
+    if isinstance(items, dict):
+        updated |= _update_dict_item(items, presigned_urls)
+    elif isinstance(items, list):
+        for item in items:
+            updated |= _update_dict_item(item, presigned_urls)
+    return updated
+
+
+def _update_dict_item(item, presigned_urls):
+    """Update a single dictionary item with a presigned URL if applicable."""
+    updated = False
+    s3_url = item.get("s3_bucket_url")
+    if s3_url and (presigned_url := presigned_urls.get(s3_url)):
+        item["URL"] = presigned_url
+        updated = True
     return updated
 
 
@@ -296,17 +308,6 @@ def update_product_urls(products_data, presigned_urls):
                 "Expected update_ref to be a dictionary but got %s",
                 type(update_refs).__name__,
             )
-
-
-def _collect_download_urls(products):
-    """Collect all download URLs from products for presigned URL generation."""
-    all_download_urls = []
-    for product in products:
-        product_update = product.update_ref  # Assuming update_ref is an attribute
-        if product_update:
-            product_downloads = product_update.product_downloads
-            all_download_urls.extend(_extract_urls_from_downloads(product_downloads))
-    return all_download_urls
 
 
 def _update_product_downloads_with_presigned_urls(product_data, presigned_urls):
@@ -342,15 +343,20 @@ def get_product(product_code: str) -> Optional[Product]:
     """Fetch the latest version of the product by its product code.
     Returns None if the product is not found.
     """
-    try:
-        product = (
-            Product.objects.filter(product_code__startswith=product_code)
-            .order_by("-version_number")
-            .first()
+    product = (
+        Product.objects.filter(product_code__startswith=product_code)
+        .order_by("-version_number")
+        .first()
+    )
+
+    if not product:
+        return handle_error(
+            ErrorCode.PRODUCT_NOT_FOUND,
+            ErrorMessage.PRODUCT_NOT_FOUND,
+            status.HTTP_404_NOT_FOUND,
         )
-        return product
-    except Product.DoesNotExist:
-        return None
+
+    return product
 
 
 def handle_exceptions(exception):
@@ -559,21 +565,19 @@ class ProductViewSet(viewsets.ViewSet):
                             )
                             logger.info("PROGRAM_ID %s", program_id)
 
-                            try:
-                                program = Program.objects.filter(
-                                    program_id=program_id
-                                ).first()
-                            except Program.DoesNotExist:
-                                logger.warning(
-                                    f"Row {index + 1}: Program with id {row['programme_id']} does not exist."
-                                )
-                                skipped_rows.append(
-                                    {
-                                        "row": index + 1,
-                                        "error": f"Program with id {row['programme_id']} does not exist.",
-                                    }
-                                )
-                                continue
+                        program = Program.objects.filter(program_id=program_id).first()
+
+                        if not program:
+                            logger.warning(
+                                f"Row {index + 1}: Program with id {row['programme_id']} does not exist."
+                            )
+                            skipped_rows.append(
+                                {
+                                    "row": index + 1,
+                                    "error": f"Program with id {row['programme_id']} does not exist.",
+                                }
+                            )
+                            continue
 
                         # Fetch language data
                         try:
@@ -1770,8 +1774,8 @@ class ProductPatchView(View):
 
 
 class ProductCreateView(APIView):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
 
     def post(self, request, *args, **kwargs):
         logger.info("ProductCreateView POST method called")
@@ -2145,8 +2149,8 @@ class ProductListMixin:
 
 
 class ProductAdminListView(APIView, ProductListMixin):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get(self, request, *args, **kwargs):
         logger.info("ProductAdminListView GET method called")
@@ -2214,8 +2218,8 @@ class ProductUsersListView(APIView, ProductListMixin):
 
 
 class ProductSearchAdminView(APIView, ProductListMixin):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
     pagination_class = CustomPagination
 
     def get(self, request, *args, **kwargs):
@@ -2319,7 +2323,7 @@ class ProductSearchUserView(APIView, ProductListMixin):
             )
 
 
-class UsersProductFilterView(APIView, ProductListMixin):
+class ProductUsersFilterView(APIView, ProductListMixin):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
     pagination_class = CustomPagination
@@ -2407,9 +2411,9 @@ class UsersProductFilterView(APIView, ProductListMixin):
             )
 
 
-class AdminProductFilterView(APIView, ProductListMixin):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+class ProductAdminFilterView(APIView, ProductListMixin):
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
     pagination_class = CustomPagination
 
     def get(self, request, *args, **kwargs) -> Response:

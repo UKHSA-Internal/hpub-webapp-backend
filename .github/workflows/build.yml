@@ -37,7 +37,7 @@ jobs:
           cache: 'pip'
       
       - name: Unit tests
-        if: ${{ env.RUN_UNIT_TESTS == 'true '}}
+        if: ${{ env.RUN_UNIT_TESTS == 'true' }}
         run: |
           cd health_pubs
           python -m pip install --upgrade pip
@@ -66,7 +66,7 @@ jobs:
         with:
           context: .
           push: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
-          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ github.sha }}
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ github.sha }},${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:latest
           cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:latest
           cache-to: type=inline
 
@@ -196,7 +196,7 @@ jobs:
         environment_prefix: ${{ steps.url.outputs.prefix }}
       shell: bash
       run: |
-        response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" https://$environment_prefix.test-and-trace.nhs.uk/)
+        response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" https://$environment_prefix.test-and-trace.nhs.uk/api/v1/health/)
         if [ "$response" -ne 200 ]; then
           echo "Post-Deployment tests failed!"
           exit 1

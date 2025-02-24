@@ -302,6 +302,8 @@ class ProductSerializer(serializers.ModelSerializer):
             "version_number",
             "update_ref",
             "order_limits",
+            "created_at",
+            "updated_at",
         )
 
     def validate(self, data):

@@ -4,29 +4,43 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.core.exceptions import ObjectDoesNotExist
 
-# Import your User model; adjust the import path as needed.
 from core.users.models import User
+from wagtail.models import Page  # Explicitly import Page from wagtail.models
 
 logger = logging.getLogger(__name__)
 
 
-def delete_user(user_id: str) -> dict:
+def delete_user_and_dependencies(user_id: str) -> dict:
     """
-    Deletes a user and, if applicable, the associated Wagtail page tree.
+    Hard deletes a user and all of its associated Wagtail pages and dependencies.
+
+    This function:
+      - Retrieves the User record by user_id.
+      - If the user has an associated Wagtail page (assumed to be stored in a 'page' attribute),
+        it explicitly queries the Page model to retrieve that page, and then calls its hard delete method.
+      - Finally, it deletes the User record.
+
+    Note: Ensure cascading delete settings are configured so that all related data (e.g., revisions,
+    workflow data, etc.) is removed.
     """
     try:
         with transaction.atomic():
             user_instance = User.objects.get(user_id=user_id)
 
-            # If your User model is a subclass of Wagtail Page, this will remove its tree.
-            # Otherwise, if there's an associated page relation, delete that tree.
-            if hasattr(user_instance, "page"):
-                # If the user has an associated page, delete that page.
-                user_instance.page.delete()
-            else:
-                # Otherwise, delete the user instance directly.
-                user_instance.delete()
+            # Explicitly retrieve the associated Page using the Page model.
+            if hasattr(user_instance, "page") and user_instance.page:
+                page_id = user_instance.page.id
+                page = Page.objects.get(id=page_id)
+                # Hard delete the page tree.
+                page.delete(hard=True)
+                logger.info(
+                    "Hard deleted Wagtail page tree (Page id: %s) for user_id %s.",
+                    page_id,
+                    user_id,
+                )
 
+            # Delete the User record.
+            user_instance.delete()
             logger.info("User with user_id %s deleted successfully.", user_id)
             return {"success": True}
 
@@ -39,7 +53,9 @@ def delete_user(user_id: str) -> dict:
 
 
 class Command(BaseCommand):
-    help = "Delete a user by user_id along with its associated Wagtail pages."
+    help = (
+        "Hard delete a user along with all associated Wagtail pages and dependencies."
+    )
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -48,11 +64,13 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         user_id = options["user_id"]
-        result = delete_user(user_id)
+        result = delete_user_and_dependencies(user_id)
 
         if result.get("success"):
             self.stdout.write(
-                self.style.SUCCESS(f"User {user_id} deleted successfully.")
+                self.style.SUCCESS(
+                    f"User {user_id} and all related Wagtail dependencies were hard deleted successfully."
+                )
             )
         else:
             error_message = result.get("error", "Unknown error")

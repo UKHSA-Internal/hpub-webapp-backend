@@ -482,7 +482,8 @@ class UserLoginView(APIView):
 
 
 class UpdateUserView(APIView):
-    permission_classes = [IsAuthenticated]
+
+    permission_classes = [AllowAny]
 
     def put(self, request):
         user_id = request.data.get("user_id")

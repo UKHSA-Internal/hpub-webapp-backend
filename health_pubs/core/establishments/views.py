@@ -182,8 +182,8 @@ class EstablishmentListViewSet(ReadOnlyModelViewSet):
 
 
 class EstablishmentsByOrganizationViewSet(viewsets.ModelViewSet):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated]
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
 
     queryset = Establishment.objects.all()
     serializer_class = EstablishmentSerializer

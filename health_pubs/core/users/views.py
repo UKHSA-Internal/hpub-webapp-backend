@@ -482,7 +482,6 @@ class UserLoginView(APIView):
 
 
 class UpdateUserView(APIView):
-
     permission_classes = [AllowAny]
 
     def put(self, request):

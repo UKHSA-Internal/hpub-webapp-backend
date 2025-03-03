@@ -101,7 +101,6 @@ def get_file_metadata(presigned_urls):
             elif file_type.startswith("image/"):
                 dimensions = get_image_dimensions(file_path)
                 metadata["dimensions"] = dimensions
-                metadata["number_of_pages"] = 1
 
             elif (
                 file_type

@@ -1,18 +1,25 @@
 # views.py
-import time
+import uuid
 import boto3
 from django.conf import settings
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework.authentication import SessionAuthentication
-from rest_framework.permissions import AllowAny
+from core.utils.custom_token_authentication import CustomTokenAuthentication
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import authentication_classes, permission_classes
+from core.users.permissions import IsAdminUser
 
 
-@authentication_classes([SessionAuthentication])
-@permission_classes([AllowAny])
+@authentication_classes([CustomTokenAuthentication])
+@permission_classes([IsAuthenticated, IsAdminUser])
 class GeneratePresignedUrlView(APIView):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.bucket_name = settings.AWS_BUCKET_NAME
+        self.region = settings.AWS_REGION
+        self.s3_client = boto3.client("s3", region_name=self.region)
+
     def post(self, request):
         file_name = request.data.get("fileName")
         content_type = request.data.get("contentType")
@@ -23,20 +30,14 @@ class GeneratePresignedUrlView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        bucket_name = settings.AWS_BUCKET_NAME
-        region = settings.AWS_REGION
+        # Generate a unique key for the file using a UUID.
+        key = f"{uuid.uuid4()}_{file_name}"
 
-        # Generate a unique key for the file using the current timestamp.
-        key = f"{int(time.time())}_{file_name}"
-
-        # Initialize the S3 client
-        s3_client = boto3.client("s3", region_name=region)
         try:
-            # Create a pre-signed URL valid for 1 hour (3600 seconds)
-            presigned_url = s3_client.generate_presigned_url(
+            presigned_url = self.s3_client.generate_presigned_url(
                 "put_object",
                 Params={
-                    "Bucket": bucket_name,
+                    "Bucket": self.bucket_name,
                     "Key": key,
                     "ContentType": content_type,
                 },
@@ -51,7 +52,7 @@ class GeneratePresignedUrlView(APIView):
             {
                 "url": presigned_url,
                 "key": key,
-                "bucketName": bucket_name,
-                "region": region,
+                "bucketName": self.bucket_name,
+                "region": self.region,
             }
         )

@@ -42,3 +42,54 @@ def generate_presigned_urls(urls: List[str], expiration: int = 3600) -> Dict[str
     # logging.info("Presigned Url", presigned_urls)
 
     return presigned_urls
+
+
+def generate_inline_presigned_urls(urls: list, expiration: int = 3600) -> dict:
+    """
+    For a list of S3 URLs, generate presigned URLs with an inline content disposition.
+    This header tells browsers to render (for example, display a PDF inline in a new tab).
+    Before generating the URL, the function checks that the S3 object exists.
+    """
+    s3_client = boto3.client("s3")
+    inline_urls = {}
+    for url in urls:
+        parsed_url = urlparse(url)
+        if "amazonaws.com" in parsed_url.netloc:
+            bucket_name = parsed_url.netloc.split(".")[0]
+            object_key = parsed_url.path.lstrip("/")
+        else:
+            logger.info(f"Invalid S3 URL format: {url}")
+            continue
+
+        # Check if the object exists before generating the presigned URL.
+        try:
+            s3_client.head_object(Bucket=bucket_name, Key=object_key)
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "")
+            if error_code in ["404", "NoSuchKey"]:
+                logger.info(f"The specified key does not exist: {object_key}")
+                continue
+            else:
+                logger.info(f"Error checking existence of {object_key}: {e}")
+                continue
+
+        try:
+            inline_url = s3_client.generate_presigned_url(
+                "get_object",
+                Params={
+                    "Bucket": bucket_name,
+                    "Key": object_key,
+                    "ResponseContentDisposition": "inline",
+                },
+                ExpiresIn=expiration,
+            )
+            inline_urls[url] = inline_url
+        except (NoCredentialsError, PartialCredentialsError) as e:
+            logger.info(f"Credentials error generating inline URL for {url}: {e}")
+        except ClientError as e:
+            logger.info(f"Client error generating inline URL for {url}: {e}")
+
+    return inline_urls
+
+
+#

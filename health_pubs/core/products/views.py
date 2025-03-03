@@ -25,7 +25,10 @@ from core.users.permissions import (
 )
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from core.utils.extract_file_metadata import get_file_metadata
-from core.utils.generate_s3_presigned_url import generate_presigned_urls
+from core.utils.generate_s3_presigned_url import (
+    generate_inline_presigned_urls,
+    generate_presigned_urls,
+)
 
 
 from core.utils.product_recommendation_system import get_recommended_products
@@ -405,7 +408,7 @@ def _handle_timeout_error():
 
 
 class CustomPagination(PageNumberPagination):
-    page_size = 20  # Set pagination to 20 items per page
+    page_size = 10  # Set pagination to 10 items per page
 
     def get_paginated_response(self, data, status_code=200):
         response = Response(
@@ -900,7 +903,6 @@ class ProductDetailView(View):
 
         try:
             product = Product.objects.filter(product_code=product_code).first()
-
             if not product:
                 logger.warning(f"No product found with product_code: {product_code}")
                 return handle_error(
@@ -911,31 +913,23 @@ class ProductDetailView(View):
 
             # Fetch the associated product update
             product_update = product.update_ref
-
-            logger.info("Product Update", product_update)
+            logger.info("Product Update: %s", product_update)
 
             if product_update is None:
                 logger.warning(
                     f"No product update found for product_code: {product.product_code}"
                 )
-            else:
-                logger.info(f"Update Product: {product_update}")
-
-            # Find similar products only for the updates tied to this product
-            # Commenting it for now as we would be using it later on
-            # similar_products = find_similar_products(product, product_update)
 
             serializer = ProductSerializer(product)
             response_data = serializer.data
-            # response_data["similar_products"] = similar_products
 
-            # Collect all URLs for presigned URL generation
+            # Collect all S3 bucket URLs from the product downloads
             all_download_urls = []
             update_refs = response_data.get("update_ref") or {}
             if isinstance(update_refs, dict):
                 product_downloads = update_refs.get("product_downloads") or {}
 
-                # Check main download URL
+                # Process main download URL
                 if "main_download_url" in product_downloads:
                     main_download = product_downloads.get("main_download_url") or {}
                     if not isinstance(main_download, dict):
@@ -943,7 +937,7 @@ class ProductDetailView(View):
                     if "s3_bucket_url" in main_download:
                         all_download_urls.append(main_download["s3_bucket_url"])
 
-                # Check additional download types
+                # Process additional download types
                 for download_type in [
                     "web_download_url",
                     "print_download_url",
@@ -957,22 +951,33 @@ class ProductDetailView(View):
 
             logger.info(LOG_MSG_S3_URL_EXTRACTION, all_download_urls)
 
-            # Generate new presigned URLs
+            # Independently generate standard and inline presigned URLs.
             presigned_urls = generate_presigned_urls(all_download_urls)
-            logger.info("Generated presigned URLs: %s", presigned_urls)
+            inline_presigned_urls = generate_inline_presigned_urls(all_download_urls)
 
-            # Update product download URLs with presigned URLs
+            logger.info("Generated presigned URLs: %s", presigned_urls)
+            logger.info("Generated inline presigned URLs: %s", inline_presigned_urls)
+
+            # Update product downloads with both fields.
             if isinstance(update_refs, dict):
                 product_downloads = update_refs.get("product_downloads") or {}
 
-                # Update main_download_url
+                # Update main_download_url field.
                 if "main_download_url" in product_downloads:
                     main_download = product_downloads.get("main_download_url") or {}
                     s3_url = main_download.get("s3_bucket_url") or ""
                     if s3_url in presigned_urls:
                         main_download["URL"] = presigned_urls[s3_url]
+                    # If inline_presigned_s3_url is missing or empty, generate one.
+                    if (
+                        not main_download.get("inline_presigned_s3_url")
+                        and s3_url in inline_presigned_urls
+                    ):
+                        main_download[
+                            "inline_presigned_s3_url"
+                        ] = inline_presigned_urls[s3_url]
 
-                # Update other download types
+                # Update additional download types.
                 for download_type in [
                     "web_download_url",
                     "print_download_url",
@@ -984,6 +989,13 @@ class ProductDetailView(View):
                             s3_url = item.get("s3_bucket_url", "")
                             if s3_url in presigned_urls:
                                 item["URL"] = presigned_urls[s3_url]
+                            if (
+                                not item.get("inline_presigned_s3_url")
+                                and s3_url in inline_presigned_urls
+                            ):
+                                item["inline_presigned_s3_url"] = inline_presigned_urls[
+                                    s3_url
+                                ]
 
             logger.info("Returning product details for product_code: %s", product_code)
             return JsonResponse(response_data, status=200)
@@ -1614,6 +1626,7 @@ class ProductPatchView(View):
 
         # Generate pre-signed URLs for all URLs first.
         presigned_urls = generate_presigned_urls(all_urls)
+        inline_presigned_urls = generate_inline_presigned_urls(all_urls)
 
         # Get metadata for all presigned URLs.
         metadata_list = get_file_metadata(list(presigned_urls.values()))
@@ -1628,6 +1641,7 @@ class ProductPatchView(View):
                 presigned_url = presigned_urls.get(url)
                 metadata = metadata_dict.get(presigned_url, {"URL": url})
                 metadata["s3_bucket_url"] = url
+                metadata["inline_presigned_s3_url"] = inline_presigned_urls.get(url, "")
                 file_urls[key] = metadata
 
             # Handle list-based URLs (e.g., web_download_url, print_download_url).
@@ -1637,6 +1651,9 @@ class ProductPatchView(View):
                     presigned_url = presigned_urls.get(url)
                     metadata = metadata_dict.get(presigned_url, {"URL": url})
                     metadata["s3_bucket_url"] = url
+                    metadata["inline_presigned_s3_url"] = inline_presigned_urls.get(
+                        url, ""
+                    )
                     updated_list.append(metadata)
                 file_urls[key] = updated_list
 

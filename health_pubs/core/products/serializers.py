@@ -15,6 +15,7 @@ from .models import Product, ProductUpdate
 
 class FileMetadataSerializer(serializers.Serializer):
     URL = serializers.URLField(required=True)
+    inline_presigned_s3_url = serializers.URLField(required=False)
     file_size = serializers.CharField(required=True)
     file_type = serializers.CharField(required=True)
     number_of_pages = serializers.CharField(required=False)

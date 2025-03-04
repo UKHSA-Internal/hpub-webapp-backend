@@ -24,7 +24,7 @@ def generate_presigned_urls(urls: List[str], expiration: int = 3600) -> Dict[str
             bucket_name = parsed_url.netloc.split(".")[0]
             object_key = parsed_url.path.lstrip("/")
         else:
-            logging.info(f"Invalid S3 URL format: {url}")
+            logging.warning(f"Invalid S3 URL format: {url}")
             continue  # Skip to the next URL if the format is incorrect
 
         try:
@@ -57,8 +57,9 @@ def generate_inline_presigned_urls(urls: list, expiration: int = 3600) -> dict:
         if "amazonaws.com" in parsed_url.netloc:
             bucket_name = parsed_url.netloc.split(".")[0]
             object_key = parsed_url.path.lstrip("/")
-
-        logger.error(f"Invalid S3 URL format: {url}")
+        else:
+            logger.warning(f"Invalid S3 URL format: {url}")
+            continue
 
         # Check if the object exists before generating the presigned URL.
         try:
@@ -68,8 +69,9 @@ def generate_inline_presigned_urls(urls: list, expiration: int = 3600) -> dict:
             if error_code in ["404", "NoSuchKey"]:
                 logger.warning(f"The specified key does not exist: {object_key}")
                 continue
-
-            logger.error(f"Error checking existence of {object_key}: {e}")
+            else:
+                logger.warning(f"Error checking existence of {object_key}: {e}")
+                continue
 
         try:
             inline_url = s3_client.generate_presigned_url(

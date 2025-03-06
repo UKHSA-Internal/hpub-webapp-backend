@@ -245,11 +245,23 @@ def _extract_urls_from_downloads(product_downloads):
     return urls
 
 
+import json
+
+
 def _update_downloads_with_presigned(product_downloads, presigned_urls):
     """Helper to update product_downloads dict with presigned URLs.
 
     Returns True if any update was performed.
     """
+    # If product_downloads is a JSON string, convert it to a dictionary.
+    if isinstance(product_downloads, str):
+        try:
+            product_downloads = json.loads(product_downloads)
+        except json.JSONDecodeError as e:
+            # Log the error or handle it accordingly.
+            print("Failed to parse product_downloads JSON:", e)
+            return False
+
     updated = False
     # Update main_download_url
     main_download = product_downloads.get("main_download_url")
@@ -713,6 +725,9 @@ class ProductViewSet(viewsets.ViewSet):
                                     f"Invalid publish_date format for row {index+1}: {raw_version_date}"
                                 )
                                 publish_date = None
+                        # Set default publish_date to today's date if not provided or invalid
+                        if publish_date is None:
+                            publish_date = datetime.date.today()
 
                         # Prepare Product instance
                         slug = f"{slugify(row['title'])}-{row['product_id']}-{uuid.uuid4()}"
@@ -1384,8 +1399,8 @@ class ProductUpdateView(View):
 
 
 class ProductPatchView(View):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
     """
     View to handle product updates via PATCH requests.
     """
@@ -1430,13 +1445,26 @@ class ProductPatchView(View):
                     "order_from_date must be provided when available_from_choice is 'specific_date'."
                 )
 
+            available_until_choice = data.get("available_until_choice")
+            order_end_date = data.get("order_end_date")
+
+            if available_until_choice == "specific_date" and not order_end_date:
+                logger.error(
+                    "order_end_date must be provided when available_until_choice is 'specific_date'."
+                )
+
                 return handle_error(
                     ErrorCode.MISSING_ORDER_FROM_DATE,
                     ErrorMessage.MISSING_ORDER_FROM_DATE,
                     status_code=400,
                 )
             product_update_data = self.prepare_product_update_data(
-                data, available_from_choice, order_from_date, file_urls
+                data,
+                available_until_choice,
+                available_from_choice,
+                order_from_date,
+                order_end_date,
+                file_urls,
             )
 
             with transaction.atomic():
@@ -1453,7 +1481,9 @@ class ProductPatchView(View):
                         self.update_foreign_keys(updated_product.update_ref, data)
 
                     # Update or create ProductUpdate instance
-                    self.get_or_create_product_update(product, product_update_data)
+                    self.get_or_create_product_update(
+                        product, product_update_data, data
+                    )
 
                     response_data = serializer.data
                     if updated_product.update_ref:
@@ -1662,55 +1692,73 @@ class ProductPatchView(View):
     def prepare_product_update_data(
         self,
         data: dict,
+        available_until_choice: str,
         available_from_choice: str,
         order_from_date: str,
+        order_end_date: str,
         file_urls: dict,
     ) -> dict:
-        """Prepare the data for updating or creating a ProductUpdate instance."""
-        return {
-            "minimum_stock_level": data.get("minimum_stock_level"),
-            "maximum_order_quantity": data.get("maximum_order_quantity"),
-            "available_from_choice": available_from_choice,
-            "order_from_date": (
-                order_from_date if available_from_choice == "specific_date" else None
-            ),
-            "order_end_date": data.get("order_end_date"),
-            "product_type": data.get("product_type"),
-            "alternative_type": data.get("alternative_type"),
-            "run_to_zero": data.get("run_to_zero"),
-            "cost_centre": data.get("cost_centre"),
-            "local_code": data.get("local_code"),
-            "unit_of_measure": data.get("unit_of_measure"),
-            "order_exceptions": data.get("order_exceptions"),
-            "summary_of_guidance": data.get("summary_of_guidance"),
-            "order_referral_email_address": data.get(
-                "order_referral_email_address", ""
-            ),
-            "stock_owner_email_address": data.get("stock_owner_email_address"),
-            "product_downloads": json.dumps(file_urls, cls=DjangoJSONEncoder),
-            "title": "Product_Update Title",
-            "slug": slugify("product-update" + str(datetime.datetime.now())),
-        }
+        allowed_fields = [
+            "minimum_stock_level",
+            "maximum_order_quantity",
+            "order_exceptions",
+            "product_type",
+            "alternative_type",
+            "run_to_zero",
+            "cost_centre",
+            "local_code",
+            "unit_of_measure",
+            "summary_of_guidance",
+            "order_referral_email_address",
+            "stock_owner_email_address",
+        ]
+        product_update_data = {}
+
+        for field in allowed_fields:
+            if field in data:
+                product_update_data[field] = data.get(field)
+
+        # Special handling for available_from_choice and order_from_date:
+        if "available_from_choice" in data:
+            product_update_data["available_from_choice"] = available_from_choice
+            if available_from_choice == "specific_date" and "order_from_date" in data:
+                product_update_data["order_from_date"] = order_from_date
+        # Special handling for available_until_choice and order_end_date:
+        if "available_until_choice" in data:
+            product_update_data["available_until_choice"] = available_until_choice
+            if available_from_choice == "specific_date" and "order_end_date" in data:
+                product_update_data["order_end_date"] = order_end_date
+        # If product_downloads is provided, include it.
+        if "product_downloads" in data:
+            product_update_data["product_downloads"] = json.dumps(
+                file_urls, cls=DjangoJSONEncoder
+            )
+
+        # Always update title/slug if needed
+        product_update_data["title"] = "Product_Update Title"
+        product_update_data["slug"] = slugify(
+            "product-update" + str(datetime.datetime.now())
+        )
+
+        return product_update_data
 
     def get_or_create_product_update(
-        self, product: Product, product_update_data: dict
+        self, product: Product, product_update_data: dict, raw_data: dict
     ) -> ProductUpdate:
-        """Fetch or create a ProductUpdate instance and update the product without triggering extra signals."""
         product_update = product.update_ref
         if not product_update:
             logger.info("Creating a new ProductUpdate instance.")
             parent_page = product.get_parent()
             product_update = ProductUpdate(**product_update_data)
-            logger.info(
-                f"Product_update product_downloads before save (create): {product_update.product_downloads}"
-            )  # Log product_downloads before save
             parent_page.add_child(instance=product_update)
             product_update.save_revision().publish()
             Product.objects.filter(pk=product.pk).update(update_ref=product_update)
         else:
             logger.info("Updating existing ProductUpdate instance.")
+            # Update any field that is explicitly provided in the payload
             for key, value in product_update_data.items():
-                setattr(product_update, key, value)
+                if key in raw_data:
+                    setattr(product_update, key, value)
             product_update.save()
         return product_update
 
@@ -1748,16 +1796,30 @@ class ProductPatchView(View):
                 order_limit_page.save()
 
     def update_foreign_keys(self, product_update: ProductUpdate, data: dict):
-        """Update foreign key relationships for the product update."""
         for field_name, model_class, relationship_field in [
             ("audience_names", Audience, "audience_ref"),
             ("vaccination_names", Vaccination, "vaccination_ref"),
             ("disease_names", Disease, "diseases_ref"),
             ("where_to_use_names", WhereToUse, "where_to_use_ref"),
         ]:
-            self.update_many_to_many_relationships(
-                product_update, data, field_name, model_class, relationship_field
-            )
+            # Only update if the key exists and its value is not None or an empty list
+            if field_name in data:
+                # If the client sends an empty list explicitly, you might want to skip updating:
+                if data[field_name] is None or (
+                    isinstance(data[field_name], list) and len(data[field_name]) == 0
+                ):
+                    # Option 1: Skip update to preserve existing relationships
+                    continue
+                    # Option 2: Or, if you truly intend to clear the relationships when an empty list is sent,
+                    # you can call set([]) explicitly.
+                else:
+                    self.update_many_to_many_relationships(
+                        product_update,
+                        data,
+                        field_name,
+                        model_class,
+                        relationship_field,
+                    )
         product_update.save()
 
     def update_many_to_many_relationships(
@@ -1768,7 +1830,6 @@ class ProductPatchView(View):
         model_class,
         relationship_field: str,
     ):
-        """Helper function to update many-to-many relationships."""
         names = data.get(field_name, [])
         refs = []
         for name in names:
@@ -1777,17 +1838,12 @@ class ProductPatchView(View):
                 refs.append(ref)
             except model_class.DoesNotExist:
                 logger.warning(f"{model_class.__name__} with name {name} not found.")
-        if hasattr(product_update, relationship_field):
-            getattr(product_update, relationship_field).set(refs)
-            if not refs:
-                getattr(product_update, relationship_field).clear()
-        else:
-            logger.error(f"ProductUpdate does not have attribute {relationship_field}")
+        getattr(product_update, relationship_field).set(refs)
 
 
 class ProductCreateView(APIView):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
 
     def post(self, request, *args, **kwargs):
         logger.info("ProductCreateView POST method called")
@@ -1823,6 +1879,8 @@ class ProductCreateView(APIView):
 
             # Extract publish_date from the request data, defaulting to None
             publish_date = data.get("publish_date", None)
+            if not publish_date:
+                publish_date = timezone.now()
 
             # Check if the language_id exists in the LanguagePage table
             if not LanguagePage.objects.filter(language_id=language_id).exists():
@@ -2161,8 +2219,8 @@ class ProductListMixin:
 
 
 class ProductAdminListView(APIView, ProductListMixin):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get(self, request, *args, **kwargs):
         logger.info("ProductAdminListView GET method called")
@@ -2230,8 +2288,8 @@ class ProductUsersListView(APIView, ProductListMixin):
 
 
 class ProductSearchAdminView(APIView, ProductListMixin):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
     pagination_class = CustomPagination
 
     def get(self, request, *args, **kwargs):
@@ -2424,8 +2482,8 @@ class UsersProductFilterView(APIView, ProductListMixin):
 
 
 class AdminProductFilterView(APIView, ProductListMixin):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
     pagination_class = CustomPagination
 
     def get(self, request, *args, **kwargs) -> Response:

@@ -48,6 +48,13 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
         ],
         required=True,
     )
+    available_until_choice = serializers.ChoiceField(
+        choices=[
+            ("no_end_date", "No End Date"),
+            ("specific_date", "On a specific date"),
+        ],
+        required=True,
+    )
     order_end_date = serializers.DateField(required=True)
 
     product_type = serializers.ChoiceField(
@@ -189,6 +196,7 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
             "quantity_available",
             "available_from_choice",
             "order_from_date",
+            "available_until_choice",
             "order_end_date",
             "product_type",
             "alternative_type",

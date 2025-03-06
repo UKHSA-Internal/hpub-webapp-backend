@@ -1561,7 +1561,19 @@ class ProductPatchView(View):
         required_downloads = {
             "Audio": ["main_download", "web_download", "transcript"],
             "Bulletins": ["main_download", "print_download", "web_download"],
-            # Other product types...
+            "Consent Form": ["main_download", "print_download", "web_download"],
+            "Images": ["main_download", "web_download"],
+            "Leaflets": ["main_download", "print_download", "web_download"],
+            "Postcards": ["main_download", "print_download", "web_download"],
+            "Posters": ["main_download", "print_download", "web_download"],
+            "Pull-Up Banners": ["main_download", "print_download", "web_download"],
+            "Stickers": ["main_download", "print_download", "web_download"],
+            "Record Cards": ["main_download", "print_download", "web_download"],
+            "Z-Card": ["main_download", "print_download", "web_download"],
+            "Fridge Magnet": ["main_download", "print_download", "web_download"],
+            "Video": ["main_download", "web_download", "video_url"],
+            "GIF": ["main_download", "web_download"],
+            "Slides": ["main_download", "web_download"],
         }
 
         if product_type in required_downloads:

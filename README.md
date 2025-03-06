@@ -13,10 +13,9 @@ This project is a Wagtail-Django-based backend application for managing various 
    3. Environment variables (.env.dev file)
    4. pip (Python package manager)
    5. Docker (optional, for running the project in a container)
-   6. Ensure your Ip is whitelisted in Aurora DB please speak with Jagan (DevOps Engineer)
-   7. Install PgAdmin to visualize the db using this Link `https://ftp.postgresql.org/pub/pgadmin/pgadmin4/v8.13/windows/pgadmin4-8.13-x64.exe`
-   8. Install and set up Postman to test out the endpoints.
-   9. Have access to AWS Environments
+   6. Install PgAdmin to visualize the db using this Link `https://ftp.postgresql.org/pub/pgadmin/pgadmin4/v8.13/windows/pgadmin4-8.13-x64.exe`
+   7. Install and set up Postman to test out the endpoints.
+   8. Have access to AWS Environments
 
 ## Getting Started
 

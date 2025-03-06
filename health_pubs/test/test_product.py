@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 from core.products.views import (
     ProductViewSet,
     ProductStatusUpdateView,
-    AdminProductFilterView,
+    ProductAdminFilterView,
     ProductSearchUserView,
     ProductUpdateView,
     ProductDeleteAll,
@@ -275,21 +275,21 @@ def test_admin_product_filter_success(mock_filter):
 
     request = factory.get(url, {"product_title": "Product"})
     force_authenticate(request, user=get_dummy_user(is_admin=True))
-    with patch.object(AdminProductFilterView, "permission_classes", []), patch.object(
-        AdminProductFilterView,
+    with patch.object(ProductAdminFilterView, "permission_classes", []), patch.object(
+        ProductAdminFilterView,
         "_collect_download_urls",
         return_value=["https://example.com/file.png"],
     ), patch.object(
-        AdminProductFilterView,
+        ProductAdminFilterView,
         "_update_product_downloads_with_presigned_urls",
         return_value=None,
     ), patch(
         "core.products.views.ProductSerializer",
         new=lambda instance, many=False: DummyProductSerializer(instance, many=many),
     ), patch.object(
-        AdminProductFilterView, "pagination_class", DummyPagination
+        ProductAdminFilterView, "pagination_class", DummyPagination
     ):
-        view = AdminProductFilterView.as_view()
+        view = ProductAdminFilterView.as_view()
         response = view(request)
     print("ADMIN PRODUCT FILTER RESPONSE:", response.data)
     assert response.status_code == status.HTTP_200_OK

@@ -38,7 +38,7 @@ class FileMetadataSerializer(serializers.Serializer):
 class ProductUpdateSerializer(serializers.ModelSerializer):
     # Required fields
     minimum_stock_level = serializers.IntegerField(required=True)
-    maximum_order_quantity = serializers.IntegerField(required=True)
+    maximum_order_quantity = serializers.IntegerField(required=False, allow_null=True)
     run_to_zero = serializers.BooleanField(required=True)
     quantity_available = serializers.IntegerField(required=False)
     available_from_choice = serializers.ChoiceField(
@@ -55,7 +55,7 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
         ],
         required=True,
     )
-    order_end_date = serializers.DateField(required=True)
+    order_end_date = serializers.DateField(required=False, allow_null=True)
 
     product_type = serializers.ChoiceField(
         required=True,

@@ -1163,12 +1163,15 @@ class ProductStatusUpdateView(View):
             f"Attempting to update status for product with product_code: {decoded_product_code}"
         )
 
+        # Validate product_code pattern
         if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
+            logger.warning(f"Invalid product_code format: {product_code}")
             return _handle_invalid_query_param()
 
         try:
-            product = get_product(decoded_product_code)
+            product = self.get_product(decoded_product_code)
             if not product:
+                logger.warning(f"Product with code {decoded_product_code} not found.")
                 return handle_error(
                     ErrorCode.PRODUCT_NOT_FOUND,
                     ErrorMessage.PRODUCT_NOT_FOUND,
@@ -1176,27 +1179,44 @@ class ProductStatusUpdateView(View):
                 )
 
             new_status = self.get_status_from_request(request)
+            if not new_status:
+                return JsonResponse(
+                    {
+                        "error": "Invalid or missing 'status' field in request body.",
+                        "details": "Ensure the request includes a valid 'status' field.",
+                    },
+                    status=HTTP_400_BAD_REQUEST,
+                )
+
             if not self.is_valid_status(new_status):
-                return handle_error(
-                    ErrorCode.INVALID_STATUS,
-                    ErrorMessage.INVALID_STATUS,
-                    status_code=HTTP_400_BAD_REQUEST,
+                return JsonResponse(
+                    {
+                        "error": "Invalid status value.",
+                        "details": f"Allowed values are: {self.get_valid_statuses()}",
+                    },
+                    status=HTTP_400_BAD_REQUEST,
                 )
 
             if self.is_invalid_status_transition(product.status, new_status):
-                return handle_error(
-                    ErrorCode.INVALID_TRANSITION,
-                    ErrorMessage.INVALID_TRANSITION,
-                    status_code=HTTP_400_BAD_REQUEST,
+                return JsonResponse(
+                    {
+                        "error": "Invalid status transition.",
+                        "details": f"Cannot transition from '{product.status}' to '{new_status}'. Allowed transitions: {self.ALLOWED_TRANSITIONS.get(product.status, [])}",
+                    },
+                    status=HTTP_400_BAD_REQUEST,
                 )
 
             if new_status == "live":
                 missing_fields = self.check_required_fields(product)
                 if missing_fields:
+                    logger.warning(
+                        f"Cannot change status to 'live' due to missing fields: {missing_fields}"
+                    )
                     return JsonResponse(
                         {
-                            "error": "Cannot change status to 'live' due to missing fields.",
+                            "error": "Cannot change status to 'live'.",
                             "missing_fields": missing_fields,
+                            "details": "Ensure all required fields are provided.",
                         },
                         status=HTTP_400_BAD_REQUEST,
                     )
@@ -1204,10 +1224,20 @@ class ProductStatusUpdateView(View):
                     product.publish_date = timezone.now()
 
             product.status = new_status
-            product.save()
-            logger.info(
-                f"Product status updated to {new_status} for product_code: {decoded_product_code}"
-            )
+            try:
+                product.save()
+                logger.info(
+                    f"Product status updated to {new_status} for product_code: {decoded_product_code}"
+                )
+            except DatabaseError as e:
+                logger.error(
+                    f"Database error while updating product {decoded_product_code}: {str(e)}"
+                )
+                return handle_error(
+                    ErrorCode.DATABASE_ERROR,
+                    ErrorMessage.DATABASE_ERROR,
+                    status_code=500,
+                )
 
             return JsonResponse(
                 {"message": "Product status updated successfully."}, status=HTTP_200_OK
@@ -1216,16 +1246,12 @@ class ProductStatusUpdateView(View):
         except (DatabaseError, TimeoutError) as e:
             logger.exception(f"Error occurred while updating product status: {str(e)}")
             return handle_error(
-                (
-                    ErrorCode.DATABASE_ERROR
-                    if isinstance(e, DatabaseError)
-                    else ErrorCode.TIMEOUT_ERROR
-                ),
-                (
-                    ErrorMessage.DATABASE_ERROR
-                    if isinstance(e, DatabaseError)
-                    else ErrorMessage.TIMEOUT_ERROR
-                ),
+                ErrorCode.DATABASE_ERROR
+                if isinstance(e, DatabaseError)
+                else ErrorCode.TIMEOUT_ERROR,
+                ErrorMessage.DATABASE_ERROR
+                if isinstance(e, DatabaseError)
+                else ErrorMessage.TIMEOUT_ERROR,
                 status_code=500 if isinstance(e, DatabaseError) else 504,
             )
         except json.JSONDecodeError:
@@ -1243,6 +1269,36 @@ class ProductStatusUpdateView(View):
                 status_code=500,
             )
 
+    def get_product(self, decoded_product_code: str):
+        """
+        Retrieve a product instance based on the product code.
+        Note: Updated to query on the correct field 'product_code'.
+        """
+        try:
+            return Product.objects.get(product_code=decoded_product_code)
+        except Product.DoesNotExist:
+            return None
+
+    def get_status_from_request(self, request) -> str:
+        """Extract the new status from the request body with logging."""
+        try:
+            raw_data = request.body.decode("utf-8")
+            logger.info(f"Received request body: {raw_data}")
+            data = json.loads(raw_data)
+            return data.get("status")
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {str(e)}")
+            return None
+
+    def is_valid_status(self, status: str) -> bool:
+        """Check if the provided status is valid."""
+        valid_statuses = self.get_valid_statuses()
+        return status in valid_statuses
+
+    def get_valid_statuses(self):
+        """Helper function to retrieve valid statuses for a product."""
+        return [choice[0] for choice in Product._meta.get_field("status").choices or []]
+
     def is_invalid_status_transition(
         self, current_status: str, new_status: str
     ) -> bool:
@@ -1251,18 +1307,6 @@ class ProductStatusUpdateView(View):
         """
         allowed_next_statuses = self.ALLOWED_TRANSITIONS.get(current_status, [])
         return new_status not in allowed_next_statuses
-
-    def get_status_from_request(self, request) -> str:
-        """Extract the new status from the request body."""
-        data = json.loads(request.body)
-        return data.get("status")
-
-    def is_valid_status(self, status: str) -> bool:
-        """Check if the provided status is valid."""
-        valid_statuses = [
-            choice[0] for choice in Product._meta.get_field("status").choices or []
-        ]
-        return status in valid_statuses
 
     def check_required_fields(self, product: Product) -> list:
         """
@@ -1274,7 +1318,6 @@ class ProductStatusUpdateView(View):
         Returns:
             list: A list of missing required fields.
         """
-
         missing_fields = []
 
         # Fields to check in Product
@@ -1291,13 +1334,10 @@ class ProductStatusUpdateView(View):
         # If update_ref is None, check required fields in ProductUpdateSerializer
         if product.update_ref is None:
             product_update_serializer = ProductUpdateSerializer()
-            # Assuming that `ProductUpdateSerializer` fields are required by default
             for field in product_update_serializer.fields:
-                logging.info("product_update", product_update_serializer.fields[field])
                 if product_update_serializer.fields[field].required:
                     missing_fields.append(field)
-
-        elif product.update_ref is not None:
+        else:
             product_update_serializer = ProductUpdateSerializer(product.update_ref)
             for field, field_value in product_update_serializer.data.items():
                 if (
@@ -1755,6 +1795,9 @@ class ProductPatchView(View):
         product_update_data["slug"] = slugify(
             "product-update" + str(datetime.datetime.now())
         )
+        # Added condition: if run_to_zero is true then set minimum_stock_level to zero.
+        if product_update_data.get("run_to_zero"):
+            product_update_data["minimum_stock_level"] = 0
 
         return product_update_data
 

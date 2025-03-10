@@ -490,24 +490,47 @@ class ProductViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=["post"], url_path="bulk-upload")
     def bulk_upload(self, request):
+        """
+        Bulk upload for 'Merged_Product_Data.xlsx' or any merged product Excel.
+        Reads each row and creates Product / ProductUpdate records in the DB.
+
+        For each row:
+          - 'Groups' column → organization_names (comma-separated)
+          - 'Maximum' column → order_limit_value
+
+        Example for final JSON snippet:
+
+            "order_limits": [
+                {
+                    "organization_name": "NHS",
+                    "order_limit_value": 400
+                },
+                {
+                    "organization_name": "Local Government",
+                    "order_limit_value": 400
+                }
+            ]
+        """
         try:
             with transaction.atomic():
-                logger.info("Starting bulk upload of products to DB...")
+                logger.info("Starting bulk upload of merged product Excel to DB...")
 
-                # Validate and read the uploaded file
-                excel_file = request.FILES.get("product_excel")
-                if not excel_file:
-                    logger.error("No Excel file uploaded.")
+                # Validate and read the uploaded file from request
+                merged_excel_file = request.FILES.get("product_excel")
+                if not merged_excel_file:
+                    logger.error("No merged Excel file uploaded.")
                     return Response(
-                        {"error": "No Excel file uploaded."},
+                        {"error": "No merged Excel file uploaded."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
                 try:
-                    df = pd.read_excel(excel_file)
+                    # Read the Excel into a DataFrame
+                    df = pd.read_excel(merged_excel_file)
+                    # Replace NaN with None to standardize empties
                     df = df.where(pd.notna(df), None)
                 except Exception as e:
-                    logger.error(f"Error reading Excel file: {str(e)}")
+                    logger.error(f"Error reading merged Excel file: {str(e)}")
                     return Response(
                         {"error": "Invalid Excel file."},
                         status=status.HTTP_400_BAD_REQUEST,
@@ -519,11 +542,12 @@ class ProductViewSet(viewsets.ViewSet):
                 # Ensure the root page exists or create it
                 root_page = self.get_or_create_root_page()
 
+                # Process each row from the merged Excel
                 for index, row in df.iterrows():
                     try:
                         logger.info(f"Processing row {index + 1}: {row.to_dict()}")
 
-                        # Manual Validation
+                        # Example: Some fields might still be required
                         required_fields = [
                             "product_id",
                             "title",
@@ -562,15 +586,17 @@ class ProductViewSet(viewsets.ViewSet):
                             )
                             continue
 
-                        # Data Cleaning and Conversion
+                        # Clean row data (numeric conversions, etc.)
                         row = self.clean_row_data(row)
                         logger.debug(f"Cleaned row {index + 1}: {row}")
 
-                        # Handle date conversion
-                        created_date = self.convert_created_date(row["created"])
-                        logger.info("program_id %s", row["programme_id"])
+                        if "run_to_zero" not in row or row["run_to_zero"] is None:
+                            row["run_to_zero"] = False
 
-                        # Fetch related data if 'programme_id' exists
+                        # Convert the 'created' column (date/time) if needed
+                        created_date = self.convert_created_date(row["created"])
+
+                        # Fetch or validate program if needed
                         program = None
                         if row.get("programme_id"):
                             program_id = (
@@ -579,22 +605,23 @@ class ProductViewSet(viewsets.ViewSet):
                                 else None
                             )
                             logger.info("PROGRAM_ID %s", program_id)
+                            program = Program.objects.filter(
+                                program_id=program_id
+                            ).first()
 
-                        program = Program.objects.filter(program_id=program_id).first()
+                            if not program:
+                                logger.warning(
+                                    f"Row {index + 1}: Program with id {row['programme_id']} does not exist."
+                                )
+                                skipped_rows.append(
+                                    {
+                                        "row": index + 1,
+                                        "error": f"Program with id {row['programme_id']} does not exist.",
+                                    }
+                                )
+                                continue
 
-                        if not program:
-                            logger.warning(
-                                f"Row {index + 1}: Program with id {row['programme_id']} does not exist."
-                            )
-                            skipped_rows.append(
-                                {
-                                    "row": index + 1,
-                                    "error": f"Program with id {row['programme_id']} does not exist.",
-                                }
-                            )
-                            continue
-
-                        # Fetch language data
+                        # Fetch language data if needed
                         try:
                             language = LanguagePage.objects.get(
                                 language_id=row["language_id"]
@@ -613,11 +640,11 @@ class ProductViewSet(viewsets.ViewSet):
 
                         iso_language_code = language.iso_language_code.upper()
 
-                        # Generate a unique slug for the ProductUpdate instance
+                        # Build a unique slug for ProductUpdate
                         slug_update = f"bulkupload-{uuid.uuid4()}"
                         title_update = row["title"]
 
-                        # Create ProductUpdate page using add_child
+                        # Create a ProductUpdate page
                         product_update = ProductUpdate(
                             title=title_update,
                             slug=slug_update,
@@ -642,36 +669,11 @@ class ProductViewSet(viewsets.ViewSet):
                         )
                         root_page.add_child(instance=product_update)
 
-                        def fetch_instances_and_names(model, field_name, ids_str):
-                            """
-                            Given a model and a comma-separated string of IDs,
-                            fetch instances and return a list of their names.
-                            If ids_str is None or empty, return two empty lists.
-                            """
-                            if not ids_str:
-                                # If ids_str is None or empty, return empty lists for both instances and names
-                                return [], []
-
-                            # Split by comma and strip whitespace
-                            ids = [
-                                id_val.strip()
-                                for id_val in ids_str.split(",")
-                                if id_val.strip()
-                            ]
-                            if not ids:
-                                # If no valid IDs found after splitting, also return empty lists
-                                return [], []
-
-                            instances = model.objects.filter(
-                                **{f"{field_name}__in": ids}
-                            )
-                            # Assuming each model instance has a 'name' attribute
-                            names = [inst.name for inst in instances]
-
-                            return list(instances), names
-
-                        # Fetch and assign Many-to-Many relationships and their names
-                        audience_instances, audience_names = fetch_instances_and_names(
+                        # Many-to-Many relationships & references
+                        (
+                            audience_instances,
+                            audience_names,
+                        ) = self.fetch_instances_and_names(
                             Audience, "audience_id", row.get("audience_id")
                         )
                         product_update.audience_ref.set(audience_instances)
@@ -679,61 +681,50 @@ class ProductViewSet(viewsets.ViewSet):
                         (
                             where_to_use_instances,
                             where_to_use_names,
-                        ) = fetch_instances_and_names(
-                            WhereToUse,
-                            "where_to_use_id",
-                            row.get("where_to_use_id"),
+                        ) = self.fetch_instances_and_names(
+                            WhereToUse, "where_to_use_id", row.get("where_to_use_id")
                         )
                         product_update.where_to_use_ref.set(where_to_use_instances)
 
                         (
                             vaccination_instances,
                             vaccination_names,
-                        ) = fetch_instances_and_names(
+                        ) = self.fetch_instances_and_names(
                             Vaccination, "vaccination_id", row.get("vaccination_id")
                         )
                         product_update.vaccination_ref.set(vaccination_instances)
 
-                        disease_instances, disease_names = fetch_instances_and_names(
+                        (
+                            disease_instances,
+                            disease_names,
+                        ) = self.fetch_instances_and_names(
                             Disease, "disease_id", row.get("disease_id")
                         )
-
-                        logger.info("where_to_use_names: %s", where_to_use_names)
-                        logger.info("disease_names: %s", disease_names)
-                        logger.info("audience_names: %s", audience_names)
-                        logger.info("vaccination_names: %s", vaccination_names)
                         product_update.diseases_ref.set(disease_instances)
 
-                        # Save to persist Many-to-Many relationships
                         product_update.save()
                         created_products += 1
 
-                        # Fetch or clean 'version_date'
+                        # Publish date or version date
                         raw_version_date = row.get("version_date", None)
                         publish_date = None
-
                         if raw_version_date and raw_version_date != "-":
-                            # Try to parse the date if it's in a recognizable format (YYYY-MM-DD)
                             try:
                                 if isinstance(raw_version_date, datetime.date):
-                                    # Already a datetime.date object
                                     publish_date = raw_version_date
                                 else:
-                                    # Parse the string in YYYY-MM-DD format
                                     publish_date = datetime.datetime.strptime(
                                         raw_version_date, "%Y-%m-%d"
                                     ).date()
                             except ValueError:
-                                # If it doesn't match the expected format, set it to None or skip this row
                                 logger.warning(
                                     f"Invalid publish_date format for row {index+1}: {raw_version_date}"
                                 )
                                 publish_date = None
-                        # Set default publish_date to today's date if not provided or invalid
                         if publish_date is None:
                             publish_date = datetime.date.today()
 
-                        # Prepare Product instance
+                        # Create the Product instance
                         slug = f"{slugify(row['title'])}-{row['product_id']}-{uuid.uuid4()}"
                         product = Product(
                             title=row["title"],
@@ -756,11 +747,31 @@ class ProductViewSet(viewsets.ViewSet):
                             is_latest=True,
                             publish_date=publish_date,
                         )
-                        logger.info("Product created: %s", product)
                         root_page.add_child(instance=product)
                         created_products += 1
 
-                        # Example final JSON structure (as per your provided example)
+                        # Build "order_limits" from "organization_name" and "order_limit_value"
+                        organization_names_str = row.get(
+                            "organization_name"
+                        )  # e.g., "NHS, Local Gov"
+                        max_val = row.get("order_limit_value")  # e.g., 400
+                        order_limits_list = []
+                        if organization_names_str:
+                            # Split by comma
+                            org_list = [
+                                org.strip()
+                                for org in organization_names_str.split(",")
+                                if org.strip()
+                            ]
+                            for org_name in org_list:
+                                order_limits_list.append(
+                                    {
+                                        "organization_name": org_name,
+                                        "order_limit_value": max_val,
+                                    }
+                                )
+
+                        # Log final JSON or additional info
                         response_data = {
                             "maximum_order_quantity": product_update.maximum_order_quantity,
                             "run_to_zero": product_update.run_to_zero,
@@ -789,6 +800,8 @@ class ProductViewSet(viewsets.ViewSet):
                             "where_to_use_names": where_to_use_names,
                             "product_type": product_update.product_type,
                             "product_downloads": product_update.product_downloads,
+                            # Attach our new order_limits structure:
+                            "order_limits": order_limits_list,
                         }
 
                         logger.info(
@@ -810,11 +823,11 @@ class ProductViewSet(viewsets.ViewSet):
                             {"row": index + 1, "error": f"Unexpected error: {str(e)}"}
                         )
 
-                logger.info(f"Bulk upload completed with {len(skipped_rows)} errors.")
+                logger.info(f"Bulk upload completed. Rows skipped: {len(skipped_rows)}")
 
                 return Response(
                     {
-                        "message": "Bulk upload completed.",
+                        "message": "Bulk upload of merged product Excel completed.",
                         "created_products": created_products,
                         "skipped_rows": skipped_rows,
                     },
@@ -830,37 +843,48 @@ class ProductViewSet(viewsets.ViewSet):
 
     def clean_row_data(self, row):
         """
-        Cleans and processes row data. Handles both single and comma-separated numeric fields.
+        Cleans and processes row data. For numeric or comma-separated fields, etc.
         """
 
         def clean_numeric_field(value):
-            """
-            Cleans a numeric field by converting to integer or handling comma-separated lists.
-            """
             if pd.notna(value):
                 try:
                     if isinstance(value, str) and "," in value:
-                        # Handle comma-separated lists
                         return ",".join(
-                            (
-                                str(int(float(item.strip())))
-                                if item.strip().replace(".", "", 1).isdigit()
-                                else item.strip()
-                            )
+                            str(int(float(item.strip())))
+                            if item.strip().replace(".", "", 1).isdigit()
+                            else item.strip()
                             for item in value.split(",")
                         )
                     elif isinstance(value, (float, int)):
-                        # Single numeric value
                         return str(int(float(value)))
                     elif (
                         isinstance(value, str)
                         and value.strip().replace(".", "", 1).isdigit()
                     ):
-                        # String representing a numeric value
                         return str(int(float(value.strip())))
                 except ValueError:
                     return None
             return None
+
+        # Convert run_to_zero
+        rt_zero = row.get("run_to_zero")
+        if isinstance(rt_zero, str):
+            rt_zero_lower = rt_zero.strip().lower()
+            if rt_zero_lower == "y":
+                row["run_to_zero"] = True
+            elif rt_zero_lower == "n":
+                row["run_to_zero"] = False
+            else:
+                # If it's neither 'y' nor 'n', let's just set to None or handle error
+                row["run_to_zero"] = None
+
+        # Replace '-' or 'nan' with None for *all* columns
+        for col, val in row.items():
+            if isinstance(val, str):
+                val_lower = val.strip().lower()
+                if val_lower == "-" or val_lower == "nan":
+                    row[col] = None
 
         row["product_id"] = clean_numeric_field(row.get("product_id"))
         row["unit_of_measure"] = clean_numeric_field(row.get("unit_of_measure"))
@@ -870,12 +894,13 @@ class ProductViewSet(viewsets.ViewSet):
         row["where_to_use_id"] = clean_numeric_field(row.get("where_to_use_id"))
         row["vaccination_id"] = clean_numeric_field(row.get("vaccination_id"))
         row["disease_id"] = clean_numeric_field(row.get("disease_id"))
+        row["minimum_stock_level"] = clean_numeric_field(row.get("minimum_stock_level"))
 
         return row
 
     def convert_created_date(self, created_date_str):
         """
-        Converts the 'created' field to a datetime object.
+        Converts the 'created' field to a datetime object, if needed.
         """
         if isinstance(created_date_str, pd.Timestamp):
             return created_date_str.to_pydatetime()
@@ -888,28 +913,36 @@ class ProductViewSet(viewsets.ViewSet):
 
     def get_or_create_root_page(self):
         """
-        Ensures the root page for products exists. Creates it if missing.
+        Ensures the root page for products exists or creates it.
         """
         try:
             root_page = Page.objects.get(slug="products-root")
             logger.info("Root page 'products-root' found.")
         except Page.DoesNotExist:
             logger.warning("Root page 'products-root' not found. Creating it.")
-            try:
-                wagtail_root = Page.objects.filter(depth=1).first()
-                if not wagtail_root:
-                    raise Exception(
-                        "Wagtail root page not found. Ensure Wagtail is properly set up."
-                    )
-
-                # Create the root page as a ProductUpdate instance
-                root_page = ProductUpdate(title="Products Root", slug="products-root")
-                wagtail_root.add_child(instance=root_page)  # Establish hierarchy
-                logger.info("Root page 'products-root' created successfully.")
-            except Exception as ex:
-                logger.error("Failed to create root page: %s", str(ex))
-                raise
+            wagtail_root = Page.objects.filter(depth=1).first()
+            if not wagtail_root:
+                raise Exception("Wagtail root page not found. Check Wagtail setup.")
+            root_page = ProductUpdate(title="Products Root", slug="products-root")
+            wagtail_root.add_child(instance=root_page)
+            logger.info("Root page 'products-root' created successfully.")
         return root_page
+
+    def fetch_instances_and_names(self, model, field_name, ids_str):
+        """
+        Given a model and a comma-separated string of IDs, fetches matching instances
+        and returns (instances, [names]).
+        """
+        if not ids_str:
+            return [], []
+        ids = [id_val.strip() for id_val in ids_str.split(",") if id_val.strip()]
+        if not ids:
+            return [], []
+
+        instances = model.objects.filter(**{f"{field_name}__in": ids})
+        names = [inst.name for inst in instances]
+
+        return list(instances), names
 
 
 class ProductDetailView(View):
@@ -1333,12 +1366,16 @@ class ProductStatusUpdateView(View):
 
         # If update_ref is None, check required fields in ProductUpdateSerializer
         if product.update_ref is None:
-            product_update_serializer = ProductUpdateSerializer()
+            product_update_serializer = ProductUpdateSerializer(
+                context={"tag": product.tag}
+            )
             for field in product_update_serializer.fields:
                 if product_update_serializer.fields[field].required:
                     missing_fields.append(field)
         else:
-            product_update_serializer = ProductUpdateSerializer(product.update_ref)
+            product_update_serializer = ProductUpdateSerializer(
+                product.update_ref, context={"tag": product.tag}
+            )
             for field, field_value in product_update_serializer.data.items():
                 if (
                     field_value in [None, "", [], {}]
@@ -1939,7 +1976,7 @@ class ProductCreateView(APIView):
             # Extract publish_date from the request data, defaulting to None
             publish_date = data.get("publish_date", None)
             if not publish_date:
-                publish_date = timezone.now()
+                publish_date = timezone.now().date()
 
             # Check if the language_id exists in the LanguagePage table
             if not LanguagePage.objects.filter(language_id=language_id).exists():

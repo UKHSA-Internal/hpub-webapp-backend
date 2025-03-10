@@ -147,7 +147,8 @@ class ProgramListViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = ProgramSerializer
 
     def list(self, request, *args, **kwargs):
-        serializer = self.get_serializer(self.queryset, many=True)
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def get_filtered_programs(self, is_featured=False):
@@ -234,8 +235,8 @@ class ProgramListViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class ProgramUpdateViewSet(viewsets.ModelViewSet):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
     queryset = Program.objects.all()
     serializer_class = ProgramSerializer
 

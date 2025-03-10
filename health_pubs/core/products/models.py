@@ -45,6 +45,20 @@ class ProductUpdate(Page):
 
     order_from_date = models.DateField(null=True, blank=True)  # optional
 
+    # Available Until Choices
+    AVAILABLE_UNTIL_CHOICES = [
+        ("no_end_date", "No End Date"),
+        ("specific_date", "On a specific date"),
+    ]
+
+    available_until_choice = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True,
+        choices=AVAILABLE_UNTIL_CHOICES,
+        default="no_end_date",
+    )
+
     order_end_date = models.DateField(blank=True, null=True)
 
     # Publication and Alternative Types
@@ -192,6 +206,7 @@ class ProductUpdate(Page):
         FieldPanel("quantity_available"),
         FieldPanel("available_from_choice"),
         FieldPanel("order_from_date"),
+        FieldPanel("available_until_choice"),
         FieldPanel("order_end_date"),
         FieldPanel("product_type"),
         FieldPanel("alternative_type"),

@@ -482,7 +482,7 @@ class UserLoginView(APIView):
 
 
 class UpdateUserView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def put(self, request):
         user_id = request.data.get("user_id")
@@ -675,7 +675,7 @@ class TokenRefresh(APIView):
 
 
 class CustomPagination(PageNumberPagination):
-    page_size = 20  # Set pagination to 20 items per page
+    page_size = 10  # Set pagination to 10 items per page
 
     def get_paginated_response(self, data, status_code=200):
         response = Response(

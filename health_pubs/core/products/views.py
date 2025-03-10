@@ -25,7 +25,10 @@ from core.users.permissions import (
 )
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from core.utils.extract_file_metadata import get_file_metadata
-from core.utils.generate_s3_presigned_url import generate_presigned_urls
+from core.utils.generate_s3_presigned_url import (
+    generate_inline_presigned_urls,
+    generate_presigned_urls,
+)
 
 from core.utils.product_recommendation_system import get_recommended_products
 from core.vaccinations.models import Vaccination
@@ -41,6 +44,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.text import slugify
 from django.views import View
+from django.core.exceptions import ImproperlyConfigured
 from pydantic import BaseModel, validator
 from rest_framework import status, viewsets
 from rest_framework.authentication import SessionAuthentication
@@ -63,6 +67,7 @@ from .models import Product, ProductUpdate
 from .serializers import ProductSerializer, ProductUpdateSerializer
 from .signals import send_product_event
 from django.core.serializers.json import DjangoJSONEncoder
+
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +251,15 @@ def _update_downloads_with_presigned(product_downloads, presigned_urls):
 
     Returns True if any update was performed.
     """
+    # If product_downloads is a JSON string, convert it to a dictionary.
+    if isinstance(product_downloads, str):
+        try:
+            product_downloads = json.loads(product_downloads)
+        except json.JSONDecodeError as e:
+            # Log the error or handle it accordingly.
+            print("Failed to parse product_downloads JSON:", e)
+            return False
+
     updated = False
     for key in [
         "main_download_url",
@@ -411,7 +425,7 @@ def _handle_timeout_error():
 
 
 class CustomPagination(PageNumberPagination):
-    page_size = 20  # Set pagination to 20 items per page
+    page_size = 10  # Set pagination to 10 items per page
 
     def get_paginated_response(self, data, status_code=200):
         response = Response(
@@ -475,24 +489,47 @@ class ProductViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=["post"], url_path="bulk-upload")
     def bulk_upload(self, request):
+        """
+        Bulk upload for 'Merged_Product_Data.xlsx' or any merged product Excel.
+        Reads each row and creates Product / ProductUpdate records in the DB.
+
+        For each row:
+          - 'Groups' column → organization_names (comma-separated)
+          - 'Maximum' column → order_limit_value
+
+        Example for final JSON snippet:
+
+            "order_limits": [
+                {
+                    "organization_name": "NHS",
+                    "order_limit_value": 400
+                },
+                {
+                    "organization_name": "Local Government",
+                    "order_limit_value": 400
+                }
+            ]
+        """
         try:
             with transaction.atomic():
-                logger.info("Starting bulk upload of products to DB...")
+                logger.info("Starting bulk upload of merged product Excel to DB...")
 
-                # Validate and read the uploaded file
-                excel_file = request.FILES.get("product_excel")
-                if not excel_file:
-                    logger.error("No Excel file uploaded.")
+                # Validate and read the uploaded file from request
+                merged_excel_file = request.FILES.get("product_excel")
+                if not merged_excel_file:
+                    logger.error("No merged Excel file uploaded.")
                     return Response(
-                        {"error": "No Excel file uploaded."},
+                        {"error": "No merged Excel file uploaded."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
                 try:
-                    df = pd.read_excel(excel_file)
+                    # Read the Excel into a DataFrame
+                    df = pd.read_excel(merged_excel_file)
+                    # Replace NaN with None to standardize empties
                     df = df.where(pd.notna(df), None)
                 except Exception as e:
-                    logger.error(f"Error reading Excel file: {str(e)}")
+                    logger.error(f"Error reading merged Excel file: {str(e)}")
                     return Response(
                         {"error": "Invalid Excel file."},
                         status=status.HTTP_400_BAD_REQUEST,
@@ -504,11 +541,12 @@ class ProductViewSet(viewsets.ViewSet):
                 # Ensure the root page exists or create it
                 root_page = self.get_or_create_root_page()
 
+                # Process each row from the merged Excel
                 for index, row in df.iterrows():
                     try:
                         logger.info(f"Processing row {index + 1}: {row.to_dict()}")
 
-                        # Manual Validation
+                        # Example: Some fields might still be required
                         required_fields = [
                             "product_id",
                             "title",
@@ -547,15 +585,17 @@ class ProductViewSet(viewsets.ViewSet):
                             )
                             continue
 
-                        # Data Cleaning and Conversion
+                        # Clean row data (numeric conversions, etc.)
                         row = self.clean_row_data(row)
                         logger.debug(f"Cleaned row {index + 1}: {row}")
 
-                        # Handle date conversion
-                        created_date = self.convert_created_date(row["created"])
-                        logger.info("program_id %s", row["programme_id"])
+                        if "run_to_zero" not in row or row["run_to_zero"] is None:
+                            row["run_to_zero"] = False
 
-                        # Fetch related data if 'programme_id' exists
+                        # Convert the 'created' column (date/time) if needed
+                        created_date = self.convert_created_date(row["created"])
+
+                        # Fetch or validate program if needed
                         program = None
                         if row.get("programme_id"):
                             program_id = (
@@ -564,22 +604,23 @@ class ProductViewSet(viewsets.ViewSet):
                                 else None
                             )
                             logger.info("PROGRAM_ID %s", program_id)
+                            program = Program.objects.filter(
+                                program_id=program_id
+                            ).first()
 
-                        program = Program.objects.filter(program_id=program_id).first()
+                            if not program:
+                                logger.warning(
+                                    f"Row {index + 1}: Program with id {row['programme_id']} does not exist."
+                                )
+                                skipped_rows.append(
+                                    {
+                                        "row": index + 1,
+                                        "error": f"Program with id {row['programme_id']} does not exist.",
+                                    }
+                                )
+                                continue
 
-                        if not program:
-                            logger.warning(
-                                f"Row {index + 1}: Program with id {row['programme_id']} does not exist."
-                            )
-                            skipped_rows.append(
-                                {
-                                    "row": index + 1,
-                                    "error": f"Program with id {row['programme_id']} does not exist.",
-                                }
-                            )
-                            continue
-
-                        # Fetch language data
+                        # Fetch language data if needed
                         try:
                             language = LanguagePage.objects.get(
                                 language_id=row["language_id"]
@@ -598,11 +639,11 @@ class ProductViewSet(viewsets.ViewSet):
 
                         iso_language_code = language.iso_language_code.upper()
 
-                        # Generate a unique slug for the ProductUpdate instance
+                        # Build a unique slug for ProductUpdate
                         slug_update = f"bulkupload-{uuid.uuid4()}"
                         title_update = row["title"]
 
-                        # Create ProductUpdate page using add_child
+                        # Create a ProductUpdate page
                         product_update = ProductUpdate(
                             title=title_update,
                             slug=slug_update,
@@ -627,36 +668,11 @@ class ProductViewSet(viewsets.ViewSet):
                         )
                         root_page.add_child(instance=product_update)
 
-                        def fetch_instances_and_names(model, field_name, ids_str):
-                            """
-                            Given a model and a comma-separated string of IDs,
-                            fetch instances and return a list of their names.
-                            If ids_str is None or empty, return two empty lists.
-                            """
-                            if not ids_str:
-                                # If ids_str is None or empty, return empty lists for both instances and names
-                                return [], []
-
-                            # Split by comma and strip whitespace
-                            ids = [
-                                id_val.strip()
-                                for id_val in ids_str.split(",")
-                                if id_val.strip()
-                            ]
-                            if not ids:
-                                # If no valid IDs found after splitting, also return empty lists
-                                return [], []
-
-                            instances = model.objects.filter(
-                                **{f"{field_name}__in": ids}
-                            )
-                            # Assuming each model instance has a 'name' attribute
-                            names = [inst.name for inst in instances]
-
-                            return list(instances), names
-
-                        # Fetch and assign Many-to-Many relationships and their names
-                        audience_instances, audience_names = fetch_instances_and_names(
+                        # Many-to-Many relationships & references
+                        (
+                            audience_instances,
+                            audience_names,
+                        ) = self.fetch_instances_and_names(
                             Audience, "audience_id", row.get("audience_id")
                         )
                         product_update.audience_ref.set(audience_instances)
@@ -664,58 +680,50 @@ class ProductViewSet(viewsets.ViewSet):
                         (
                             where_to_use_instances,
                             where_to_use_names,
-                        ) = fetch_instances_and_names(
-                            WhereToUse,
-                            "where_to_use_id",
-                            row.get("where_to_use_id"),
+                        ) = self.fetch_instances_and_names(
+                            WhereToUse, "where_to_use_id", row.get("where_to_use_id")
                         )
                         product_update.where_to_use_ref.set(where_to_use_instances)
 
                         (
                             vaccination_instances,
                             vaccination_names,
-                        ) = fetch_instances_and_names(
+                        ) = self.fetch_instances_and_names(
                             Vaccination, "vaccination_id", row.get("vaccination_id")
                         )
                         product_update.vaccination_ref.set(vaccination_instances)
 
-                        disease_instances, disease_names = fetch_instances_and_names(
+                        (
+                            disease_instances,
+                            disease_names,
+                        ) = self.fetch_instances_and_names(
                             Disease, "disease_id", row.get("disease_id")
                         )
-
-                        logger.info("where_to_use_names: %s", where_to_use_names)
-                        logger.info("disease_names: %s", disease_names)
-                        logger.info("audience_names: %s", audience_names)
-                        logger.info("vaccination_names: %s", vaccination_names)
                         product_update.diseases_ref.set(disease_instances)
 
-                        # Save to persist Many-to-Many relationships
                         product_update.save()
                         created_products += 1
 
-                        # Fetch or clean 'version_date'
+                        # Publish date or version date
                         raw_version_date = row.get("version_date", None)
                         publish_date = None
-
                         if raw_version_date and raw_version_date != "-":
-                            # Try to parse the date if it's in a recognizable format (YYYY-MM-DD)
                             try:
                                 if isinstance(raw_version_date, datetime.date):
-                                    # Already a datetime.date object
                                     publish_date = raw_version_date
                                 else:
-                                    # Parse the string in YYYY-MM-DD format
                                     publish_date = datetime.datetime.strptime(
                                         raw_version_date, "%Y-%m-%d"
                                     ).date()
                             except ValueError:
-                                # If it doesn't match the expected format, set it to None or skip this row
                                 logger.warning(
                                     f"Invalid publish_date format for row {index+1}: {raw_version_date}"
                                 )
                                 publish_date = None
+                        if publish_date is None:
+                            publish_date = datetime.date.today()
 
-                        # Prepare Product instance
+                        # Create the Product instance
                         slug = f"{slugify(row['title'])}-{row['product_id']}-{uuid.uuid4()}"
                         product = Product(
                             title=row["title"],
@@ -738,11 +746,31 @@ class ProductViewSet(viewsets.ViewSet):
                             is_latest=True,
                             publish_date=publish_date,
                         )
-                        logger.info("Product created: %s", product)
                         root_page.add_child(instance=product)
                         created_products += 1
 
-                        # Example final JSON structure (as per your provided example)
+                        # Build "order_limits" from "organization_name" and "order_limit_value"
+                        organization_names_str = row.get(
+                            "organization_name"
+                        )  # e.g., "NHS, Local Gov"
+                        max_val = row.get("order_limit_value")  # e.g., 400
+                        order_limits_list = []
+                        if organization_names_str:
+                            # Split by comma
+                            org_list = [
+                                org.strip()
+                                for org in organization_names_str.split(",")
+                                if org.strip()
+                            ]
+                            for org_name in org_list:
+                                order_limits_list.append(
+                                    {
+                                        "organization_name": org_name,
+                                        "order_limit_value": max_val,
+                                    }
+                                )
+
+                        # Log final JSON or additional info
                         response_data = {
                             "maximum_order_quantity": product_update.maximum_order_quantity,
                             "run_to_zero": product_update.run_to_zero,
@@ -771,6 +799,8 @@ class ProductViewSet(viewsets.ViewSet):
                             "where_to_use_names": where_to_use_names,
                             "product_type": product_update.product_type,
                             "product_downloads": product_update.product_downloads,
+                            # Attach our new order_limits structure:
+                            "order_limits": order_limits_list,
                         }
 
                         logger.info(
@@ -792,11 +822,11 @@ class ProductViewSet(viewsets.ViewSet):
                             {"row": index + 1, "error": f"Unexpected error: {str(e)}"}
                         )
 
-                logger.info(f"Bulk upload completed with {len(skipped_rows)} errors.")
+                logger.info(f"Bulk upload completed. Rows skipped: {len(skipped_rows)}")
 
                 return Response(
                     {
-                        "message": "Bulk upload completed.",
+                        "message": "Bulk upload of merged product Excel completed.",
                         "created_products": created_products,
                         "skipped_rows": skipped_rows,
                     },
@@ -812,37 +842,48 @@ class ProductViewSet(viewsets.ViewSet):
 
     def clean_row_data(self, row):
         """
-        Cleans and processes row data. Handles both single and comma-separated numeric fields.
+        Cleans and processes row data. For numeric or comma-separated fields, etc.
         """
 
         def clean_numeric_field(value):
-            """
-            Cleans a numeric field by converting to integer or handling comma-separated lists.
-            """
             if pd.notna(value):
                 try:
                     if isinstance(value, str) and "," in value:
-                        # Handle comma-separated lists
                         return ",".join(
-                            (
-                                str(int(float(item.strip())))
-                                if item.strip().replace(".", "", 1).isdigit()
-                                else item.strip()
-                            )
+                            str(int(float(item.strip())))
+                            if item.strip().replace(".", "", 1).isdigit()
+                            else item.strip()
                             for item in value.split(",")
                         )
                     elif isinstance(value, (float, int)):
-                        # Single numeric value
                         return str(int(float(value)))
                     elif (
                         isinstance(value, str)
                         and value.strip().replace(".", "", 1).isdigit()
                     ):
-                        # String representing a numeric value
                         return str(int(float(value.strip())))
                 except ValueError:
                     return None
             return None
+
+        # Convert run_to_zero
+        rt_zero = row.get("run_to_zero")
+        if isinstance(rt_zero, str):
+            rt_zero_lower = rt_zero.strip().lower()
+            if rt_zero_lower == "y":
+                row["run_to_zero"] = True
+            elif rt_zero_lower == "n":
+                row["run_to_zero"] = False
+            else:
+                # If it's neither 'y' nor 'n', let's just set to None or handle error
+                row["run_to_zero"] = None
+
+        # Replace '-' or 'nan' with None for *all* columns
+        for col, val in row.items():
+            if isinstance(val, str):
+                val_lower = val.strip().lower()
+                if val_lower == "-" or val_lower == "nan":
+                    row[col] = None
 
         row["product_id"] = clean_numeric_field(row.get("product_id"))
         row["unit_of_measure"] = clean_numeric_field(row.get("unit_of_measure"))
@@ -852,12 +893,13 @@ class ProductViewSet(viewsets.ViewSet):
         row["where_to_use_id"] = clean_numeric_field(row.get("where_to_use_id"))
         row["vaccination_id"] = clean_numeric_field(row.get("vaccination_id"))
         row["disease_id"] = clean_numeric_field(row.get("disease_id"))
+        row["minimum_stock_level"] = clean_numeric_field(row.get("minimum_stock_level"))
 
         return row
 
     def convert_created_date(self, created_date_str):
         """
-        Converts the 'created' field to a datetime object.
+        Converts the 'created' field to a datetime object, if needed.
         """
         if isinstance(created_date_str, pd.Timestamp):
             return created_date_str.to_pydatetime()
@@ -870,28 +912,38 @@ class ProductViewSet(viewsets.ViewSet):
 
     def get_or_create_root_page(self):
         """
-        Ensures the root page for products exists. Creates it if missing.
+        Ensures the root page for products exists or creates it.
         """
         try:
             root_page = Page.objects.get(slug="products-root")
             logger.info("Root page 'products-root' found.")
         except Page.DoesNotExist:
             logger.warning("Root page 'products-root' not found. Creating it.")
-            try:
-                wagtail_root = Page.objects.filter(depth=1).first()
-                if not wagtail_root:
-                    raise Exception(
-                        "Wagtail root page not found. Ensure Wagtail is properly set up."
-                    )
-
-                # Create the root page as a ProductUpdate instance
-                root_page = ProductUpdate(title="Products Root", slug="products-root")
-                wagtail_root.add_child(instance=root_page)  # Establish hierarchy
-                logger.info("Root page 'products-root' created successfully.")
-            except Exception as ex:
-                logger.error("Failed to create root page: %s", str(ex))
-                raise
+            wagtail_root = Page.objects.filter(depth=1).first()
+            if not wagtail_root:
+                raise ImproperlyConfigured(
+                    "Wagtail root page not found. Check Wagtail setup."
+                )
+            root_page = ProductUpdate(title="Products Root", slug="products-root")
+            wagtail_root.add_child(instance=root_page)
+            logger.info("Root page 'products-root' created successfully.")
         return root_page
+
+    def fetch_instances_and_names(self, model, field_name, ids_str):
+        """
+        Given a model and a comma-separated string of IDs, fetches matching instances
+        and returns (instances, [names]).
+        """
+        if not ids_str:
+            return [], []
+        ids = [id_val.strip() for id_val in ids_str.split(",") if id_val.strip()]
+        if not ids:
+            return [], []
+
+        instances = model.objects.filter(**{f"{field_name}__in": ids})
+        names = [inst.name for inst in instances]
+
+        return list(instances), names
 
 
 class ProductDetailView(View):
@@ -904,7 +956,6 @@ class ProductDetailView(View):
 
         try:
             product = Product.objects.filter(product_code=product_code).first()
-
             if not product:
                 logger.warning(f"No product found with product_code: {product_code}")
                 return handle_error(
@@ -915,31 +966,23 @@ class ProductDetailView(View):
 
             # Fetch the associated product update
             product_update = product.update_ref
-
-            logger.info("Product Update", product_update)
+            logger.info("Product Update: %s", product_update)
 
             if product_update is None:
                 logger.warning(
                     f"No product update found for product_code: {product.product_code}"
                 )
-            else:
-                logger.info(f"Update Product: {product_update}")
-
-            # Find similar products only for the updates tied to this product
-            # Commenting it for now as we would be using it later on
-            # similar_products = find_similar_products(product, product_update)
 
             serializer = ProductSerializer(product)
             response_data = serializer.data
-            # response_data["similar_products"] = similar_products
 
-            # Collect all URLs for presigned URL generation
+            # Collect all S3 bucket URLs from the product downloads
             all_download_urls = []
             update_refs = response_data.get("update_ref") or {}
             if isinstance(update_refs, dict):
                 product_downloads = update_refs.get("product_downloads") or {}
 
-                # Check main download URL
+                # Process main download URL
                 if "main_download_url" in product_downloads:
                     main_download = product_downloads.get("main_download_url") or {}
                     if not isinstance(main_download, dict):
@@ -947,7 +990,7 @@ class ProductDetailView(View):
                     if "s3_bucket_url" in main_download:
                         all_download_urls.append(main_download["s3_bucket_url"])
 
-                # Check additional download types
+                # Process additional download types
                 for download_type in [
                     "web_download_url",
                     "print_download_url",
@@ -961,22 +1004,33 @@ class ProductDetailView(View):
 
             logger.info(LOG_MSG_S3_URL_EXTRACTION, all_download_urls)
 
-            # Generate new presigned URLs
+            # Independently generate standard and inline presigned URLs.
             presigned_urls = generate_presigned_urls(all_download_urls)
-            logger.info("Generated presigned URLs: %s", presigned_urls)
+            inline_presigned_urls = generate_inline_presigned_urls(all_download_urls)
 
-            # Update product download URLs with presigned URLs
+            logger.info("Generated presigned URLs: %s", presigned_urls)
+            logger.info("Generated inline presigned URLs: %s", inline_presigned_urls)
+
+            # Update product downloads with both fields.
             if isinstance(update_refs, dict):
                 product_downloads = update_refs.get("product_downloads") or {}
 
-                # Update main_download_url
+                # Update main_download_url field.
                 if "main_download_url" in product_downloads:
                     main_download = product_downloads.get("main_download_url") or {}
                     s3_url = main_download.get("s3_bucket_url") or ""
                     if s3_url in presigned_urls:
                         main_download["URL"] = presigned_urls[s3_url]
+                    # If inline_presigned_s3_url is missing or empty, generate one.
+                    if (
+                        not main_download.get("inline_presigned_s3_url")
+                        and s3_url in inline_presigned_urls
+                    ):
+                        main_download[
+                            "inline_presigned_s3_url"
+                        ] = inline_presigned_urls[s3_url]
 
-                # Update other download types
+                # Update additional download types.
                 for download_type in [
                     "web_download_url",
                     "print_download_url",
@@ -988,6 +1042,13 @@ class ProductDetailView(View):
                             s3_url = item.get("s3_bucket_url", "")
                             if s3_url in presigned_urls:
                                 item["URL"] = presigned_urls[s3_url]
+                            if (
+                                not item.get("inline_presigned_s3_url")
+                                and s3_url in inline_presigned_urls
+                            ):
+                                item["inline_presigned_s3_url"] = inline_presigned_urls[
+                                    s3_url
+                                ]
 
             logger.info("Returning product details for product_code: %s", product_code)
             return JsonResponse(response_data, status=200)
@@ -1136,12 +1197,15 @@ class ProductStatusUpdateView(View):
             f"Attempting to update status for product with product_code: {decoded_product_code}"
         )
 
+        # Validate product_code pattern
         if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
+            logger.warning(f"Invalid product_code format: {product_code}")
             return _handle_invalid_query_param()
 
         try:
-            product = get_product(decoded_product_code)
+            product = self.get_product(decoded_product_code)
             if not product:
+                logger.warning(f"Product with code {decoded_product_code} not found.")
                 return handle_error(
                     ErrorCode.PRODUCT_NOT_FOUND,
                     ErrorMessage.PRODUCT_NOT_FOUND,
@@ -1149,27 +1213,44 @@ class ProductStatusUpdateView(View):
                 )
 
             new_status = self.get_status_from_request(request)
+            if not new_status:
+                return JsonResponse(
+                    {
+                        "error": "Invalid or missing 'status' field in request body.",
+                        "details": "Ensure the request includes a valid 'status' field.",
+                    },
+                    status=HTTP_400_BAD_REQUEST,
+                )
+
             if not self.is_valid_status(new_status):
-                return handle_error(
-                    ErrorCode.INVALID_STATUS,
-                    ErrorMessage.INVALID_STATUS,
-                    status_code=HTTP_400_BAD_REQUEST,
+                return JsonResponse(
+                    {
+                        "error": "Invalid status value.",
+                        "details": f"Allowed values are: {self.get_valid_statuses()}",
+                    },
+                    status=HTTP_400_BAD_REQUEST,
                 )
 
             if self.is_invalid_status_transition(product.status, new_status):
-                return handle_error(
-                    ErrorCode.INVALID_TRANSITION,
-                    ErrorMessage.INVALID_TRANSITION,
-                    status_code=HTTP_400_BAD_REQUEST,
+                return JsonResponse(
+                    {
+                        "error": "Invalid status transition.",
+                        "details": f"Cannot transition from '{product.status}' to '{new_status}'. Allowed transitions: {self.ALLOWED_TRANSITIONS.get(product.status, [])}",
+                    },
+                    status=HTTP_400_BAD_REQUEST,
                 )
 
             if new_status == "live":
                 missing_fields = self.check_required_fields(product)
                 if missing_fields:
+                    logger.warning(
+                        f"Cannot change status to 'live' due to missing fields: {missing_fields}"
+                    )
                     return JsonResponse(
                         {
-                            "error": "Cannot change status to 'live' due to missing fields.",
+                            "error": "Cannot change status to 'live'.",
                             "missing_fields": missing_fields,
+                            "details": "Ensure all required fields are provided.",
                         },
                         status=HTTP_400_BAD_REQUEST,
                     )
@@ -1177,10 +1258,20 @@ class ProductStatusUpdateView(View):
                     product.publish_date = timezone.now()
 
             product.status = new_status
-            product.save()
-            logger.info(
-                f"Product status updated to {new_status} for product_code: {decoded_product_code}"
-            )
+            try:
+                product.save()
+                logger.info(
+                    f"Product status updated to {new_status} for product_code: {decoded_product_code}"
+                )
+            except DatabaseError as e:
+                logger.error(
+                    f"Database error while updating product {decoded_product_code}: {str(e)}"
+                )
+                return handle_error(
+                    ErrorCode.DATABASE_ERROR,
+                    ErrorMessage.DATABASE_ERROR,
+                    status_code=500,
+                )
 
             return JsonResponse(
                 {"message": "Product status updated successfully."}, status=HTTP_200_OK
@@ -1189,16 +1280,12 @@ class ProductStatusUpdateView(View):
         except (DatabaseError, TimeoutError) as e:
             logger.exception(f"Error occurred while updating product status: {str(e)}")
             return handle_error(
-                (
-                    ErrorCode.DATABASE_ERROR
-                    if isinstance(e, DatabaseError)
-                    else ErrorCode.TIMEOUT_ERROR
-                ),
-                (
-                    ErrorMessage.DATABASE_ERROR
-                    if isinstance(e, DatabaseError)
-                    else ErrorMessage.TIMEOUT_ERROR
-                ),
+                ErrorCode.DATABASE_ERROR
+                if isinstance(e, DatabaseError)
+                else ErrorCode.TIMEOUT_ERROR,
+                ErrorMessage.DATABASE_ERROR
+                if isinstance(e, DatabaseError)
+                else ErrorMessage.TIMEOUT_ERROR,
                 status_code=500 if isinstance(e, DatabaseError) else 504,
             )
         except json.JSONDecodeError:
@@ -1216,6 +1303,36 @@ class ProductStatusUpdateView(View):
                 status_code=500,
             )
 
+    def get_product(self, decoded_product_code: str):
+        """
+        Retrieve a product instance based on the product code.
+        Note: Updated to query on the correct field 'product_code'.
+        """
+        try:
+            return Product.objects.get(product_code=decoded_product_code)
+        except Product.DoesNotExist:
+            return None
+
+    def get_status_from_request(self, request) -> Optional[str]:
+        """Extract the new status from the request body with logging."""
+        try:
+            raw_data = request.body.decode("utf-8")
+            logger.info(f"Received request body: {raw_data}")
+            data = json.loads(raw_data)
+            return data.get("status")
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {str(e)}")
+            return None
+
+    def is_valid_status(self, status: str) -> bool:
+        """Check if the provided status is valid."""
+        valid_statuses = self.get_valid_statuses()
+        return status in valid_statuses
+
+    def get_valid_statuses(self):
+        """Helper function to retrieve valid statuses for a product."""
+        return [choice[0] for choice in Product._meta.get_field("status").choices or []]
+
     def is_invalid_status_transition(
         self, current_status: str, new_status: str
     ) -> bool:
@@ -1224,18 +1341,6 @@ class ProductStatusUpdateView(View):
         """
         allowed_next_statuses = self.ALLOWED_TRANSITIONS.get(current_status, [])
         return new_status not in allowed_next_statuses
-
-    def get_status_from_request(self, request) -> str:
-        """Extract the new status from the request body."""
-        data = json.loads(request.body)
-        return data.get("status")
-
-    def is_valid_status(self, status: str) -> bool:
-        """Check if the provided status is valid."""
-        valid_statuses = [
-            choice[0] for choice in Product._meta.get_field("status").choices or []
-        ]
-        return status in valid_statuses
 
     def check_required_fields(self, product: Product) -> list:
         """
@@ -1247,7 +1352,6 @@ class ProductStatusUpdateView(View):
         Returns:
             list: A list of missing required fields.
         """
-
         missing_fields = []
 
         # Fields to check in Product
@@ -1263,15 +1367,16 @@ class ProductStatusUpdateView(View):
 
         # If update_ref is None, check required fields in ProductUpdateSerializer
         if product.update_ref is None:
-            product_update_serializer = ProductUpdateSerializer()
-            # Assuming that `ProductUpdateSerializer` fields are required by default
+            product_update_serializer = ProductUpdateSerializer(
+                context={"tag": product.tag}
+            )
             for field in product_update_serializer.fields:
-                logging.info("product_update", product_update_serializer.fields[field])
                 if product_update_serializer.fields[field].required:
                     missing_fields.append(field)
-
-        elif product.update_ref is not None:
-            product_update_serializer = ProductUpdateSerializer(product.update_ref)
+        else:
+            product_update_serializer = ProductUpdateSerializer(
+                product.update_ref, context={"tag": product.tag}
+            )
             for field, field_value in product_update_serializer.data.items():
                 if (
                     field_value in [None, "", [], {}]
@@ -1376,8 +1481,8 @@ class ProductUpdateView(View):
 
 
 class ProductPatchView(View):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
     """
     View to handle product updates via PATCH requests.
     """
@@ -1422,13 +1527,26 @@ class ProductPatchView(View):
                     "order_from_date must be provided when available_from_choice is 'specific_date'."
                 )
 
+            available_until_choice = data.get("available_until_choice")
+            order_end_date = data.get("order_end_date")
+
+            if available_until_choice == "specific_date" and not order_end_date:
+                logger.error(
+                    "order_end_date must be provided when available_until_choice is 'specific_date'."
+                )
+
                 return handle_error(
                     ErrorCode.MISSING_ORDER_FROM_DATE,
                     ErrorMessage.MISSING_ORDER_FROM_DATE,
                     status_code=400,
                 )
             product_update_data = self.prepare_product_update_data(
-                data, available_from_choice, order_from_date, file_urls
+                data,
+                available_until_choice,
+                available_from_choice,
+                order_from_date,
+                order_end_date,
+                file_urls,
             )
 
             with transaction.atomic():
@@ -1445,7 +1563,9 @@ class ProductPatchView(View):
                         self.update_foreign_keys(updated_product.update_ref, data)
 
                     # Update or create ProductUpdate instance
-                    self.get_or_create_product_update(product, product_update_data)
+                    self.get_or_create_product_update(
+                        product, product_update_data, data
+                    )
 
                     response_data = serializer.data
                     if updated_product.update_ref:
@@ -1519,7 +1639,19 @@ class ProductPatchView(View):
         required_downloads = {
             "Audio": ["main_download", "web_download", "transcript"],
             "Bulletins": ["main_download", "print_download", "web_download"],
-            # Other product types...
+            "Consent Form": ["main_download", "print_download", "web_download"],
+            "Images": ["main_download", "web_download"],
+            "Leaflets": ["main_download", "print_download", "web_download"],
+            "Postcards": ["main_download", "print_download", "web_download"],
+            "Posters": ["main_download", "print_download", "web_download"],
+            "Pull-Up Banners": ["main_download", "print_download", "web_download"],
+            "Stickers": ["main_download", "print_download", "web_download"],
+            "Record Cards": ["main_download", "print_download", "web_download"],
+            "Z-Card": ["main_download", "print_download", "web_download"],
+            "Fridge Magnet": ["main_download", "print_download", "web_download"],
+            "Video": ["main_download", "web_download", "video_url"],
+            "GIF": ["main_download", "web_download"],
+            "Slides": ["main_download", "web_download"],
         }
 
         if product_type in required_downloads:
@@ -1618,6 +1750,7 @@ class ProductPatchView(View):
 
         # Generate pre-signed URLs for all URLs first.
         presigned_urls = generate_presigned_urls(all_urls)
+        inline_presigned_urls = generate_inline_presigned_urls(all_urls)
 
         # Get metadata for all presigned URLs.
         metadata_list = get_file_metadata(list(presigned_urls.values()))
@@ -1632,6 +1765,7 @@ class ProductPatchView(View):
                 presigned_url = presigned_urls.get(url)
                 metadata = metadata_dict.get(presigned_url, {"URL": url})
                 metadata["s3_bucket_url"] = url
+                metadata["inline_presigned_s3_url"] = inline_presigned_urls.get(url, "")
                 file_urls[key] = metadata
 
             # Handle list-based URLs (e.g., web_download_url, print_download_url).
@@ -1641,6 +1775,9 @@ class ProductPatchView(View):
                     presigned_url = presigned_urls.get(url)
                     metadata = metadata_dict.get(presigned_url, {"URL": url})
                     metadata["s3_bucket_url"] = url
+                    metadata["inline_presigned_s3_url"] = inline_presigned_urls.get(
+                        url, ""
+                    )
                     updated_list.append(metadata)
                 file_urls[key] = updated_list
 
@@ -1649,57 +1786,77 @@ class ProductPatchView(View):
     def prepare_product_update_data(
         self,
         data: dict,
+        available_until_choice: str,
         available_from_choice: str,
         order_from_date: str,
+        order_end_date: str,
         file_urls: dict,
     ) -> dict:
-        """Prepare the data for updating or creating a ProductUpdate instance."""
-        return {
-            "minimum_stock_level": data.get("minimum_stock_level"),
-            "maximum_order_quantity": data.get("maximum_order_quantity"),
-            "available_from_choice": available_from_choice,
-            "order_from_date": (
-                order_from_date if available_from_choice == "specific_date" else None
-            ),
-            "order_end_date": data.get("order_end_date"),
-            "product_type": data.get("product_type"),
-            "alternative_type": data.get("alternative_type"),
-            "run_to_zero": data.get("run_to_zero"),
-            "cost_centre": data.get("cost_centre"),
-            "local_code": data.get("local_code"),
-            "unit_of_measure": data.get("unit_of_measure"),
-            "order_exceptions": data.get("order_exceptions"),
-            "summary_of_guidance": data.get("summary_of_guidance"),
-            "order_referral_email_address": data.get(
-                "order_referral_email_address", ""
-            ),
-            "stock_owner_email_address": data.get("stock_owner_email_address"),
-            "product_downloads": json.dumps(file_urls, cls=DjangoJSONEncoder),
-            "title": "Product_Update Title",
-            "slug": slugify("product-update" + str(datetime.datetime.now())),
-        }
+        allowed_fields = [
+            "minimum_stock_level",
+            "maximum_order_quantity",
+            "order_exceptions",
+            "product_type",
+            "alternative_type",
+            "run_to_zero",
+            "cost_centre",
+            "local_code",
+            "unit_of_measure",
+            "summary_of_guidance",
+            "order_referral_email_address",
+            "stock_owner_email_address",
+        ]
+        product_update_data = {}
+
+        for field in allowed_fields:
+            if field in data:
+                product_update_data[field] = data.get(field)
+
+        # Special handling for available_from_choice and order_from_date:
+        if "available_from_choice" in data:
+            product_update_data["available_from_choice"] = available_from_choice
+            if available_from_choice == "specific_date" and "order_from_date" in data:
+                product_update_data["order_from_date"] = order_from_date
+        # Special handling for available_until_choice and order_end_date:
+        if "available_until_choice" in data:
+            product_update_data["available_until_choice"] = available_until_choice
+            if available_from_choice == "specific_date" and "order_end_date" in data:
+                product_update_data["order_end_date"] = order_end_date
+        # If product_downloads is provided, include it.
+        if "product_downloads" in data:
+            product_update_data["product_downloads"] = json.dumps(
+                file_urls, cls=DjangoJSONEncoder
+            )
+
+        # Always update title/slug if needed
+        product_update_data["title"] = "Product_Update Title"
+        product_update_data["slug"] = slugify(
+            "product-update" + str(datetime.datetime.now())
+        )
+        # Added condition: if run_to_zero is true then set minimum_stock_level to zero.
+        if product_update_data.get("run_to_zero"):
+            product_update_data["minimum_stock_level"] = 0
+
+        return product_update_data
 
     def get_or_create_product_update(
-        self, product: Product, product_update_data: dict
+        self, product: Product, product_update_data: dict, raw_data: dict
     ) -> ProductUpdate:
-        """Fetch or create a ProductUpdate instance and save it."""
         product_update = product.update_ref
         if not product_update:
             logger.info("Creating a new ProductUpdate instance.")
             parent_page = product.get_parent()
             product_update = ProductUpdate(**product_update_data)
-            logger.info(
-                f"Product_update product_downloads before save (create): {product_update.product_downloads}"
-            )  # Log product_downloads before save
             parent_page.add_child(instance=product_update)
             product_update.save_revision().publish()
-            product.update_ref = product_update
+            Product.objects.filter(pk=product.pk).update(update_ref=product_update)
         else:
             logger.info("Updating existing ProductUpdate instance.")
+            # Update any field that is explicitly provided in the payload
             for key, value in product_update_data.items():
-                setattr(product_update, key, value)
-        product_update.save()
-        product.save()
+                if key in raw_data:
+                    setattr(product_update, key, value)
+            product_update.save()
         return product_update
 
     def update_order_limits(self, product: Product, order_limits: list):
@@ -1736,16 +1893,30 @@ class ProductPatchView(View):
                 order_limit_page.save()
 
     def update_foreign_keys(self, product_update: ProductUpdate, data: dict):
-        """Update foreign key relationships for the product update."""
         for field_name, model_class, relationship_field in [
             ("audience_names", Audience, "audience_ref"),
             ("vaccination_names", Vaccination, "vaccination_ref"),
             ("disease_names", Disease, "diseases_ref"),
             ("where_to_use_names", WhereToUse, "where_to_use_ref"),
         ]:
-            self.update_many_to_many_relationships(
-                product_update, data, field_name, model_class, relationship_field
-            )
+            # Only update if the key exists and its value is not None or an empty list
+            if field_name in data:
+                # If the client sends an empty list explicitly, you might want to skip updating:
+                if data[field_name] is None or (
+                    isinstance(data[field_name], list) and len(data[field_name]) == 0
+                ):
+                    # Option 1: Skip update to preserve existing relationships
+                    continue
+                    # Option 2: Or, if you truly intend to clear the relationships when an empty list is sent,
+                    # you can call set([]) explicitly.
+                else:
+                    self.update_many_to_many_relationships(
+                        product_update,
+                        data,
+                        field_name,
+                        model_class,
+                        relationship_field,
+                    )
         product_update.save()
 
     def update_many_to_many_relationships(
@@ -1756,7 +1927,6 @@ class ProductPatchView(View):
         model_class,
         relationship_field: str,
     ):
-        """Helper function to update many-to-many relationships."""
         names = data.get(field_name, [])
         refs = []
         for name in names:
@@ -1765,12 +1935,7 @@ class ProductPatchView(View):
                 refs.append(ref)
             except model_class.DoesNotExist:
                 logger.warning(f"{model_class.__name__} with name {name} not found.")
-        if hasattr(product_update, relationship_field):
-            getattr(product_update, relationship_field).set(refs)
-            if not refs:
-                getattr(product_update, relationship_field).clear()
-        else:
-            logger.error(f"ProductUpdate does not have attribute {relationship_field}")
+        getattr(product_update, relationship_field).set(refs)
 
 
 class ProductCreateView(APIView):
@@ -1811,6 +1976,8 @@ class ProductCreateView(APIView):
 
             # Extract publish_date from the request data, defaulting to None
             publish_date = data.get("publish_date", None)
+            if not publish_date:
+                publish_date = timezone.now().date()
 
             # Check if the language_id exists in the LanguagePage table
             if not LanguagePage.objects.filter(language_id=language_id).exists():

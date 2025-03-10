@@ -108,13 +108,14 @@ def get_file_metadata(presigned_urls):
             ):
                 num_slides = get_pptx_metadata(file_path)
                 metadata["number_of_slides"] = num_slides
+                metadata["number_of_pages"] = num_slides
 
             elif (
                 file_type
                 == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             ):
                 num_sheets = get_xlsx_metadata(file_path)
-                metadata["Number_of_sheets"] = num_sheets
+                metadata["number_of_pages"] = num_sheets
 
             elif file_type == "application/vnd.oasis.opendocument.text":
                 num_paragraphs = get_odt_metadata(file_path)

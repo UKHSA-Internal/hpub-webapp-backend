@@ -15,6 +15,7 @@ from .models import Product, ProductUpdate
 
 class FileMetadataSerializer(serializers.Serializer):
     URL = serializers.URLField(required=True)
+    inline_presigned_s3_url = serializers.URLField(required=False)
     file_size = serializers.CharField(required=True)
     file_type = serializers.CharField(required=True)
     number_of_pages = serializers.CharField(required=False)
@@ -37,7 +38,7 @@ class FileMetadataSerializer(serializers.Serializer):
 class ProductUpdateSerializer(serializers.ModelSerializer):
     # Required fields
     minimum_stock_level = serializers.IntegerField(required=True)
-    maximum_order_quantity = serializers.IntegerField(required=True)
+    maximum_order_quantity = serializers.IntegerField(required=False, allow_null=True)
     run_to_zero = serializers.BooleanField(required=True)
     quantity_available = serializers.IntegerField(required=False)
     available_from_choice = serializers.ChoiceField(
@@ -47,7 +48,14 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
         ],
         required=True,
     )
-    order_end_date = serializers.DateField(required=True)
+    available_until_choice = serializers.ChoiceField(
+        choices=[
+            ("no_end_date", "No End Date"),
+            ("specific_date", "On a specific date"),
+        ],
+        required=True,
+    )
+    order_end_date = serializers.DateField(required=False, allow_null=True)
 
     product_type = serializers.ChoiceField(
         required=True,
@@ -179,6 +187,37 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
         child=serializers.CharField(max_length=255), required=False, allow_empty=True
     )
 
+    def __init__(self, *args, **kwargs):
+        """
+        Override __init__ to dynamically set required fields based on the product's tag.
+        """
+        super().__init__(*args, **kwargs)
+
+        # Retrieve tag from the context
+        tag = self.context.get("tag", None)
+
+        if tag == "download-only":
+            optional_fields = [
+                "minimum_stock_level",
+                "run_to_zero",
+                "stock_owner_email_address",
+                "order_referral_email_address",
+                "cost_centre",
+                "local_code",
+                "unit_of_measure",
+                "order_exceptions",
+                "available_from_choice",
+                "available_until_choice",
+                "order_from_date",
+                "order_end_date",
+            ]
+
+            # Make these fields NOT required dynamically
+            for field in optional_fields:
+                if field in self.fields:
+                    self.fields[field].required = False
+                    self.fields[field].allow_null = True
+
     class Meta:
         model = ProductUpdate
         fields = [
@@ -188,6 +227,7 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
             "quantity_available",
             "available_from_choice",
             "order_from_date",
+            "available_until_choice",
             "order_end_date",
             "product_type",
             "alternative_type",
@@ -217,6 +257,35 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 "order_from_date is required when available_from_choice is 'specific_date'."
             )
+        if data.get("available_until_choice") == "specific_date" and not data.get(
+            "order_end_date"
+        ):
+            raise serializers.ValidationError(
+                "order_end_date is required when available_until_choice is 'specific_date'."
+            )
+        tag = self.context.get("tag", None)
+
+        if tag == "download-only":
+            optional_fields = [
+                "minimum_stock_level",
+                "run_to_zero",
+                "stock_owner_email_address",
+                "order_referral_email_address",
+                "cost_centre",
+                "local_code",
+                "unit_of_measure",
+                "order_exceptions",
+                "available_from_choice",
+                "available_until_choice",
+                "order_from_date",
+                "order_end_date",
+            ]
+
+            for field in optional_fields:
+                self.fields[field].required = False
+                data[field] = data.get(
+                    field, None
+                )  # Allow null values for optional fields
         return data
 
     def get_product_downloads(self, obj):
@@ -302,9 +371,12 @@ class ProductSerializer(serializers.ModelSerializer):
             "version_number",
             "update_ref",
             "order_limits",
+            "created_at",
+            "updated_at",
         )
 
     def validate(self, data):
+        self.context["tag"] = data.get("tag", None)
         return data
 
     def get_existing_languages(self, obj):

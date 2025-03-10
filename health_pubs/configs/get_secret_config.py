@@ -223,6 +223,10 @@ class Config:
         )
 
     @staticmethod
+    def get_hpub_s3_bucket_name():
+        return Config.get_value("VITE_BUCKET_NAME", is_secret=False)
+
+    @staticmethod
     def get_django_secret_key():
         return Config.get_value("DJANGO_SECRET_KEY", is_secret=False)
 

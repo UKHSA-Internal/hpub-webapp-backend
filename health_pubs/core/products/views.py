@@ -44,6 +44,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.text import slugify
 from django.views import View
+from django.core.exceptions import ImproperlyConfigured
 from pydantic import BaseModel, validator
 from rest_framework import status, viewsets
 from rest_framework.authentication import SessionAuthentication
@@ -66,6 +67,7 @@ from .models import Product, ProductUpdate
 from .serializers import ProductSerializer, ProductUpdateSerializer
 from .signals import send_product_event
 from django.core.serializers.json import DjangoJSONEncoder
+
 
 logger = logging.getLogger(__name__)
 
@@ -922,7 +924,9 @@ class ProductViewSet(viewsets.ViewSet):
             logger.warning("Root page 'products-root' not found. Creating it.")
             wagtail_root = Page.objects.filter(depth=1).first()
             if not wagtail_root:
-                raise Exception("Wagtail root page not found. Check Wagtail setup.")
+                raise ImproperlyConfigured(
+                    "Wagtail root page not found. Check Wagtail setup."
+                )
             root_page = ProductUpdate(title="Products Root", slug="products-root")
             wagtail_root.add_child(instance=root_page)
             logger.info("Root page 'products-root' created successfully.")
@@ -1312,7 +1316,7 @@ class ProductStatusUpdateView(View):
         except Product.DoesNotExist:
             return None
 
-    def get_status_from_request(self, request) -> str:
+    def get_status_from_request(self, request) -> Optional[str]:
         """Extract the new status from the request body with logging."""
         try:
             raw_data = request.body.decode("utf-8")

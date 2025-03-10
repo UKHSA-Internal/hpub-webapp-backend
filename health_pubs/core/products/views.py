@@ -246,9 +246,6 @@ def _extract_urls_from_downloads(product_downloads):
     return urls
 
 
-import json
-
-
 def _update_downloads_with_presigned(product_downloads, presigned_urls):
     """Helper to update product_downloads dict with presigned URLs.
 

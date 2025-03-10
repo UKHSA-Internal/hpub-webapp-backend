@@ -15,31 +15,36 @@ def generate_presigned_urls(urls: List[str], expiration: int = 3600) -> Dict[str
     presigned_urls = {}
 
     for url in urls:
-        # Parse the bucket name and key from the URL
         parsed_url = urlparse(url)
 
-        # Handle bucket names based on different S3 URL formats
         if "amazonaws.com" in parsed_url.netloc:
-            # Standard S3 URL
             bucket_name = parsed_url.netloc.split(".")[0]
             object_key = parsed_url.path.lstrip("/")
         else:
             logging.warning(f"Invalid S3 URL format: {url}")
-            continue  # Skip to the next URL if the format is incorrect
+            continue
+
+        params = {"Bucket": bucket_name, "Key": object_key}
+
+        # Only force download for video files by checking the file extension.
+        if object_key.lower().endswith(
+            (".mp4", ".mov", ".avi", ".wmv", ".flv", ".mkv")
+        ):
+            # You can set the filename dynamically based on object_key or any other logic.
+            filename = object_key.split("/")[-1]
+            params["ResponseContentDisposition"] = f'attachment; filename="{filename}"'
 
         try:
             presigned_url = s3_client.generate_presigned_url(
                 "get_object",
-                Params={"Bucket": bucket_name, "Key": object_key},
+                Params=params,
                 ExpiresIn=expiration,
             )
-            # Add the original URL and presigned URL to the dictionary
             presigned_urls[url] = presigned_url
         except (NoCredentialsError, PartialCredentialsError) as e:
             logging.info(f"Error generating presigned URL for {url}: {e}")
         except ClientError as e:
             logging.info(f"Client error occurred for {url}: {e}")
-    # logging.info("Presigned Url", presigned_urls)
 
     return presigned_urls
 

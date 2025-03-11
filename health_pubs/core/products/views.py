@@ -2294,7 +2294,7 @@ class ProductListMixin:
 
     def get_sorted_queryset(self, queryset, request):
         sort_by = request.GET.get("sort_by")
-        if sort_by and sort_by in VALID_SORT_FIELDS:
+        if sort_by in VALID_SORT_FIELDS:
             return queryset.order_by(sort_by)
         return queryset
 
@@ -2304,14 +2304,18 @@ class ProductListMixin:
         serializer_class = serializer_class or self.serializer_class
         paginator = CustomPagination()
         paginated = paginator.paginate_queryset(queryset, request)
+
+        # Serialize once and batch-process S3 URLs
         serializer = serializer_class(paginated, many=True)
         all_download_urls = extract_s3_urls(serializer.data)
         presigned_urls = generate_presigned_urls(all_download_urls)
+
         if use_direct_update:
             _update_product_downloads_with_presigned_urls(paginated, presigned_urls)
             serializer = serializer_class(paginated, many=True)
         else:
             update_product_urls(serializer.data, presigned_urls)
+
         return serializer.data, paginator
 
 
@@ -2331,13 +2335,12 @@ class ProductAdminListView(APIView, ProductListMixin):
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
             sorted_qs = self.get_sorted_queryset(products, request)
-            # paginate_and_serialize returns already serialized data and a paginator.
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
             logger.info("Returning paginated response with %d products", len(data))
             return paginator.get_paginated_response(
                 data, status_code=status.HTTP_200_OK
             )
-        except (DatabaseError, TimeoutError, Exception) as e:
+        except Exception as e:
             return handle_exceptions(e)
 
 
@@ -2357,31 +2360,36 @@ class ProductUsersListView(APIView, ProductListMixin):
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
             sorted_qs = self.get_sorted_queryset(products, request)
-            # Get already serialized data.
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
-            # Optionally filter languages from the serialized data.
             data = self.filter_languages(data)
             logger.info("Returning paginated response with %d products", len(data))
             return paginator.get_paginated_response(
                 data, status_code=status.HTTP_200_OK
             )
-        except (DatabaseError, TimeoutError, Exception) as e:
+        except Exception as e:
             return handle_exceptions(e)
 
     def filter_languages(self, products_data):
-        filtered_data = []
+        # Gather all language product codes in one pass
+        product_codes = {
+            lang["product_url"].split("/")[-1]
+            for product in products_data
+            for lang in product.get("existing_languages", [])
+        }
+        # Bulk query to check which codes are live
+        live_codes = set(
+            Product.objects.filter(
+                product_code__in=product_codes, status="live"
+            ).values_list("product_code", flat=True)
+        )
+        # Filter the languages in memory
         for product in products_data:
-            existing_languages = product.get("existing_languages", [])
-            filtered_languages = [
+            product["existing_languages"] = [
                 lang
-                for lang in existing_languages
-                if Product.objects.filter(
-                    product_code=lang["product_url"].split("/")[-1], status="live"
-                ).exists()
+                for lang in product.get("existing_languages", [])
+                if lang["product_url"].split("/")[-1] in live_codes
             ]
-            product["existing_languages"] = filtered_languages
-            filtered_data.append(product)
-        return filtered_data
+        return products_data
 
 
 class ProductSearchAdminView(APIView, ProductListMixin):
@@ -2410,16 +2418,13 @@ class ProductSearchAdminView(APIView, ProductListMixin):
                     status=status.HTTP_404_NOT_FOUND,
                 )
             sorted_qs = self.get_sorted_queryset(products, request)
-            # Use direct update so model fields are updated as needed.
             data, paginator = self.paginate_and_serialize(
                 sorted_qs, request, use_direct_update=True
             )
-            # Use the serialized data (data) directly
             response_data = _prepare_response_data(
                 products, data, product_code, product_title
             )
-            recommended_products = get_recommended_products(products)
-            response_data["recommended_products"] = recommended_products
+            response_data["recommended_products"] = get_recommended_products(products)
             return paginator.get_paginated_response(
                 response_data, status_code=status.HTTP_200_OK
             )
@@ -2464,11 +2469,9 @@ class ProductSearchUserView(APIView, ProductListMixin):
                     status=status.HTTP_404_NOT_FOUND,
                 )
             sorted_qs = self.get_sorted_queryset(products, request)
-            # paginate_and_serialize returns already serialized data.
             data, paginator = self.paginate_and_serialize(
                 sorted_qs, request, use_direct_update=True
             )
-            # Pass the serialized data directly to _prepare_response_data.
             response_data = _prepare_response_data(
                 products, data, product_code, product_title
             )
@@ -2497,7 +2500,6 @@ class ProductUsersFilterView(APIView, ProductListMixin):
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            # Build query based on various filter parameters.
             query = Q()
             recently_updated = request.GET.get("recently_updated")
             download_or_order = request.GET.get("download_or_order")
@@ -2542,33 +2544,12 @@ class ProductUsersFilterView(APIView, ProductListMixin):
                 query &= Q(language_name__in=language_names)
 
             products = Product.objects.filter(query, is_latest=True, status="live")
-            # Validate and set sort field.
-            valid_sort_fields = VALID_SORT_FIELDS
-            if sort_by not in valid_sort_fields:
+            if sort_by not in VALID_SORT_FIELDS:
                 sort_by = "product_title"
             sorted_qs = products.order_by(sort_by)
-            # Get serialized data and paginator.
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
-            # Filter out languages where product status is not 'live'
-            filtered_data = []
-            for product in data:
-                existing_languages = product.get("existing_languages", [])
-                filtered_languages = [
-                    lang
-                    for lang in existing_languages
-                    if Product.objects.filter(
-                        product_code=lang["product_url"].split("/")[-1], status="live"
-                    ).exists()
-                ]
-                product["existing_languages"] = filtered_languages
-                filtered_data.append(product)
-            return paginator.get_paginated_response(filtered_data)
-        except DatabaseError:
-            return _handle_database_error()
-        except TimeoutError:
-            return _handle_timeout_error()
-        except ValidationError:
-            return _handle_invalid_query_param()
+            data = self.filter_languages(data)
+            return paginator.get_paginated_response(data)
         except Exception:
             logger.exception(INTERNAL_ERROR_MSG)
             return handle_error(
@@ -2576,6 +2557,25 @@ class ProductUsersFilterView(APIView, ProductListMixin):
                 ErrorMessage.INTERNAL_SERVER_ERROR,
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+    def filter_languages(self, products_data):
+        product_codes = {
+            lang["product_url"].split("/")[-1]
+            for product in products_data
+            for lang in product.get("existing_languages", [])
+        }
+        live_codes = set(
+            Product.objects.filter(
+                product_code__in=product_codes, status="live"
+            ).values_list("product_code", flat=True)
+        )
+        for product in products_data:
+            product["existing_languages"] = [
+                lang
+                for lang in product.get("existing_languages", [])
+                if lang["product_url"].split("/")[-1] in live_codes
+            ]
+        return products_data
 
 
 class ProductAdminFilterView(APIView, ProductListMixin):
@@ -2622,18 +2622,8 @@ class ProductAdminFilterView(APIView, ProductListMixin):
 
             products = Product.objects.filter(query)
             sorted_qs = self.get_sorted_queryset(products, request)
-            # Get serialized data and paginator.
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
-            # Update S3 URLs using the serialized data.
-            all_download_urls = extract_s3_urls(data)
-            presigned_urls = generate_presigned_urls(all_download_urls)
-            update_product_urls(data, presigned_urls)
-            # Return the data directly without re-wrapping in a new serializer.
             return paginator.get_paginated_response(data)
-        except DatabaseError:
-            return _handle_database_error()
-        except ValidationError:
-            return _handle_invalid_query_param()
         except Exception:
             logger.exception(INTERNAL_ERROR_MSG)
             return handle_error(

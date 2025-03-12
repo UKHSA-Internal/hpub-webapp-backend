@@ -1478,103 +1478,23 @@ class ProductUpdateView(View):
             )
 
 
-class ProductPatchView(View):
+class ErrorHandlingMixin:
     """
-    Optimized view to handle product updates via PATCH requests.
+    Mixin to wrap view dispatch with common error handling.
     """
 
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
-
-    def patch(self, request, product_code, *args, **kwargs) -> JsonResponse:
-        decoded_product_code = unquote(product_code)
-        logger.info("Updating product with product_code: %s", decoded_product_code)
+    def dispatch(self, request, *args, **kwargs):
         try:
-            product = get_product(decoded_product_code)
-            if not product:
-                logger.warning(
-                    "No product found with product_code: %s", decoded_product_code
-                )
-                return handle_error(
-                    ErrorCode.PRODUCT_NOT_FOUND,
-                    ErrorMessage.PRODUCT_NOT_FOUND,
-                    status.HTTP_404_NOT_FOUND,
-                )
-
-            data = json.loads(request.body)
-            product_type = data.get("product_type")
-            product_downloads = data.get("product_downloads", {})
-
-            # Process file URLs (includes validation, metadata and presigned URL generation)
-            file_urls = self.process_file_urls(product_type, product_downloads)
-
-            # Validate date fields based on provided choices
-            available_from_choice = data.get("available_from_choice")
-            order_from_date = data.get("order_from_date")
-            if available_from_choice == "specific_date" and not order_from_date:
-                logger.error("order_from_date must be provided for 'specific_date'.")
-            available_until_choice = data.get("available_until_choice")
-            order_end_date = data.get("order_end_date")
-            if available_until_choice == "specific_date" and not order_end_date:
-                logger.error("order_end_date must be provided for 'specific_date'.")
-                return handle_error(
-                    ErrorCode.MISSING_ORDER_FROM_DATE,
-                    ErrorMessage.MISSING_ORDER_FROM_DATE,
-                    status_code=400,
-                )
-
-            # Prepare additional update data for the ProductUpdate instance
-            product_update_data = self.prepare_product_update_data(
-                data,
-                available_until_choice,
-                available_from_choice,
-                order_from_date,
-                order_end_date,
-                file_urls,
-            )
-
-            with transaction.atomic():
-                # Update order limits if provided
-                if data.get("order_limits"):
-                    self.update_order_limits(product, data.get("order_limits"))
-
-                serializer = ProductSerializer(product, data=data, partial=True)
-                if serializer.is_valid():
-                    updated_product = serializer.save()
-                    if updated_product.update_ref:
-                        self.update_foreign_keys(updated_product.update_ref, data)
-
-                    self.get_or_create_product_update(
-                        product, product_update_data, data
-                    )
-
-                    response_data = serializer.data
-                    if updated_product.update_ref:
-                        response_data["update_ref"] = ProductUpdateSerializer(
-                            updated_product.update_ref
-                        ).data
-
-                    logger.info(
-                        "Product updated successfully for product_code: %s",
-                        decoded_product_code,
-                    )
-                    return JsonResponse(response_data, status=status.HTTP_200_OK)
-                else:
-                    logger.error("Serializer errors: %s", serializer.errors)
-                    return handle_error(
-                        ErrorCode.INVALID_DATA,
-                        ErrorMessage.INVALID_DATA,
-                        status_code=400,
-                    )
-        except ValidationError as e:
-            logger.error("Validation error: %s", str(e))
-            return handle_error(
-                ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
-            )
-        except DatabaseError as e:
+            return super().dispatch(request, *args, **kwargs)
+        except (DatabaseError, TimeoutError) as e:
             logger.exception("Database error: %s", str(e))
             return handle_error(
                 ErrorCode.DATABASE_ERROR, ErrorMessage.DATABASE_ERROR, status_code=500
+            )
+        except ValidationError as e:
+            logger.exception("Validation error: %s", str(e))
+            return handle_error(
+                ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
             )
         except AttributeError as e:
             logger.error("Attribute error: %s", str(e))
@@ -1588,6 +1508,90 @@ class ProductPatchView(View):
                 ErrorMessage.INTERNAL_SERVER_ERROR,
                 status_code=500,
             )
+
+
+class ProductPatchView(ErrorHandlingMixin, View):
+    """
+    Optimized view to handle product updates via PATCH requests.
+    """
+
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def patch(self, request, product_code, *args, **kwargs) -> JsonResponse:
+        decoded_product_code = unquote(product_code)
+        logger.info("Updating product with product_code: %s", decoded_product_code)
+
+        product = get_product(decoded_product_code)
+        if not product:
+            logger.warning(
+                "No product found with product_code: %s", decoded_product_code
+            )
+            return handle_error(
+                ErrorCode.PRODUCT_NOT_FOUND,
+                ErrorMessage.PRODUCT_NOT_FOUND,
+                status.HTTP_404_NOT_FOUND,
+            )
+
+        data = json.loads(request.body)
+        product_type = data.get("product_type")
+        product_downloads = data.get("product_downloads", {})
+
+        # Process file URLs (validation, metadata, presigned URL generation)
+        file_urls = self.process_file_urls(product_type, product_downloads)
+
+        # Validate date fields based on provided choices
+        available_from_choice = data.get("available_from_choice")
+        order_from_date = data.get("order_from_date")
+        if available_from_choice == "specific_date" and not order_from_date:
+            logger.error("order_from_date must be provided for 'specific_date'.")
+        available_until_choice = data.get("available_until_choice")
+        order_end_date = data.get("order_end_date")
+        if available_until_choice == "specific_date" and not order_end_date:
+            logger.error("order_end_date must be provided for 'specific_date'.")
+            return handle_error(
+                ErrorCode.MISSING_ORDER_FROM_DATE,
+                ErrorMessage.MISSING_ORDER_FROM_DATE,
+                status_code=400,
+            )
+
+        # Prepare additional update data for the ProductUpdate instance
+        product_update_data = self.prepare_product_update_data(
+            data,
+            available_until_choice,
+            available_from_choice,
+            order_from_date,
+            order_end_date,
+            file_urls,
+        )
+
+        with transaction.atomic():
+            if data.get("order_limits"):
+                self.update_order_limits(product, data.get("order_limits"))
+
+            serializer = ProductSerializer(product, data=data, partial=True)
+            if serializer.is_valid():
+                updated_product = serializer.save()
+                if updated_product.update_ref:
+                    self.update_foreign_keys(updated_product.update_ref, data)
+
+                self.get_or_create_product_update(product, product_update_data, data)
+                response_data = serializer.data
+                if updated_product.update_ref:
+                    response_data["update_ref"] = ProductUpdateSerializer(
+                        updated_product.update_ref
+                    ).data
+
+                logger.info(
+                    "Product updated successfully for product_code: %s",
+                    decoded_product_code,
+                )
+                return JsonResponse(response_data, status=status.HTTP_200_OK)
+            else:
+                logger.error("Serializer errors: %s", serializer.errors)
+                return handle_error(
+                    ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
+                )
 
     def process_file_urls(self, product_type: str, product_downloads: dict) -> dict:
         """
@@ -1784,19 +1788,14 @@ class ProductPatchView(View):
         This method deletes existing order limits and creates new ones individually,
         as bulk_create is not supported for multi-table inherited models.
         """
-        # Delete existing order limits for the product.
         OrderLimitPage.objects.filter(product_ref=product).delete()
-
         org_cache = {}
         parent_page = Page.objects.get(slug="products")
-
         for limit in order_limits:
             org_name = limit.get("organization_name")
             if not org_name:
                 continue
             order_limit_value = limit.get("order_limit_value", 0)
-
-            # Cache organization lookup.
             if org_name not in org_cache:
                 try:
                     org_cache[org_name] = Organization.objects.get(name=org_name)
@@ -1804,15 +1803,11 @@ class ProductPatchView(View):
                     logger.warning("Organization %s not found.", org_name)
                     continue
             organization = org_cache[org_name]
-
-            # Retrieve full external keys for the organization.
             full_keys = list(
                 Establishment.objects.filter(organization_ref=organization).values_list(
                     "full_external_key", flat=True
                 )
             )
-
-            # Create a new OrderLimitPage instance.
             order_limit_page = OrderLimitPage(
                 title=f"Order Limit for {org_name}",
                 slug=slugify(f"{org_name}-order-limit-{datetime.datetime.now()}"),
@@ -1821,8 +1816,6 @@ class ProductPatchView(View):
                 organization_ref=organization,
                 full_external_keys=full_keys,
             )
-
-            # Create each order limit page individually as a child of the parent.
             parent_page.add_child(instance=order_limit_page)
 
     def update_foreign_keys(self, product_update: ProductUpdate, data: dict):
@@ -1842,7 +1835,7 @@ class ProductPatchView(View):
         product_update.save()
 
 
-class ProductCreateView(APIView):
+class ProductCreateView(ErrorHandlingMixin, APIView):
     """
     Optimized view to handle product creation via POST requests.
     """
@@ -1852,133 +1845,116 @@ class ProductCreateView(APIView):
 
     def post(self, request, *args, **kwargs):
         logger.info("ProductCreateView POST method called")
+        data = json.loads(request.body)
+        logger.info("Data received: %s", data)
+
+        required_fields = [
+            "product_title",
+            "language_id",
+            "file_url",
+            "program_name",
+            "tag",
+            "user_id",
+        ]
+        missing_fields = [field for field in required_fields if not data.get(field)]
+        if missing_fields:
+            logger.warning("Missing required fields: %s", missing_fields)
+            return handle_error(
+                ErrorCode.MISSING_FIELD, ErrorMessage.MISSING_FIELD, status_code=400
+            )
+
+        product_title = data["product_title"]
+        language_id = data["language_id"]
+        file_url = data["file_url"]
+        program_name = data["program_name"]
+        product_id = data.get("product_id")
+        tag = data.get("tag")
+        publish_date = data.get("publish_date") or timezone.now().date()
+
+        if not LanguagePage.objects.filter(language_id=language_id).exists():
+            logger.warning("Language ID %s does not exist.", language_id)
+            return handle_error(
+                ErrorCode.INVALID_DATA,
+                ErrorMessage.LANGUAGE_ID_DOES_NOT_EXIST,
+                status_code=400,
+            )
+
+        if not Program.objects.filter(programme_name=program_name).exists():
+            logger.warning("Program name %s does not exist.", program_name)
+            return handle_error(
+                ErrorCode.INVALID_DATA,
+                ErrorMessage.PROGRAM_NAME_DOES_NOT_EXIST,
+                status_code=400,
+            )
+
         try:
-            data = json.loads(request.body)
-            logger.info("Data received: %s", data)
+            uuid.UUID(language_id)
+            is_uuid = True
+        except ValueError:
+            is_uuid = False
 
-            required_fields = [
-                "product_title",
-                "language_id",
-                "file_url",
-                "program_name",
-                "tag",
-                "user_id",
-            ]
-            missing_fields = [field for field in required_fields if not data.get(field)]
-            if missing_fields:
-                logger.warning("Missing required fields: %s", missing_fields)
-                return handle_error(
-                    ErrorCode.MISSING_FIELD, ErrorMessage.MISSING_FIELD, status_code=400
-                )
-
-            product_title = data["product_title"]
-            language_id = data["language_id"]
-            file_url = data["file_url"]
-            program_name = data["program_name"]
-            product_id = data.get("product_id")
-            tag = data.get("tag")
-            publish_date = data.get("publish_date") or timezone.now().date()
-
-            if not LanguagePage.objects.filter(language_id=language_id).exists():
-                logger.warning("Language ID %s does not exist.", language_id)
-                return handle_error(
-                    ErrorCode.INVALID_DATA,
-                    ErrorMessage.LANGUAGE_ID_DOES_NOT_EXIST,
-                    status_code=400,
-                )
-
-            if not Program.objects.filter(programme_name=program_name).exists():
-                logger.warning("Program name %s does not exist.", program_name)
-                return handle_error(
-                    ErrorCode.INVALID_DATA,
-                    ErrorMessage.PROGRAM_NAME_DOES_NOT_EXIST,
-                    status_code=400,
-                )
-
-            try:
-                uuid.UUID(language_id)
-                is_uuid = True
-            except ValueError:
-                is_uuid = False
-
-            program, iso_language_code, language_page = self.get_program_and_language(
-                program_name, language_id, is_uuid
-            )
-            if not program or not iso_language_code or not language_page:
-                return handle_error(
-                    ErrorCode.INVALID_DATA,
-                    ErrorMessage.INVALID_PROGRAM_OR_LANGUAGE,
-                    status_code=400,
-                )
-
-            existing_product = Product.objects.filter(
-                program_name=program.programme_name,
-                product_title__icontains=product_title,
-            ).first()
-            product_key, version_number = self.get_product_key_and_version(
-                program, product_title, language_id
-            )
-            self.mark_previous_versions_archived(existing_product, language_id)
-            product_code = self.generate_unique_product_code(
-                program.program_id, product_key, iso_language_code, version_number
-            )
-
-            data.update(
-                {
-                    "title": product_title,
-                    "slug": slugify(product_title + str(datetime.datetime.now())),
-                    "product_id": product_id,
-                    "version_number": version_number,
-                    "product_code": product_code,
-                    "is_latest": True,
-                    "iso_language_code": iso_language_code,
-                    "program_id": program.program_id,
-                    "product_key": product_key,
-                    "file_url": file_url,
-                    "language_id": language_page,
-                    "language_name": language_page.language_names,
-                    "tag": tag,
-                    "publish_date": publish_date,
-                }
-            )
-
-            parent_page = self.get_or_create_parent_page()
-            user_instance = self.get_user_instance(data.get("user_id"))
-            product_instance = self.create_product_instance(
-                data, program, parent_page, user_instance
-            )
-            if not product_instance:
-                return handle_error(
-                    ErrorCode.INTERNAL_SERVER_ERROR,
-                    ErrorMessage.INTERNAL_SERVER_ERROR,
-                    status_code=500,
-                )
-            return JsonResponse(ProductSerializer(product_instance).data, status=201)
-        except (DatabaseError, TimeoutError) as e:
-            logger.exception("Database or timeout error: %s", str(e))
+        program, iso_language_code, language_page = self.get_program_and_language(
+            program_name, language_id, is_uuid
+        )
+        if not program or not iso_language_code or not language_page:
             return handle_error(
-                ErrorCode.DATABASE_ERROR, ErrorMessage.DATABASE_ERROR, status_code=500
+                ErrorCode.INVALID_DATA,
+                ErrorMessage.INVALID_PROGRAM_OR_LANGUAGE,
+                status_code=400,
             )
-        except ValidationError as e:
-            logger.exception("Validation error: %s", str(e))
-            return handle_error(
-                ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
-            )
-        except Exception as e:
-            logger.exception("Unexpected error: %s", str(e))
+
+        existing_product = Product.objects.filter(
+            program_name=program.programme_name,
+            product_title__icontains=product_title,
+        ).first()
+        product_key, version_number = self.get_product_key_and_version(
+            program, product_title, language_id
+        )
+        self.mark_previous_versions_archived(existing_product, language_id)
+        product_code = self.generate_unique_product_code(
+            program.program_id, product_key, iso_language_code, version_number
+        )
+
+        data.update(
+            {
+                "title": product_title,
+                "slug": slugify(product_title + str(datetime.datetime.now())),
+                "product_id": product_id,
+                "version_number": version_number,
+                "product_code": product_code,
+                "is_latest": True,
+                "iso_language_code": iso_language_code,
+                "program_id": program.program_id,
+                "product_key": product_key,
+                "file_url": file_url,
+                "language_id": language_page,
+                "language_name": language_page.language_names,
+                "tag": tag,
+                "publish_date": publish_date,
+            }
+        )
+
+        parent_page = self.get_or_create_parent_page()
+        user_instance = self.get_user_instance(data.get("user_id"))
+        product_instance = self.create_product_instance(
+            data, program, parent_page, user_instance
+        )
+        if not product_instance:
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,
                 status_code=500,
             )
+        return JsonResponse(ProductSerializer(product_instance).data, status=201)
 
     def get_program_and_language(self, program_name, language_id, is_uuid):
         try:
             program = Program.objects.get(programme_name=program_name)
-            if is_uuid:
-                language_page = LanguagePage.objects.get(language_id=language_id)
-            else:
-                language_page = LanguagePage.objects.get(language_id__exact=language_id)
+            language_page = (
+                LanguagePage.objects.get(language_id=language_id)
+                if is_uuid
+                else LanguagePage.objects.get(language_id__exact=language_id)
+            )
             iso_language_code = language_page.iso_language_code.upper()
             logger.info(
                 "Program and language found: %s (ISO: %s)",
@@ -2057,7 +2033,7 @@ class ProductCreateView(APIView):
                 return User.objects.get(user_id=user_ref_id)
             except User.DoesNotExist as e:
                 logger.warning("User %s not found: %s", user_ref_id, str(e))
-                handle_error(
+                return handle_error(
                     ErrorCode.USER_NOT_FOUND,
                     ErrorMessage.USER_NOT_FOUND,
                     status_code=404,

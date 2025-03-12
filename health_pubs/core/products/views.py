@@ -62,10 +62,8 @@ from rest_framework.status import (
 from rest_framework.views import APIView
 from wagtail.models import Page
 
-from .enums import required_event_fields_archived
 from .models import Product, ProductUpdate
 from .serializers import ProductSerializer, ProductUpdateSerializer
-from .signals import send_product_event
 from django.core.serializers.json import DjangoJSONEncoder
 
 
@@ -1481,65 +1479,51 @@ class ProductUpdateView(View):
 
 
 class ProductPatchView(View):
+    """
+    Optimized view to handle product updates via PATCH requests.
+    """
+
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
-    """
-    View to handle product updates via PATCH requests.
-    """
 
     def patch(self, request, product_code, *args, **kwargs) -> JsonResponse:
-        """
-        Update a product with the given product_code.
-
-        Args:
-            request (HttpRequest): The HTTP request containing update data.
-            product_code (str): The product code to identify the product to be updated.
-
-        Returns:
-            JsonResponse: A response containing the result of the update operation.
-        """
         decoded_product_code = unquote(product_code)
-        logger.info(f"Updating product with product_code: {decoded_product_code}")
-
+        logger.info("Updating product with product_code: %s", decoded_product_code)
         try:
             product = get_product(decoded_product_code)
             if not product:
                 logger.warning(
-                    f"No product found with product_code: {decoded_product_code}"
+                    "No product found with product_code: %s", decoded_product_code
                 )
                 return handle_error(
                     ErrorCode.PRODUCT_NOT_FOUND,
                     ErrorMessage.PRODUCT_NOT_FOUND,
                     status.HTTP_404_NOT_FOUND,
                 )
+
             data = json.loads(request.body)
             product_type = data.get("product_type")
             product_downloads = data.get("product_downloads", {})
 
-            self.validate_required_downloads(product_type, product_downloads)
+            # Process file URLs (includes validation, metadata and presigned URL generation)
             file_urls = self.process_file_urls(product_type, product_downloads)
 
+            # Validate date fields based on provided choices
             available_from_choice = data.get("available_from_choice")
             order_from_date = data.get("order_from_date")
-
             if available_from_choice == "specific_date" and not order_from_date:
-                logger.error(
-                    "order_from_date must be provided when available_from_choice is 'specific_date'."
-                )
-
+                logger.error("order_from_date must be provided for 'specific_date'.")
             available_until_choice = data.get("available_until_choice")
             order_end_date = data.get("order_end_date")
-
             if available_until_choice == "specific_date" and not order_end_date:
-                logger.error(
-                    "order_end_date must be provided when available_until_choice is 'specific_date'."
-                )
-
+                logger.error("order_end_date must be provided for 'specific_date'.")
                 return handle_error(
                     ErrorCode.MISSING_ORDER_FROM_DATE,
                     ErrorMessage.MISSING_ORDER_FROM_DATE,
                     status_code=400,
                 )
+
+            # Prepare additional update data for the ProductUpdate instance
             product_update_data = self.prepare_product_update_data(
                 data,
                 available_until_choice,
@@ -1550,19 +1534,16 @@ class ProductPatchView(View):
             )
 
             with transaction.atomic():
-                # Update order limits if present
-                order_limits = data.get("order_limits")
-                if order_limits:
-                    self.update_order_limits(product, order_limits)
+                # Update order limits if provided
+                if data.get("order_limits"):
+                    self.update_order_limits(product, data.get("order_limits"))
 
-                # Update the product and handle foreign keys
                 serializer = ProductSerializer(product, data=data, partial=True)
                 if serializer.is_valid():
                     updated_product = serializer.save()
                     if updated_product.update_ref:
                         self.update_foreign_keys(updated_product.update_ref, data)
 
-                    # Update or create ProductUpdate instance
                     self.get_or_create_product_update(
                         product, product_update_data, data
                     )
@@ -1574,43 +1555,34 @@ class ProductPatchView(View):
                         ).data
 
                     logger.info(
-                        f"Product updated successfully with new data for product_code: {decoded_product_code}"
+                        "Product updated successfully for product_code: %s",
+                        decoded_product_code,
                     )
-
                     return JsonResponse(response_data, status=status.HTTP_200_OK)
                 else:
-                    logger.error(
-                        f"Serializer errors during product update: {serializer.errors}"
-                    )
+                    logger.error("Serializer errors: %s", serializer.errors)
                     return handle_error(
                         ErrorCode.INVALID_DATA,
                         ErrorMessage.INVALID_DATA,
                         status_code=400,
                     )
-
         except ValidationError as e:
-            logger.error(f"Validation error: {str(e)}")
+            logger.error("Validation error: %s", str(e))
             return handle_error(
-                ErrorCode.INVALID_DATA,
-                ErrorMessage.INVALID_DATA,
-                status_code=400,
+                ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
             )
         except DatabaseError as e:
-            logger.exception(f"Database error occurred: {str(e)}")
+            logger.exception("Database error: %s", str(e))
             return handle_error(
-                ErrorCode.DATABASE_ERROR,
-                ErrorMessage.DATABASE_ERROR,
-                status_code=500,
+                ErrorCode.DATABASE_ERROR, ErrorMessage.DATABASE_ERROR, status_code=500
             )
         except AttributeError as e:
-            logger.error(f"Attribute error: {str(e)}")
+            logger.error("Attribute error: %s", str(e))
             return handle_error(
-                ErrorCode.ATTRIBUTE_ERROR,
-                ErrorMessage.ATTRIBUTE_ERROR,
-                status_code=400,
+                ErrorCode.ATTRIBUTE_ERROR, ErrorMessage.ATTRIBUTE_ERROR, status_code=400
             )
         except Exception as e:
-            logger.exception(f"Unexpected error: {str(e)}")
+            logger.exception("Unexpected error: %s", str(e))
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,
@@ -1618,10 +1590,10 @@ class ProductPatchView(View):
             )
 
     def process_file_urls(self, product_type: str, product_downloads: dict) -> dict:
-        """Process file URLs for the product based on the product type and downloads."""
-        # Ensure product_downloads is a dictionary
-        import json
-
+        """
+        Process file URLs by validating required downloads, initializing URLs,
+        validating file extensions, and adding metadata (including presigned URLs).
+        """
         if isinstance(product_downloads, str):
             try:
                 product_downloads = json.loads(product_downloads)
@@ -1631,12 +1603,10 @@ class ProductPatchView(View):
         self.validate_required_downloads(product_type, product_downloads)
         file_urls = self.initialize_file_urls(product_downloads)
         file_urls = self.validate_file_extensions(file_urls)
-        file_urls = self.add_file_metadata(file_urls)
-        return file_urls
+        return self.add_file_metadata(file_urls)
 
     def validate_required_downloads(self, product_type: str, product_downloads: dict):
-        """Validate if required downloads are present for the product type."""
-        required_downloads = {
+        required = {
             "Audio": ["main_download", "web_download", "transcript"],
             "Bulletins": ["main_download", "print_download", "web_download"],
             "Consent Form": ["main_download", "print_download", "web_download"],
@@ -1653,20 +1623,14 @@ class ProductPatchView(View):
             "GIF": ["main_download", "web_download"],
             "Slides": ["main_download", "web_download"],
         }
-
-        if product_type in required_downloads:
-            missing_downloads = [
-                d
-                for d in required_downloads[product_type]
-                if d not in product_downloads
-            ]
-            if missing_downloads:
+        if product_type in required:
+            missing = [d for d in required[product_type] if d not in product_downloads]
+            if missing:
                 raise ValidationError(
-                    f"Missing required downloads for {product_type} product type. Expected: {', '.join(missing_downloads)}."
+                    f"Missing required downloads for {product_type}: {', '.join(missing)}."
                 )
 
     def initialize_file_urls(self, product_downloads: dict) -> dict:
-        """Initialize file URLs based on provided downloads."""
         return {
             "main_download_url": product_downloads.get("main_download", ""),
             "web_download_url": product_downloads.get("web_download", []),
@@ -1676,8 +1640,7 @@ class ProductPatchView(View):
         }
 
     def validate_file_extensions(self, file_urls: dict) -> dict:
-        """Validate the file URLs against allowed extensions."""
-        allowed_extensions = {
+        allowed = {
             "main_download_url": ["jpg", "jpeg", "png", "gif"],
             "transcript_url": ["pdf", "txt", "srt"],
             "web_download_url": [
@@ -1709,78 +1672,47 @@ class ProductPatchView(View):
                 "xlsx",
             ],
         }
-
-        # Validate single main_download_url
         if file_urls["main_download_url"]:
-            main_download_extension = file_urls["main_download_url"].split(".")[-1]
-            if main_download_extension not in allowed_extensions["main_download_url"]:
-                file_urls["main_download_url"] = ""  # Clear if invalid
-
-        # Validate lists for other file types
+            ext = file_urls["main_download_url"].split(".")[-1]
+            if ext not in allowed["main_download_url"]:
+                file_urls["main_download_url"] = ""
         for key in ["web_download_url", "print_download_url", "transcript_url"]:
             file_urls[key] = [
                 url
                 for url in file_urls[key]
-                if url.split(".")[-1] in allowed_extensions.get(key, [])
+                if url.split(".")[-1] in allowed.get(key, [])
             ]
-
         return file_urls
 
     def add_file_metadata(self, file_urls: dict) -> dict:
-        """
-        Generate pre-signed URLs for all file URLs, retrieve metadata for those presigned URLs,
-        and map it back to the provided file URLs.
-
-        Args:
-            file_urls (dict): A dictionary containing file URLs to process.
-
-        Returns:
-            dict: Updated file URLs with metadata.
-        """
         all_urls = []
-
-        # Handle 'main_download_url' as a single URL (not a list).
-        if "main_download_url" in file_urls and file_urls["main_download_url"]:
+        if file_urls.get("main_download_url"):
             all_urls.append(file_urls["main_download_url"])
-
-        # Collect all other URLs from lists (e.g., web_download_url, print_download_url).
         for key, value in file_urls.items():
             if key != "main_download_url" and isinstance(value, list):
                 all_urls.extend(value)
 
-        # Generate pre-signed URLs for all URLs first.
-        presigned_urls = generate_presigned_urls(all_urls)
-        inline_presigned_urls = generate_inline_presigned_urls(all_urls)
+        presigned = generate_presigned_urls(all_urls)
+        inline_presigned = generate_inline_presigned_urls(all_urls)
+        metadata_list = get_file_metadata(list(presigned.values()))
+        metadata_dict = {meta["URL"]: meta for meta in metadata_list}
 
-        # Get metadata for all presigned URLs.
-        metadata_list = get_file_metadata(list(presigned_urls.values()))
-
-        metadata_dict = {metadata["URL"]: metadata for metadata in metadata_list}
-
-        # Map metadata and pre-signed URLs back to file URLs.
         for key, value in file_urls.items():
-            # Handle 'main_download_url' as a single item.
             if key == "main_download_url" and value:
-                url = value
-                presigned_url = presigned_urls.get(url)
-                metadata = metadata_dict.get(presigned_url, {"URL": url})
-                metadata["s3_bucket_url"] = url
-                metadata["inline_presigned_s3_url"] = inline_presigned_urls.get(url, "")
-                file_urls[key] = metadata
-
-            # Handle list-based URLs (e.g., web_download_url, print_download_url).
+                presigned_url = presigned.get(value)
+                meta = metadata_dict.get(presigned_url, {"URL": value})
+                meta["s3_bucket_url"] = value
+                meta["inline_presigned_s3_url"] = inline_presigned.get(value, "")
+                file_urls[key] = meta
             elif isinstance(value, list):
-                updated_list = []
-                for url in value:
-                    presigned_url = presigned_urls.get(url)
-                    metadata = metadata_dict.get(presigned_url, {"URL": url})
-                    metadata["s3_bucket_url"] = url
-                    metadata["inline_presigned_s3_url"] = inline_presigned_urls.get(
-                        url, ""
-                    )
-                    updated_list.append(metadata)
-                file_urls[key] = updated_list
-
+                file_urls[key] = [
+                    {
+                        **metadata_dict.get(presigned.get(url), {"URL": url}),
+                        "s3_bucket_url": url,
+                        "inline_presigned_s3_url": inline_presigned.get(url, ""),
+                    }
+                    for url in value
+                ]
         return file_urls
 
     def prepare_product_update_data(
@@ -1806,150 +1738,124 @@ class ProductPatchView(View):
             "order_referral_email_address",
             "stock_owner_email_address",
         ]
-        product_update_data = {}
-
-        for field in allowed_fields:
-            if field in data:
-                product_update_data[field] = data.get(field)
-
-        # Special handling for available_from_choice and order_from_date:
+        update_data = {
+            field: data.get(field) for field in allowed_fields if field in data
+        }
         if "available_from_choice" in data:
-            product_update_data["available_from_choice"] = available_from_choice
-            if available_from_choice == "specific_date" and "order_from_date" in data:
-                product_update_data["order_from_date"] = order_from_date
-        # Special handling for available_until_choice and order_end_date:
+            update_data["available_from_choice"] = available_from_choice
+            if available_from_choice == "specific_date":
+                update_data["order_from_date"] = order_from_date
         if "available_until_choice" in data:
-            product_update_data["available_until_choice"] = available_until_choice
-            if available_from_choice == "specific_date" and "order_end_date" in data:
-                product_update_data["order_end_date"] = order_end_date
-        # If product_downloads is provided, include it.
+            update_data["available_until_choice"] = available_until_choice
+            if available_until_choice == "specific_date":
+                update_data["order_end_date"] = order_end_date
         if "product_downloads" in data:
-            product_update_data["product_downloads"] = json.dumps(
+            update_data["product_downloads"] = json.dumps(
                 file_urls, cls=DjangoJSONEncoder
             )
-
-        # Always update title/slug if needed
-        product_update_data["title"] = "Product_Update Title"
-        product_update_data["slug"] = slugify(
-            "product-update" + str(datetime.datetime.now())
-        )
-        # Added condition: if run_to_zero is true then set minimum_stock_level to zero.
-        if product_update_data.get("run_to_zero"):
-            product_update_data["minimum_stock_level"] = 0
-
-        return product_update_data
+        update_data["title"] = "Product_Update Title"
+        update_data["slug"] = slugify("product-update" + str(datetime.datetime.now()))
+        if update_data.get("run_to_zero"):
+            update_data["minimum_stock_level"] = 0
+        return update_data
 
     def get_or_create_product_update(
-        self, product: Product, product_update_data: dict, raw_data: dict
+        self, product: Product, update_data: dict, raw_data: dict
     ) -> ProductUpdate:
         product_update = product.update_ref
         if not product_update:
-            logger.info("Creating a new ProductUpdate instance.")
+            logger.info("Creating new ProductUpdate instance.")
             parent_page = product.get_parent()
-            product_update = ProductUpdate(**product_update_data)
+            product_update = ProductUpdate(**update_data)
             parent_page.add_child(instance=product_update)
             product_update.save_revision().publish()
             Product.objects.filter(pk=product.pk).update(update_ref=product_update)
         else:
             logger.info("Updating existing ProductUpdate instance.")
-            # Update any field that is explicitly provided in the payload
-            for key, value in product_update_data.items():
+            for key, value in update_data.items():
                 if key in raw_data:
                     setattr(product_update, key, value)
             product_update.save()
         return product_update
 
     def update_order_limits(self, product: Product, order_limits: list):
-        """Update order limits associated with the product."""
+        """
+        Update order limits associated with the product.
+        This method deletes existing order limits and creates new ones individually,
+        as bulk_create is not supported for multi-table inherited models.
+        """
+        # Delete existing order limits for the product.
         OrderLimitPage.objects.filter(product_ref=product).delete()
 
+        org_cache = {}
+        parent_page = Page.objects.get(slug="products")
+
         for limit in order_limits:
-            organization_name = limit.get("organization_name")
-            if organization_name:
-                order_limit_value = limit.get("order_limit_value", 0)
-                organization_instance = get_object_or_404(
-                    Organization, name=organization_name
-                )
+            org_name = limit.get("organization_name")
+            if not org_name:
+                continue
+            order_limit_value = limit.get("order_limit_value", 0)
 
-                # Fetch full_external_keys from the Establishment table
-                full_external_keys = list(
-                    Establishment.objects.filter(
-                        organization_ref=organization_instance
-                    ).values_list("full_external_key", flat=True)
-                )
+            # Cache organization lookup.
+            if org_name not in org_cache:
+                try:
+                    org_cache[org_name] = Organization.objects.get(name=org_name)
+                except Organization.DoesNotExist:
+                    logger.warning("Organization %s not found.", org_name)
+                    continue
+            organization = org_cache[org_name]
 
-                order_limit_page = OrderLimitPage(
-                    title=f"Order Limit for {organization_name}",
-                    slug=slugify(
-                        f"{organization_name}-order-limit-{datetime.datetime.now()}"
-                    ),
-                    order_limit=order_limit_value,
-                    product_ref=product,
-                    organization_ref=organization_instance,
-                    full_external_keys=full_external_keys,
+            # Retrieve full external keys for the organization.
+            full_keys = list(
+                Establishment.objects.filter(organization_ref=organization).values_list(
+                    "full_external_key", flat=True
                 )
-                parent_page = Page.objects.get(slug="products")
-                parent_page.add_child(instance=order_limit_page)
-                order_limit_page.save()
+            )
+
+            # Create a new OrderLimitPage instance.
+            order_limit_page = OrderLimitPage(
+                title=f"Order Limit for {org_name}",
+                slug=slugify(f"{org_name}-order-limit-{datetime.datetime.now()}"),
+                order_limit=order_limit_value,
+                product_ref=product,
+                organization_ref=organization,
+                full_external_keys=full_keys,
+            )
+
+            # Create each order limit page individually as a child of the parent.
+            parent_page.add_child(instance=order_limit_page)
 
     def update_foreign_keys(self, product_update: ProductUpdate, data: dict):
-        for field_name, model_class, relationship_field in [
+        mapping = [
             ("audience_names", Audience, "audience_ref"),
             ("vaccination_names", Vaccination, "vaccination_ref"),
             ("disease_names", Disease, "diseases_ref"),
             ("where_to_use_names", WhereToUse, "where_to_use_ref"),
-        ]:
-            # Only update if the key exists and its value is not None or an empty list
+        ]
+        for field_name, model_class, relationship_field in mapping:
             if field_name in data:
-                # If the client sends an empty list explicitly, you might want to skip updating:
-                if data[field_name] is None or (
-                    isinstance(data[field_name], list) and len(data[field_name]) == 0
-                ):
-                    # Option 1: Skip update to preserve existing relationships
+                names = data.get(field_name)
+                if not names:
                     continue
-                    # Option 2: Or, if you truly intend to clear the relationships when an empty list is sent,
-                    # you can call set([]) explicitly.
-                else:
-                    self.update_many_to_many_relationships(
-                        product_update,
-                        data,
-                        field_name,
-                        model_class,
-                        relationship_field,
-                    )
+                refs = list(model_class.objects.filter(name__in=names))
+                getattr(product_update, relationship_field).set(refs)
         product_update.save()
-
-    def update_many_to_many_relationships(
-        self,
-        product_update: ProductUpdate,
-        data: dict,
-        field_name: str,
-        model_class,
-        relationship_field: str,
-    ):
-        names = data.get(field_name, [])
-        refs = []
-        for name in names:
-            try:
-                ref = model_class.objects.get(name=name)
-                refs.append(ref)
-            except model_class.DoesNotExist:
-                logger.warning(f"{model_class.__name__} with name {name} not found.")
-        getattr(product_update, relationship_field).set(refs)
 
 
 class ProductCreateView(APIView):
+    """
+    Optimized view to handle product creation via POST requests.
+    """
+
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def post(self, request, *args, **kwargs):
         logger.info("ProductCreateView POST method called")
-
         try:
             data = json.loads(request.body)
             logger.info("Data received: %s", data)
 
-            # Validate required fields
             required_fields = [
                 "product_title",
                 "language_id",
@@ -1962,9 +1868,7 @@ class ProductCreateView(APIView):
             if missing_fields:
                 logger.warning("Missing required fields: %s", missing_fields)
                 return handle_error(
-                    ErrorCode.MISSING_FIELD,
-                    ErrorMessage.MISSING_FIELD,
-                    status_code=400,
+                    ErrorCode.MISSING_FIELD, ErrorMessage.MISSING_FIELD, status_code=400
                 )
 
             product_title = data["product_title"]
@@ -1973,74 +1877,52 @@ class ProductCreateView(APIView):
             program_name = data["program_name"]
             product_id = data.get("product_id")
             tag = data.get("tag")
+            publish_date = data.get("publish_date") or timezone.now().date()
 
-            # Extract publish_date from the request data, defaulting to None
-            publish_date = data.get("publish_date", None)
-            if not publish_date:
-                publish_date = timezone.now().date()
-
-            # Check if the language_id exists in the LanguagePage table
             if not LanguagePage.objects.filter(language_id=language_id).exists():
-                logger.warning(
-                    "Language ID %s does not exist in languages table", language_id
-                )
+                logger.warning("Language ID %s does not exist.", language_id)
                 return handle_error(
                     ErrorCode.INVALID_DATA,
                     ErrorMessage.LANGUAGE_ID_DOES_NOT_EXIST,
                     status_code=400,
                 )
 
-                # Check if the program_name exists in the Program table
-
             if not Program.objects.filter(programme_name=program_name).exists():
-                logger.warning(
-                    "Program name %s does not exist in programs table", program_name
-                )
+                logger.warning("Program name %s does not exist.", program_name)
                 return handle_error(
                     ErrorCode.INVALID_DATA,
                     ErrorMessage.PROGRAM_NAME_DOES_NOT_EXIST,
                     status_code=400,
                 )
 
-            # Determine if language_id is a UUID or plain number
             try:
-                # Attempt to parse as UUID
                 uuid.UUID(language_id)
                 is_uuid = True
             except ValueError:
                 is_uuid = False
 
-            # Fetch program and language data
             program, iso_language_code, language_page = self.get_program_and_language(
                 program_name, language_id, is_uuid
             )
-            if program is None or iso_language_code is None or language_page is None:
+            if not program or not iso_language_code or not language_page:
                 return handle_error(
                     ErrorCode.INVALID_DATA,
                     ErrorMessage.INVALID_PROGRAM_OR_LANGUAGE,
                     status_code=400,
                 )
 
-            # Check if the product already exists
             existing_product = Product.objects.filter(
                 program_name=program.programme_name,
                 product_title__icontains=product_title,
             ).first()
-
-            # Determine product key and version number
             product_key, version_number = self.get_product_key_and_version(
                 program, product_title, language_id
             )
-
-            # Mark previous versions as archived
             self.mark_previous_versions_archived(existing_product, language_id)
-
-            # Ensure product code is unique
             product_code = self.generate_unique_product_code(
                 program.program_id, product_key, iso_language_code, version_number
             )
 
-            # Update data with validated fields
             data.update(
                 {
                     "title": product_title,
@@ -2060,13 +1942,8 @@ class ProductCreateView(APIView):
                 }
             )
 
-            # Retrieve or create parent page
             parent_page = self.get_or_create_parent_page()
-
-            # Handle user reference
             user_instance = self.get_user_instance(data.get("user_id"))
-
-            # Create and save product instance
             product_instance = self.create_product_instance(
                 data, program, parent_page, user_instance
             )
@@ -2076,22 +1953,16 @@ class ProductCreateView(APIView):
                     ErrorMessage.INTERNAL_SERVER_ERROR,
                     status_code=500,
                 )
-
             return JsonResponse(ProductSerializer(product_instance).data, status=201)
-
         except (DatabaseError, TimeoutError) as e:
             logger.exception("Database or timeout error: %s", str(e))
             return handle_error(
-                ErrorCode.DATABASE_ERROR,
-                ErrorMessage.DATABASE_ERROR,
-                status_code=500,
+                ErrorCode.DATABASE_ERROR, ErrorMessage.DATABASE_ERROR, status_code=500
             )
         except ValidationError as e:
             logger.exception("Validation error: %s", str(e))
             return handle_error(
-                ErrorCode.INVALID_DATA,
-                ErrorMessage.INVALID_DATA,
-                status_code=400,
+                ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
             )
         except Exception as e:
             logger.exception("Unexpected error: %s", str(e))
@@ -2107,25 +1978,23 @@ class ProductCreateView(APIView):
             if is_uuid:
                 language_page = LanguagePage.objects.get(language_id=language_id)
             else:
-                # Handle the case where language_id is a plain number
                 language_page = LanguagePage.objects.get(language_id__exact=language_id)
             iso_language_code = language_page.iso_language_code.upper()
             logger.info(
-                "Program and language found: %s (ISO Code: %s)",
+                "Program and language found: %s (ISO: %s)",
                 language_id,
                 iso_language_code,
             )
             return program, iso_language_code, language_page
         except ObjectDoesNotExist as e:
             logger.warning("Program or language not found: %s", str(e))
-            return None, None
+            return None, None, None
 
     def get_product_key_and_version(self, program, product_title, language_id):
         product_title_ = product_title.strip()
         existing_product = Product.objects.filter(
             program_name=program.programme_name, product_title__icontains=product_title_
         ).first()
-
         if existing_product:
             if existing_product.language_id == language_id:
                 product_key = existing_product.product_key
@@ -2136,81 +2005,34 @@ class ProductCreateView(APIView):
         else:
             product_key = get_next_product_key(program.programme_name)
             version_number = 1
-
-        logger.info(f"Product key: {product_key}, Version number: {version_number}")
+        logger.info("Product key: %s, Version: %d", product_key, version_number)
         return product_key, version_number
 
     def mark_previous_versions_archived(self, existing_product, language_id):
-        if existing_product is not None:
-            # Fetch previous versions of this product that are marked as the latest
-            previous_versions = Product.objects.filter(
+        if existing_product:
+            Product.objects.filter(
                 product_key=existing_product.product_key,
                 language_id=language_id,
                 is_latest=True,
+            ).update(is_latest=False, status="archived")
+            logger.info(
+                "Previous versions archived for product_key: %s",
+                existing_product.product_key,
             )
-
-            logger.info(f"Previous versions found: {previous_versions.count()}")
-
-            # Update all previous versions to "archived"
-            for previous_version in previous_versions:
-                previous_version.is_latest = False
-                previous_version.status = "archived"
-                previous_version.save()
-                logger.info(
-                    f"Marked previous version as archived: {previous_version.product_code}"
-                )
-
         else:
-            logger.info("No existing product found. No previous versions to update.")
-
-    def trigger_event_for_archived_product(self, product_instance):
-        """
-        Trigger an event for an archived product.
-        """
-        send_product_event(
-            product_instance,
-            "archived",
-            "ProductArchived",
-            required_event_fields_archived,
-        )
-
-    def generate_unique_product_code_prev(
-        self, program_id, product_key, iso_language_code, version_number
-    ):
-        product_code = (
-            f"{program_id}-{product_key}-{iso_language_code}-{version_number:03}"
-        )
-        while Product.objects.filter(product_code=product_code).exists():
-            version_number += 1
-            product_code = (
-                f"{program_id}-{product_key}-{iso_language_code}-{version_number:03}"
-            )
-        logger.info("Unique product code generated: %s", product_code)
-        return product_code
+            logger.info("No existing product found; no versions archived.")
 
     def generate_unique_product_code(
         self, program_id, product_key, iso_language_code, version_number
     ):
-        # Abbreviate components to fit within 18 characters
-        short_program_id = str(program_id)[
-            :5
-        ]  # Take first 4 characters of program_id / previously 3
-        short_product_key = str(product_key)[
-            :4
-        ]  # Take first 3 characters of product_key
-        short_language_code = iso_language_code[
-            :4
-        ]  # Use 4-character ISO code / previously 2
-
-        # Generate compact product code
-        product_code = f"{short_program_id}{short_product_key}{short_language_code}{version_number:03}"  # previously version_number:02
-
-        # Ensure uniqueness
+        short_program_id = str(program_id)[:5]
+        short_product_key = str(product_key)[:4]
+        short_language_code = iso_language_code[:4]
+        product_code = f"{short_program_id}{short_product_key}{short_language_code}{version_number:03}"
         while Product.objects.filter(product_code=product_code).exists():
             version_number += 1
-            product_code = f"{short_program_id}{short_product_key}{short_language_code}{version_number:03}"  # previously version_number:02
-
-        logger.info("Unique product code generated: %s", product_code)
+            product_code = f"{short_program_id}{short_product_key}{short_language_code}{version_number:03}"
+        logger.info("Unique product code: %s", product_code)
         return product_code
 
     def get_or_create_parent_page(self):
@@ -2218,19 +2040,15 @@ class ProductCreateView(APIView):
             parent_page = Page.objects.get(slug="products")
             logger.info("Parent page 'products' found.")
         except Page.DoesNotExist:
-            logger.warning("Parent page 'products' not found, creating new one.")
-            try:
-                root_page = Page.objects.first()
-                parent_page = Page(
-                    title="Products",
-                    slug="products",
-                    content_type=ContentType.objects.get_for_model(Page),
-                )
-                root_page.add_child(instance=parent_page)
-                logger.info("Parent page 'products' created.")
-            except Exception as ex:
-                logger.error("Failed to create parent page: %s", str(ex))
-                raise
+            logger.warning("Parent page 'products' not found; creating new one.")
+            root_page = Page.objects.first()
+            parent_page = Page(
+                title="Products",
+                slug="products",
+                content_type=ContentType.objects.get_for_model(Page),
+            )
+            root_page.add_child(instance=parent_page)
+            logger.info("Parent page 'products' created.")
         return parent_page
 
     def get_user_instance(self, user_ref_id):
@@ -2238,7 +2056,7 @@ class ProductCreateView(APIView):
             try:
                 return User.objects.get(user_id=user_ref_id)
             except User.DoesNotExist as e:
-                logger.warning("User with ID %s not found: %s", user_ref_id, str(e))
+                logger.warning("User %s not found: %s", user_ref_id, str(e))
                 handle_error(
                     ErrorCode.USER_NOT_FOUND,
                     ErrorMessage.USER_NOT_FOUND,
@@ -2269,22 +2087,16 @@ class ProductCreateView(APIView):
                     tag=data["tag"],
                     publish_date=data.get("publish_date"),
                 )
-
-                # Use add_child to handle depth and path automatically
                 parent_page.add_child(instance=product_instance)
-
                 logger.info("Product instance created successfully.")
                 return product_instance
-
             except Exception as ex:
                 logger.error("Error creating product instance: %s", str(ex))
                 return None
         else:
             logger.error("Serializer errors: %s", serializer.errors)
             handle_error(
-                ErrorCode.INVALID_DATA,
-                ErrorMessage.INVALID_DATA,
-                status_code=400,
+                ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
             )
             return None
 

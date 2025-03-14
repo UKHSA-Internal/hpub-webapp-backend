@@ -751,11 +751,13 @@ class ProductViewSet(viewsets.ViewSet):
         rt_zero = row.get("run_to_zero")
         if isinstance(rt_zero, str):
             rt_zero_lower = rt_zero.strip().lower()
-            row["run_to_zero"] = (
-                True
-                if rt_zero_lower == "y"
-                else (False if rt_zero_lower == "n" else None)
-            )
+            if rt_zero_lower == "y":
+                run_to_zero_value = True
+            elif rt_zero_lower == "n":
+                run_to_zero_value = False
+            else:
+                run_to_zero_value = None
+            row["run_to_zero"] = run_to_zero_value
 
         for col, val in row.items():
             if isinstance(val, str) and val.strip().lower() in ["-", "nan"]:

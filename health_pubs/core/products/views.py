@@ -440,6 +440,44 @@ class CustomPagination(PageNumberPagination):
         return response
 
 
+class ErrorHandlingMixin:
+    """
+    Mixin to wrap view dispatch with common error handling.
+    Any exception raised in the view method will be caught here.
+    """
+
+    def dispatch(self, request, *args, **kwargs):
+        try:
+            return super().dispatch(request, *args, **kwargs)
+        except DatabaseError as e:
+            logger.exception("Database error: %s", str(e))
+            return handle_error(
+                ErrorCode.DATABASE_ERROR, ErrorMessage.DATABASE_ERROR, status_code=500
+            )
+        except TimeoutError as e:
+            logger.exception("Timeout error: %s", str(e))
+            return handle_error(
+                ErrorCode.TIMEOUT_ERROR, ErrorMessage.TIMEOUT_ERROR, status_code=504
+            )
+        except ValidationError as e:
+            logger.exception("Validation error: %s", str(e))
+            return handle_error(
+                ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
+            )
+        except AttributeError as e:
+            logger.error("Attribute error: %s", str(e))
+            return handle_error(
+                ErrorCode.ATTRIBUTE_ERROR, ErrorMessage.ATTRIBUTE_ERROR, status_code=400
+            )
+        except Exception as e:
+            logger.exception("Unexpected error: %s", str(e))
+            return handle_error(
+                ErrorCode.INTERNAL_SERVER_ERROR,
+                ErrorMessage.INTERNAL_SERVER_ERROR,
+                status_code=500,
+            )
+
+
 class ProductViewSet(viewsets.ViewSet):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
@@ -821,204 +859,131 @@ class ProductViewSet(viewsets.ViewSet):
         return list(instances), names
 
 
-class ProductDetailView(View):
+class ProductDetailView(ErrorHandlingMixin, View):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
     def get(self, request, product_code, *args, **kwargs):
+        # Remove manual try/except; errors will be caught by ErrorHandlingMixin.
         product_code = unquote(product_code)
-        logger.info(f"Fetching details for product with product_code: {product_code}")
+        logger.info("Fetching details for product with product_code: %s", product_code)
 
-        try:
-            product = Product.objects.filter(product_code=product_code).first()
-            if not product:
-                logger.warning(f"No product found with product_code: {product_code}")
-                return handle_error(
-                    ErrorCode.PRODUCT_NOT_FOUND,
-                    ErrorMessage.PRODUCT_NOT_FOUND,
-                    status_code=HTTP_404_NOT_FOUND,
-                )
+        product = Product.objects.filter(product_code=product_code).first()
+        if not product:
+            logger.warning("No product found with product_code: %s", product_code)
+            return handle_error(
+                ErrorCode.PRODUCT_NOT_FOUND,
+                ErrorMessage.PRODUCT_NOT_FOUND,
+                status_code=HTTP_404_NOT_FOUND,
+            )
 
-            # Fetch the associated product update
-            product_update = product.update_ref
-            logger.info("Product Update: %s", product_update)
+        serializer = ProductSerializer(product)
+        response_data = serializer.data
 
-            if product_update is None:
-                logger.warning(
-                    f"No product update found for product_code: {product.product_code}"
-                )
-
-            serializer = ProductSerializer(product)
-            response_data = serializer.data
-
-            # Collect all S3 bucket URLs from the product downloads
+        # Process presigned URLs if update_ref exists
+        update_refs = response_data.get("update_ref") or {}
+        if isinstance(update_refs, dict):
+            product_downloads = update_refs.get("product_downloads") or {}
             all_download_urls = []
-            update_refs = response_data.get("update_ref") or {}
-            if isinstance(update_refs, dict):
-                product_downloads = update_refs.get("product_downloads") or {}
-
-                # Process main download URL
-                if "main_download_url" in product_downloads:
-                    main_download = product_downloads.get("main_download_url") or {}
-                    if not isinstance(main_download, dict):
-                        main_download = {}
-                    if "s3_bucket_url" in main_download:
-                        all_download_urls.append(main_download["s3_bucket_url"])
-
-                # Process additional download types
-                for download_type in [
-                    "web_download_url",
-                    "print_download_url",
-                    "transcript_url",
-                ]:
-                    downloads = product_downloads.get(download_type, [])
-                    if isinstance(downloads, list):
-                        for item in downloads:
-                            if isinstance(item, dict) and "s3_bucket_url" in item:
-                                all_download_urls.append(item["s3_bucket_url"])
+            # Process main_download_url
+            main_download = product_downloads.get("main_download_url") or {}
+            if isinstance(main_download, dict) and "s3_bucket_url" in main_download:
+                all_download_urls.append(main_download["s3_bucket_url"])
+            # Process additional download types
+            for download_type in [
+                "web_download_url",
+                "print_download_url",
+                "transcript_url",
+            ]:
+                downloads = product_downloads.get(download_type, [])
+                if isinstance(downloads, list):
+                    for item in downloads:
+                        if isinstance(item, dict) and "s3_bucket_url" in item:
+                            all_download_urls.append(item["s3_bucket_url"])
 
             logger.info(LOG_MSG_S3_URL_EXTRACTION, all_download_urls)
-
-            # Independently generate standard and inline presigned URLs.
             presigned_urls = generate_presigned_urls(all_download_urls)
             inline_presigned_urls = generate_inline_presigned_urls(all_download_urls)
 
-            logger.info("Generated presigned URLs: %s", presigned_urls)
-            logger.info("Generated inline presigned URLs: %s", inline_presigned_urls)
+            # Update main_download_url field
+            if "main_download_url" in product_downloads:
+                main_download = product_downloads.get("main_download_url") or {}
+                s3_url = main_download.get("s3_bucket_url", "")
+                if s3_url in presigned_urls:
+                    main_download["URL"] = presigned_urls[s3_url]
+                if (
+                    not main_download.get("inline_presigned_s3_url")
+                    and s3_url in inline_presigned_urls
+                ):
+                    main_download["inline_presigned_s3_url"] = inline_presigned_urls[
+                        s3_url
+                    ]
+                product_downloads["main_download_url"] = main_download
 
-            # Update product downloads with both fields.
-            if isinstance(update_refs, dict):
-                product_downloads = update_refs.get("product_downloads") or {}
+            # Update additional download types
+            for download_type in [
+                "web_download_url",
+                "print_download_url",
+                "transcript_url",
+            ]:
+                downloads = product_downloads.get(download_type, [])
+                if isinstance(downloads, list):
+                    for item in downloads:
+                        s3_url = item.get("s3_bucket_url", "")
+                        if s3_url in presigned_urls:
+                            item["URL"] = presigned_urls[s3_url]
+                        if (
+                            not item.get("inline_presigned_s3_url")
+                            and s3_url in inline_presigned_urls
+                        ):
+                            item["inline_presigned_s3_url"] = inline_presigned_urls[
+                                s3_url
+                            ]
 
-                # Update main_download_url field.
-                if "main_download_url" in product_downloads:
-                    main_download = product_downloads.get("main_download_url") or {}
-                    s3_url = main_download.get("s3_bucket_url") or ""
-                    if s3_url in presigned_urls:
-                        main_download["URL"] = presigned_urls[s3_url]
-                    # If inline_presigned_s3_url is missing or empty, generate one.
-                    if (
-                        not main_download.get("inline_presigned_s3_url")
-                        and s3_url in inline_presigned_urls
-                    ):
-                        main_download[
-                            "inline_presigned_s3_url"
-                        ] = inline_presigned_urls[s3_url]
-
-                # Update additional download types.
-                for download_type in [
-                    "web_download_url",
-                    "print_download_url",
-                    "transcript_url",
-                ]:
-                    downloads = product_downloads.get(download_type, [])
-                    if isinstance(downloads, list):
-                        for item in downloads:
-                            s3_url = item.get("s3_bucket_url", "")
-                            if s3_url in presigned_urls:
-                                item["URL"] = presigned_urls[s3_url]
-                            if (
-                                not item.get("inline_presigned_s3_url")
-                                and s3_url in inline_presigned_urls
-                            ):
-                                item["inline_presigned_s3_url"] = inline_presigned_urls[
-                                    s3_url
-                                ]
-
-            logger.info("Returning product details for product_code: %s", product_code)
-            return JsonResponse(response_data, status=200)
-
-        except DatabaseError:
-            logger.exception("Database error occurred while fetching product details.")
-            return handle_error(
-                ErrorCode.DATABASE_ERROR, ErrorMessage.DATABASE_ERROR, status_code=500
-            )
-        except TimeoutError:
-            logger.exception("Timeout error occurred while fetching product details.")
-            return handle_error(
-                ErrorCode.TIMEOUT_ERROR, ErrorMessage.TIMEOUT_ERROR, status_code=504
-            )
-        except Exception:
-            logger.exception(
-                f"An unexpected error occurred while fetching the product details for product_code: {product_code}"
-            )
-            return handle_error(
-                ErrorCode.INTERNAL_SERVER_ERROR,
-                ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=500,
-            )
+        logger.info("Returning product details for product_code: %s", product_code)
+        return JsonResponse(response_data, status=200)
 
 
-class ProductDetailDelete(View):
+class ProductDetailDelete(ErrorHandlingMixin, View):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def delete(self, request, product_code, *args, **kwargs):
         decoded_product_code = unquote(product_code)
         logger.info(
-            f"Attempting to delete product with product_code: {decoded_product_code}"
+            "Attempting to delete product with product_code: %s", decoded_product_code
         )
-        try:
-            product = Product.objects.filter(
-                product_code__startswith=decoded_product_code
-            ).first()
 
-            if not product:
-                logger.warning(
-                    f"No product found with product_code: {decoded_product_code}"
-                )
-                return handle_error(
-                    ErrorCode.PRODUCT_NOT_FOUND,
-                    ErrorMessage.PRODUCT_NOT_FOUND,
-                    status_code=HTTP_404_NOT_FOUND,
-                )
-
-            # Allow withdrawal from either 'draft' or 'live' or'archived status
-            if product.status not in ["draft", "live", "archived"]:
-                logger.warning(
-                    f"Cannot withdraw product {decoded_product_code} as it is not in draft or live or archived status."
-                )
-                return handle_error(
-                    ErrorCode.INVALID_DATA,
-                    ErrorMessage.INVALID_DATA,
-                    status_code=HTTP_403_FORBIDDEN,
-                )
-
-            # Change product status to 'withdrawn' instead of deleting it
-            product.status = "withdrawn"
-            product.save()
-            # for debugging
-            # logger.info(
-            #     f"Product with product_code {decoded_product_code} archived successfully."
-            # )
-            return JsonResponse(
-                {"message": "Product archived successfully."},
-                status=HTTP_204_NO_CONTENT,
-            )
-
-        except DatabaseError:
-            logger.exception("Database error occurred while archiving product.")
-            return handle_error(
-                ErrorCode.DATABASE_ERROR,
-                ErrorMessage.DATABASE_ERROR,
-                status_code=500,
-            )
-        except TimeoutError:
-            logger.exception("Timeout error occurred while archiving product.")
-            return handle_error(
-                ErrorCode.TIMEOUT_ERROR,
-                ErrorMessage.TIMEOUT_ERROR,
-                status_code=504,
-            )
-        except Exception:
-            logger.exception(
-                f"An unexpected error occurred while archiving the product with product_code: {decoded_product_code}"
+        product = Product.objects.filter(
+            product_code__startswith=decoded_product_code
+        ).first()
+        if not product:
+            logger.warning(
+                "No product found with product_code: %s", decoded_product_code
             )
             return handle_error(
-                ErrorCode.INTERNAL_SERVER_ERROR,
-                ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=500,
+                ErrorCode.PRODUCT_NOT_FOUND,
+                ErrorMessage.PRODUCT_NOT_FOUND,
+                status_code=HTTP_404_NOT_FOUND,
             )
+
+        if product.status not in ["draft", "live", "archived"]:
+            logger.warning(
+                "Cannot withdraw product %s as it is not in draft, live, or archived status.",
+                decoded_product_code,
+            )
+            return handle_error(
+                ErrorCode.INVALID_DATA,
+                ErrorMessage.INVALID_DATA,
+                status_code=HTTP_403_FORBIDDEN,
+            )
+
+        # Change product status to 'withdrawn' instead of deleting it.
+        product.status = "withdrawn"
+        product.save()
+        return JsonResponse(
+            {"message": "Product archived successfully."}, status=HTTP_204_NO_CONTENT
+        )
 
 
 class ProductDeleteAll(View):
@@ -1352,38 +1317,6 @@ class ProductUpdateView(View):
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,
                 status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-
-class ErrorHandlingMixin:
-    """
-    Mixin to wrap view dispatch with common error handling.
-    """
-
-    def dispatch(self, request, *args, **kwargs):
-        try:
-            return super().dispatch(request, *args, **kwargs)
-        except (DatabaseError, TimeoutError) as e:
-            logger.exception("Database error: %s", str(e))
-            return handle_error(
-                ErrorCode.DATABASE_ERROR, ErrorMessage.DATABASE_ERROR, status_code=500
-            )
-        except ValidationError as e:
-            logger.exception("Validation error: %s", str(e))
-            return handle_error(
-                ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
-            )
-        except AttributeError as e:
-            logger.error("Attribute error: %s", str(e))
-            return handle_error(
-                ErrorCode.ATTRIBUTE_ERROR, ErrorMessage.ATTRIBUTE_ERROR, status_code=400
-            )
-        except Exception as e:
-            logger.exception("Unexpected error: %s", str(e))
-            return handle_error(
-                ErrorCode.INTERNAL_SERVER_ERROR,
-                ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=500,
             )
 
 

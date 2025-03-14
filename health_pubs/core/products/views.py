@@ -45,7 +45,6 @@ from django.utils import timezone
 from django.utils.text import slugify
 from django.views import View
 from django.core.exceptions import ImproperlyConfigured
-from pydantic import BaseModel, validator
 from rest_framework import status, viewsets
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
@@ -441,46 +440,6 @@ class CustomPagination(PageNumberPagination):
         return response
 
 
-class ProductSchema(BaseModel):
-    product_id: str
-    title: str
-    content_type: str
-    status: str
-    created: datetime.datetime
-    unit_of_measure: str
-    description: str
-    gov_related_article: str
-    product_code: str
-    version_date: str
-    guidance: str
-    stock_owner: str
-    stock_referral: str
-    tag: str
-    programme_id: str
-    language_id: str
-    language_name: str
-    audience_id: str
-    where_to_use_id: str
-    vaccination_id: str
-    disease_id: str
-
-    @validator("created", pre=True, allow_reuse=True)
-    def parse_created(cls, value):
-        # Handle pandas.Timestamp directly
-        if isinstance(value, pd.Timestamp):
-            return value.to_pydatetime()
-        # Handle string-based date parsing
-        elif isinstance(value, str):
-            try:
-                return datetime.datetime.strptime(value, "%d/%m/%Y %H:%M:%S")
-            except ValueError:
-                raise ValueError(
-                    f"Invalid date format for 'created': {value}. Expected format: DD/MM/YYYY HH:MM:SS"
-                )
-        else:
-            raise ValueError(f"Unsupported type for 'created': {type(value)}")
-
-
 class ProductViewSet(viewsets.ViewSet):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
@@ -495,7 +454,6 @@ class ProductViewSet(viewsets.ViewSet):
             with transaction.atomic():
                 logger.info("Starting bulk upload of merged product Excel to DB...")
 
-                # Validate and read the uploaded file
                 merged_excel_file = request.FILES.get("product_excel")
                 if not merged_excel_file:
                     logger.error("No merged Excel file uploaded.")
@@ -506,7 +464,7 @@ class ProductViewSet(viewsets.ViewSet):
 
                 try:
                     df = pd.read_excel(merged_excel_file)
-                    df = df.where(pd.notna(df), None)  # Standardize empties
+                    df = df.where(pd.notna(df), None)
                 except Exception as e:
                     logger.error(f"Error reading merged Excel file: {str(e)}")
                     return Response(
@@ -516,11 +474,8 @@ class ProductViewSet(viewsets.ViewSet):
 
                 skipped_rows = []
                 created_products = 0
-
-                # Ensure the root page exists or create it
                 root_page = self.get_or_create_root_page()
 
-                # Process each row
                 for index, row in df.iterrows():
                     result = self.process_row(row, index, root_page)
                     if result.get("skipped"):
@@ -545,15 +500,33 @@ class ProductViewSet(viewsets.ViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+    def skip_row(self, index, message):
+        """Helper to log and return a standardized skip result."""
+        logger.warning(f"Skipping row {index+1}: {message}")
+        return {"skipped": True, "error": {"row": index + 1, "error": message}}
+
+    def assign_m2m_fields(self, instance, m2m_mapping, row):
+        """
+        Assign many-to-many fields on the given instance using the provided mapping.
+        Returns a dict mapping response keys to the assigned names.
+        """
+        m2m_names = {}
+        for field_key, (attr_name, model, response_key) in m2m_mapping.items():
+            instances, names = self.fetch_instances_and_names(
+                model, field_key, row.get(field_key)
+            )
+            getattr(instance, attr_name).set(instances)
+            m2m_names[response_key] = names
+        return m2m_names
+
     def process_row(self, row, index, root_page):
         """
         Processes a single row from the Excel file.
-        Returns a dict with either a 'skipped' flag and error details or products_created count.
+        Returns a dict with either a 'skipped' flag and error details or the count of pages created.
         """
         try:
-            logger.info(f"Processing row {index + 1}: {row.to_dict()}")
+            logger.info(f"Processing row {index+1}: {row.to_dict()}")
 
-            # Validate required fields
             required_fields = [
                 "product_id",
                 "title",
@@ -562,37 +535,18 @@ class ProductViewSet(viewsets.ViewSet):
             ]
             missing_fields = [f for f in required_fields if pd.isna(row.get(f))]
             if missing_fields:
-                logger.warning(
-                    f"Skipping row {index + 1}: Missing required fields {missing_fields}"
-                )
-                return {
-                    "skipped": True,
-                    "error": {
-                        "row": index + 1,
-                        "error": f"Missing fields: {missing_fields}",
-                    },
-                }
+                return self.skip_row(index, f"Missing fields: {missing_fields}")
 
-            # Prevent duplicate products
             if Product.objects.filter(product_id=row["product_id"]).exists():
-                logger.warning(
-                    f"Skipping row {index + 1}: Product with id {row['product_id']} already exists."
+                return self.skip_row(
+                    index, f"Product with id {row['product_id']} already exists."
                 )
-                return {
-                    "skipped": True,
-                    "error": {
-                        "row": index + 1,
-                        "error": f"Product with id {row['product_id']} already exists.",
-                    },
-                }
 
-            # Clean and process row data
             row = self.clean_row_data(row)
-            logger.debug(f"Cleaned row {index + 1}: {row}")
+            logger.debug(f"Cleaned row {index+1}: {row}")
             row.setdefault("run_to_zero", False)
             created_date = self.convert_created_date(row["created"])
 
-            # Validate program if provided
             program = None
             if row.get("programme_id"):
                 program_id = (
@@ -603,34 +557,18 @@ class ProductViewSet(viewsets.ViewSet):
                 logger.info("PROGRAM_ID %s", program_id)
                 program = Program.objects.filter(program_id=program_id).first()
                 if not program:
-                    logger.warning(
-                        f"Row {index + 1}: Program with id {row['programme_id']} does not exist."
+                    return self.skip_row(
+                        index, f"Program with id {row['programme_id']} does not exist."
                     )
-                    return {
-                        "skipped": True,
-                        "error": {
-                            "row": index + 1,
-                            "error": f"Program with id {row['programme_id']} does not exist.",
-                        },
-                    }
 
-            # Validate language
             try:
                 language = LanguagePage.objects.get(language_id=row["language_id"])
             except LanguagePage.DoesNotExist:
-                logger.warning(
-                    f"Row {index + 1}: Language with id {row['language_id']} does not exist."
+                return self.skip_row(
+                    index, f"Language with id {row['language_id']} does not exist."
                 )
-                return {
-                    "skipped": True,
-                    "error": {
-                        "row": index + 1,
-                        "error": f"Language with id {row['language_id']} does not exist.",
-                    },
-                }
             iso_language_code = language.iso_language_code.upper()
 
-            # Create the ProductUpdate page
             slug_update = f"bulkupload-{uuid.uuid4()}"
             product_update = ProductUpdate(
                 title=row["title"],
@@ -654,7 +592,6 @@ class ProductViewSet(viewsets.ViewSet):
             )
             root_page.add_child(instance=product_update)
 
-            # Handle many-to-many relationships using a mapping
             m2m_mapping = {
                 "audience_id": ("audience_ref", Audience, "audience_names"),
                 "where_to_use_id": (
@@ -665,20 +602,10 @@ class ProductViewSet(viewsets.ViewSet):
                 "vaccination_id": ("vaccination_ref", Vaccination, "vaccination_names"),
                 "disease_id": ("diseases_ref", Disease, "disease_names"),
             }
-            m2m_names = {}
-            for field_key, (attr_name, model, response_key) in m2m_mapping.items():
-                instances, names = self.fetch_instances_and_names(
-                    model, field_key, row.get(field_key)
-                )
-                getattr(product_update, attr_name).set(instances)
-                m2m_names[response_key] = names
-
+            m2m_names = self.assign_m2m_fields(product_update, m2m_mapping, row)
             product_update.save()
 
-            # Determine publish date
             publish_date = self.get_publish_date(row.get("version_date"), index)
-
-            # Create the Product instance
             slug = f"{slugify(row['title'])}-{row['product_id']}-{uuid.uuid4()}"
             product = Product(
                 title=row["title"],
@@ -703,12 +630,10 @@ class ProductViewSet(viewsets.ViewSet):
             )
             root_page.add_child(instance=product)
 
-            # Build order limits structure
             order_limits_list = self.build_order_limits(
                 row.get("organization_name"), row.get("order_limit_value")
             )
 
-            # Log final response data
             response_data = {
                 "maximum_order_quantity": product_update.maximum_order_quantity,
                 "run_to_zero": product_update.run_to_zero,
@@ -740,18 +665,14 @@ class ProductViewSet(viewsets.ViewSet):
                 product.product_id,
                 response_data,
             )
-            # Return count of two pages created: product_update and product.
             return {"skipped": False, "products_created": 2}
 
         except (Program.DoesNotExist, LanguagePage.DoesNotExist, ValueError) as ve:
-            logger.warning(f"Data error in row {index + 1}: {ve}")
-            return {"skipped": True, "error": {"row": index + 1, "error": str(ve)}}
+            logger.warning(f"Data error in row {index+1}: {ve}")
+            return self.skip_row(index, str(ve))
         except Exception as e:
-            logger.exception(f"Unexpected error in row {index + 1}: {e}")
-            return {
-                "skipped": True,
-                "error": {"row": index + 1, "error": f"Unexpected error: {str(e)}"},
-            }
+            logger.exception(f"Unexpected error in row {index+1}: {e}")
+            return self.skip_row(index, f"Unexpected error: {str(e)}")
 
     def get_publish_date(self, raw_version_date, index):
         """
@@ -768,7 +689,7 @@ class ProductViewSet(viewsets.ViewSet):
                     ).date()
             except ValueError:
                 logger.warning(
-                    f"Invalid publish_date format for row {index + 1}: {raw_version_date}"
+                    f"Invalid publish_date format for row {index+1}: {raw_version_date}"
                 )
                 publish_date = None
         if publish_date is None:
@@ -816,7 +737,6 @@ class ProductViewSet(viewsets.ViewSet):
                     return None
             return None
 
-        # Convert run_to_zero value from string if needed
         rt_zero = row.get("run_to_zero")
         if isinstance(rt_zero, str):
             rt_zero_lower = rt_zero.strip().lower()
@@ -827,13 +747,10 @@ class ProductViewSet(viewsets.ViewSet):
             else:
                 row["run_to_zero"] = None
 
-        # Replace '-' or 'nan' with None for all string columns
         for col, val in row.items():
-            if isinstance(val, str):
-                if val.strip().lower() in ["-", "nan"]:
-                    row[col] = None
+            if isinstance(val, str) and val.strip().lower() in ["-", "nan"]:
+                row[col] = None
 
-        # Clean numeric fields
         row["product_id"] = clean_numeric_field(row.get("product_id"))
         row["unit_of_measure"] = clean_numeric_field(row.get("unit_of_measure"))
         row["programme_id"] = clean_numeric_field(row.get("programme_id"))
@@ -843,7 +760,6 @@ class ProductViewSet(viewsets.ViewSet):
         row["vaccination_id"] = clean_numeric_field(row.get("vaccination_id"))
         row["disease_id"] = clean_numeric_field(row.get("disease_id"))
         row["minimum_stock_level"] = clean_numeric_field(row.get("minimum_stock_level"))
-
         return row
 
     def convert_created_date(self, created_date_str):

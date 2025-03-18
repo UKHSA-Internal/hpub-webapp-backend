@@ -504,7 +504,381 @@ class ErrorHandlingMixin:
             )
 
 
-class ProductViewSet(viewsets.ViewSet):
+class PresignedUrlMixin:
+    """Handles presigned URL extraction and injection."""
+
+    def _process_presigned_urls(self, response_data):
+        update_refs = response_data.get("update_ref")
+        if not isinstance(update_refs, dict):
+            return
+
+        product_downloads = update_refs.get("product_downloads")
+        if not isinstance(product_downloads, dict):
+            return
+
+        all_download_urls = self._collect_s3_urls(product_downloads)
+        logger.info(LOG_MSG_S3_URL_EXTRACTION, all_download_urls)
+
+        presigned_urls = generate_presigned_urls(all_download_urls)
+        inline_presigned_urls = generate_inline_presigned_urls(all_download_urls)
+
+        if "main_download_url" in product_downloads:
+            product_downloads["main_download_url"] = self._process_main_download(
+                product_downloads.get("main_download_url"),
+                presigned_urls,
+                inline_presigned_urls,
+            )
+
+        for download_type in [
+            "web_download_url",
+            "print_download_url",
+            "transcript_url",
+        ]:
+            downloads = product_downloads.get(download_type, [])
+            if isinstance(downloads, list):
+                product_downloads[download_type] = [
+                    self._process_download_item(
+                        item, presigned_urls, inline_presigned_urls
+                    )
+                    for item in downloads
+                ]
+
+    def _collect_s3_urls(self, product_downloads):
+        urls = []
+        main_download = product_downloads.get("main_download_url")
+        if isinstance(main_download, dict):
+            s3_url = main_download.get("s3_bucket_url")
+            if s3_url:
+                urls.append(s3_url)
+        for download_type in [
+            "web_download_url",
+            "print_download_url",
+            "transcript_url",
+        ]:
+            downloads = product_downloads.get(download_type, [])
+            if isinstance(downloads, list):
+                for item in downloads:
+                    if isinstance(item, dict):
+                        s3_url = item.get("s3_bucket_url")
+                        if s3_url:
+                            urls.append(s3_url)
+        return urls
+
+    def _process_main_download(
+        self, main_download, presigned_urls, inline_presigned_urls
+    ):
+        if not isinstance(main_download, dict):
+            return main_download
+        s3_url = main_download.get("s3_bucket_url", "")
+        if s3_url in presigned_urls:
+            main_download["URL"] = presigned_urls[s3_url]
+        if (
+            not main_download.get("inline_presigned_s3_url")
+            and s3_url in inline_presigned_urls
+        ):
+            main_download["inline_presigned_s3_url"] = inline_presigned_urls[s3_url]
+        return main_download
+
+    def _process_download_item(self, item, presigned_urls, inline_presigned_urls):
+        if not isinstance(item, dict):
+            return item
+        s3_url = item.get("s3_bucket_url", "")
+        if s3_url in presigned_urls:
+            item["URL"] = presigned_urls[s3_url]
+        if not item.get("inline_presigned_s3_url") and s3_url in inline_presigned_urls:
+            item["inline_presigned_s3_url"] = inline_presigned_urls[s3_url]
+        return item
+
+
+class ProductUtilsMixin:
+    """
+    Contains common helper functions for product processing,
+    used in bulk uploads.
+    """
+
+    def skip_row(self, index, message):
+        logger.warning(f"Skipping row {index + 1}: {message}")
+        return {"skipped": True, "error": {"row": index + 1, "error": message}}
+
+    def assign_m2m_fields(self, instance, m2m_mapping, row):
+        m2m_names = {}
+        for field_key, (attr_name, model, response_key) in m2m_mapping.items():
+            instances, names = self.fetch_instances_and_names(
+                model, field_key, row.get(field_key)
+            )
+            getattr(instance, attr_name).set(instances)
+            m2m_names[response_key] = names
+        return m2m_names
+
+    def create_product_update(self, row):
+        slug_update = f"bulkupload-{uuid.uuid4()}"
+        data = {
+            "title": row["title"],
+            "slug": slug_update,
+            "minimum_stock_level": row.get("minimum_stock_level"),
+            "maximum_order_quantity": row.get("maximum_order_quantity"),
+            "quantity_available": row.get("quantity_available", 0),
+            "run_to_zero": row.get("run_to_zero", False),
+            "available_from_choice": row.get("available_from_choice", "immediately"),
+            "order_from_date": row.get("order_from_date"),
+            "order_end_date": row.get("order_end_date"),
+            "product_type": row.get("product_type"),
+            "alternative_type": row.get("alternative_type"),
+            "cost_centre": row.get("cost_centre", "10200"),
+            "local_code": row.get("local_code", "0001"),
+            "unit_of_measure": row.get("unit_of_measure"),
+            "summary_of_guidance": row.get("summary_of_guidance"),
+            "stock_owner_email_address": row.get("stock_owner"),
+            "order_referral_email_address": row.get("stock_referral"),
+            "product_downloads": row.get("product_downloads", {}),
+        }
+        return ProductUpdate(**data)
+
+    def create_product(
+        self,
+        row,
+        program,
+        language,
+        iso_language_code,
+        product_update,
+        created_date,
+        publish_date,
+    ):
+        slug = f"{slugify(row['title'])}-{row['product_id']}-{uuid.uuid4()}"
+        data = {
+            "title": row["title"],
+            "slug": slug,
+            "product_id": row["product_id"],
+            "program_name": program.programme_name if program else "",
+            "product_title": row["title"],
+            "status": row["status"],
+            "product_code": row["product_code"],
+            "file_url": row["gov_related_article"],
+            "tag": row["tag"],
+            "product_key": 1,
+            "program_id": program,
+            "language_id": language,
+            "version_number": "001",
+            "iso_language_code": iso_language_code,
+            "language_name": row["language_name"],
+            "update_ref": product_update,
+            "created_at": created_date,
+            "is_latest": True,
+            "publish_date": publish_date,
+        }
+        return Product(**data)
+
+    def process_row(self, row, index, root_page):
+        try:
+            logger.info(f"Processing row {index + 1}: {row.to_dict()}")
+            required_fields = [
+                "product_id",
+                "title",
+                "language_id",
+                "gov_related_article",
+            ]
+            missing_fields = [f for f in required_fields if pd.isna(row.get(f))]
+            if missing_fields:
+                return self.skip_row(index, f"Missing fields: {missing_fields}")
+
+            if Product.objects.filter(product_id=row["product_id"]).exists():
+                return self.skip_row(
+                    index, f"Product with id {row['product_id']} already exists."
+                )
+
+            row = self.clean_row_data(row)
+            logger.debug(f"Cleaned row {index + 1}: {row}")
+            row.setdefault("run_to_zero", False)
+            created_date = self.convert_created_date(row["created"])
+
+            program = None
+            if row.get("programme_id"):
+                program_id = (
+                    str(int(row["programme_id"]))
+                    if pd.notna(row["programme_id"])
+                    else None
+                )
+                logger.info("PROGRAM_ID %s", program_id)
+                program = Program.objects.filter(program_id=program_id).first()
+                if not program:
+                    return self.skip_row(
+                        index, f"Program with id {row['programme_id']} does not exist."
+                    )
+
+            try:
+                language = LanguagePage.objects.get(language_id=row["language_id"])
+            except LanguagePage.DoesNotExist:
+                return self.skip_row(
+                    index, f"Language with id {row['language_id']} does not exist."
+                )
+            iso_language_code = language.iso_language_code.upper()
+
+            product_update = self.create_product_update(row)
+            root_page.add_child(instance=product_update)
+
+            m2m_mapping = {
+                "audience_id": ("audience_ref", Audience, "audience_names"),
+                "where_to_use_id": (
+                    "where_to_use_ref",
+                    WhereToUse,
+                    "where_to_use_names",
+                ),
+                "vaccination_id": ("vaccination_ref", Vaccination, "vaccination_names"),
+                "disease_id": ("diseases_ref", Disease, "disease_names"),
+            }
+            m2m_names = self.assign_m2m_fields(product_update, m2m_mapping, row)
+            product_update.save()
+
+            publish_date = self.get_publish_date(row.get("version_date"), index)
+            product = self.create_product(
+                row,
+                program,
+                language,
+                iso_language_code,
+                product_update,
+                created_date,
+                publish_date,
+            )
+            root_page.add_child(instance=product)
+
+            order_limits_list = self.build_order_limits(
+                row.get("organization_name"), row.get("order_limit_value")
+            )
+            logger.info(
+                "Final response for product_id %s: %s",
+                product.product_id,
+                {
+                    "audience_names": m2m_names.get("audience_names", []),
+                    "vaccination_names": m2m_names.get("vaccination_names", []),
+                    "disease_names": m2m_names.get("disease_names", []),
+                    "where_to_use_names": m2m_names.get("where_to_use_names", []),
+                    "order_limits": order_limits_list,
+                },
+            )
+            # Two pages created: product_update and product.
+            return {"skipped": False, "products_created": 2}
+
+        except (Program.DoesNotExist, LanguagePage.DoesNotExist, ValueError) as ve:
+            logger.warning(f"Data error in row {index + 1}: {ve}")
+            return self.skip_row(index, str(ve))
+        except Exception as e:
+            logger.exception(f"Unexpected error in row {index + 1}: {e}")
+            return self.skip_row(index, f"Unexpected error: {str(e)}")
+
+    def get_publish_date(self, raw_version_date, index):
+        publish_date = None
+        if raw_version_date and raw_version_date != "-":
+            try:
+                if isinstance(raw_version_date, datetime.date):
+                    publish_date = raw_version_date
+                else:
+                    publish_date = datetime.datetime.strptime(
+                        raw_version_date, "%Y-%m-%d"
+                    ).date()
+            except ValueError:
+                logger.warning(
+                    f"Invalid publish_date format for row {index + 1}: {raw_version_date}"
+                )
+                publish_date = None
+        if publish_date is None:
+            publish_date = datetime.date.today()
+        return publish_date
+
+    def build_order_limits(self, organization_names_str, max_val):
+        order_limits_list = []
+        if organization_names_str:
+            for org_name in (
+                org.strip() for org in organization_names_str.split(",") if org.strip()
+            ):
+                order_limits_list.append(
+                    {"organization_name": org_name, "order_limit_value": max_val}
+                )
+        return order_limits_list
+
+    def clean_row_data(self, row):
+        def clean_numeric_field(value):
+            if pd.notna(value):
+                try:
+                    if isinstance(value, str) and "," in value:
+                        return ",".join(
+                            str(int(float(item.strip())))
+                            if item.strip().replace(".", "", 1).isdigit()
+                            else item.strip()
+                            for item in value.split(",")
+                        )
+                    elif isinstance(value, (float, int)):
+                        return str(int(float(value)))
+                    elif (
+                        isinstance(value, str)
+                        and value.strip().replace(".", "", 1).isdigit()
+                    ):
+                        return str(int(float(value.strip())))
+                except ValueError:
+                    return None
+            return None
+
+        rt_zero = row.get("run_to_zero")
+        if isinstance(rt_zero, str):
+            rt_zero_lower = rt_zero.strip().lower()
+            row["run_to_zero"] = (
+                True
+                if rt_zero_lower == "y"
+                else (False if rt_zero_lower == "n" else None)
+            )
+
+        for col, val in row.items():
+            if isinstance(val, str) and val.strip().lower() in ["-", "nan"]:
+                row[col] = None
+
+        row["product_id"] = clean_numeric_field(row.get("product_id"))
+        row["unit_of_measure"] = clean_numeric_field(row.get("unit_of_measure"))
+        row["programme_id"] = clean_numeric_field(row.get("programme_id"))
+        row["language_id"] = clean_numeric_field(row.get("language_id"))
+        row["audience_id"] = clean_numeric_field(row.get("audience_id"))
+        row["where_to_use_id"] = clean_numeric_field(row.get("where_to_use_id"))
+        row["vaccination_id"] = clean_numeric_field(row.get("vaccination_id"))
+        row["disease_id"] = clean_numeric_field(row.get("disease_id"))
+        row["minimum_stock_level"] = clean_numeric_field(row.get("minimum_stock_level"))
+        return row
+
+    def convert_created_date(self, created_date_str):
+        if isinstance(created_date_str, pd.Timestamp):
+            return created_date_str.to_pydatetime()
+        elif isinstance(created_date_str, str):
+            return datetime.datetime.strptime(created_date_str, "%d/%m/%Y %H:%M:%S")
+        else:
+            raise ValueError(
+                f"Unsupported type for 'created': {type(created_date_str)}"
+            )
+
+    def get_or_create_root_page(self):
+        try:
+            root_page = Page.objects.get(slug="products-root")
+            logger.info("Root page 'products-root' found.")
+        except Page.DoesNotExist:
+            logger.warning("Root page 'products-root' not found. Creating it.")
+            wagtail_root = Page.objects.filter(depth=1).first()
+            if not wagtail_root:
+                raise ImproperlyConfigured(
+                    "Wagtail root page not found. Check Wagtail setup."
+                )
+            root_page = ProductUpdate(title="Products Root", slug="products-root")
+            wagtail_root.add_child(instance=root_page)
+            logger.info("Root page 'products-root' created successfully.")
+        return root_page
+
+    def fetch_instances_and_names(self, model, field_name, ids_str):
+        if not ids_str:
+            return [], []
+        ids = [id_val.strip() for id_val in ids_str.split(",") if id_val.strip()]
+        if not ids:
+            return [], []
+        instances = model.objects.filter(**{f"{field_name}__in": ids})
+        names = [inst.name for inst in instances]
+        return list(instances), names
+
+
+class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
@@ -564,332 +938,17 @@ class ProductViewSet(viewsets.ViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-    def skip_row(self, index, message):
-        """Helper to log and return a standardized skip result."""
-        logger.warning(f"Skipping row {index + 1}: {message}")
-        return {"skipped": True, "error": {"row": index + 1, "error": message}}
 
-    def assign_m2m_fields(self, instance, m2m_mapping, row):
-        """
-        Assign many-to-many fields on the given instance using the provided mapping.
-        Returns a dict mapping response keys to the assigned names.
-        """
-        m2m_names = {}
-        for field_key, (attr_name, model, response_key) in m2m_mapping.items():
-            instances, names = self.fetch_instances_and_names(
-                model, field_key, row.get(field_key)
-            )
-            getattr(instance, attr_name).set(instances)
-            m2m_names[response_key] = names
-        return m2m_names
+class ProductDetailView(ErrorHandlingMixin, PresignedUrlMixin, viewsets.ViewSet):
+    """
+    A view for returning product details.
+    Note: This example uses ViewSet for consistency, but you can also use a plain View.
+    """
 
-    def create_product_update(self, row):
-        """
-        Creates and returns a ProductUpdate instance based on the row data.
-        """
-        slug_update = f"bulkupload-{uuid.uuid4()}"
-        data = {
-            "title": row["title"],
-            "slug": slug_update,
-            "minimum_stock_level": row.get("minimum_stock_level"),
-            "maximum_order_quantity": row.get("maximum_order_quantity"),
-            "quantity_available": row.get("quantity_available", 0),
-            "run_to_zero": row.get("run_to_zero", False),
-            "available_from_choice": row.get("available_from_choice", "immediately"),
-            "order_from_date": row.get("order_from_date"),
-            "order_end_date": row.get("order_end_date"),
-            "product_type": row.get("product_type"),
-            "alternative_type": row.get("alternative_type"),
-            "cost_centre": row.get("cost_centre", "10200"),
-            "local_code": row.get("local_code", "0001"),
-            "unit_of_measure": row.get("unit_of_measure"),
-            "summary_of_guidance": row.get("summary_of_guidance"),
-            "stock_owner_email_address": row.get("stock_owner"),
-            "order_referral_email_address": row.get("stock_referral"),
-            "product_downloads": row.get("product_downloads", {}),
-        }
-        return ProductUpdate(**data)
-
-    def create_product(
-        self,
-        row,
-        program,
-        language,
-        iso_language_code,
-        product_update,
-        created_date,
-        publish_date,
-    ):
-        """
-        Creates and returns a Product instance based on the row data and related objects.
-        """
-        slug = f"{slugify(row['title'])}-{row['product_id']}-{uuid.uuid4()}"
-        data = {
-            "title": row["title"],
-            "slug": slug,
-            "product_id": row["product_id"],
-            "program_name": program.programme_name if program else "",
-            "product_title": row["title"],
-            "status": row["status"],
-            "product_code": row["product_code"],
-            "file_url": row["gov_related_article"],
-            "tag": row["tag"],
-            "product_key": 1,
-            "program_id": program,
-            "language_id": language,
-            "version_number": "001",
-            "iso_language_code": iso_language_code,
-            "language_name": row["language_name"],
-            "update_ref": product_update,
-            "created_at": created_date,
-            "is_latest": True,
-            "publish_date": publish_date,
-        }
-        return Product(**data)
-
-    def process_row(self, row, index, root_page):
-        """
-        Processes a single row from the Excel file.
-        Returns a dict with either a 'skipped' flag and error details or the count of pages created.
-        """
-        try:
-            logger.info(f"Processing row {index + 1}: {row.to_dict()}")
-            required_fields = [
-                "product_id",
-                "title",
-                "language_id",
-                "gov_related_article",
-            ]
-            missing_fields = [f for f in required_fields if pd.isna(row.get(f))]
-            if missing_fields:
-                return self.skip_row(index, f"Missing fields: {missing_fields}")
-
-            if Product.objects.filter(product_id=row["product_id"]).exists():
-                return self.skip_row(
-                    index, f"Product with id {row['product_id']} already exists."
-                )
-
-            row = self.clean_row_data(row)
-            logger.debug(f"Cleaned row {index + 1}: {row}")
-            row.setdefault("run_to_zero", False)
-            created_date = self.convert_created_date(row["created"])
-
-            # Get program if specified
-            program = None
-            if row.get("programme_id"):
-                program_id = (
-                    str(int(row["programme_id"]))
-                    if pd.notna(row["programme_id"])
-                    else None
-                )
-                logger.info("PROGRAM_ID %s", program_id)
-                program = Program.objects.filter(program_id=program_id).first()
-                if not program:
-                    return self.skip_row(
-                        index, f"Program with id {row['programme_id']} does not exist."
-                    )
-
-            # Get language and iso code
-            try:
-                language = LanguagePage.objects.get(language_id=row["language_id"])
-            except LanguagePage.DoesNotExist:
-                return self.skip_row(
-                    index, f"Language with id {row['language_id']} does not exist."
-                )
-            iso_language_code = language.iso_language_code.upper()
-
-            product_update = self.create_product_update(row)
-            root_page.add_child(instance=product_update)
-
-            m2m_mapping = {
-                "audience_id": ("audience_ref", Audience, "audience_names"),
-                "where_to_use_id": (
-                    "where_to_use_ref",
-                    WhereToUse,
-                    "where_to_use_names",
-                ),
-                "vaccination_id": ("vaccination_ref", Vaccination, "vaccination_names"),
-                "disease_id": ("diseases_ref", Disease, "disease_names"),
-            }
-            m2m_names = self.assign_m2m_fields(product_update, m2m_mapping, row)
-            product_update.save()
-
-            publish_date = self.get_publish_date(row.get("version_date"), index)
-            product = self.create_product(
-                row,
-                program,
-                language,
-                iso_language_code,
-                product_update,
-                created_date,
-                publish_date,
-            )
-            root_page.add_child(instance=product)
-
-            order_limits_list = self.build_order_limits(
-                row.get("organization_name"), row.get("order_limit_value")
-            )
-            logger.info(
-                "Final response data for product_id %s: %s",
-                product.product_id,
-                {
-                    "audience_names": m2m_names.get("audience_names", []),
-                    "vaccination_names": m2m_names.get("vaccination_names", []),
-                    "disease_names": m2m_names.get("disease_names", []),
-                    "where_to_use_names": m2m_names.get("where_to_use_names", []),
-                    "order_limits": order_limits_list,
-                },
-            )
-            # Two pages created: product_update and product.
-            return {"skipped": False, "products_created": 2}
-
-        except (Program.DoesNotExist, LanguagePage.DoesNotExist, ValueError) as ve:
-            logger.warning(f"Data error in row {index + 1}: {ve}")
-            return self.skip_row(index, str(ve))
-        except Exception as e:
-            logger.exception(f"Unexpected error in row {index + 1}: {e}")
-            return self.skip_row(index, f"Unexpected error: {str(e)}")
-
-    def get_publish_date(self, raw_version_date, index):
-        """
-        Determines the publish date from the raw version_date field.
-        """
-        publish_date = None
-        if raw_version_date and raw_version_date != "-":
-            try:
-                if isinstance(raw_version_date, datetime.date):
-                    publish_date = raw_version_date
-                else:
-                    publish_date = datetime.datetime.strptime(
-                        raw_version_date, "%Y-%m-%d"
-                    ).date()
-            except ValueError:
-                logger.warning(
-                    f"Invalid publish_date format for row {index + 1}: {raw_version_date}"
-                )
-                publish_date = None
-        if publish_date is None:
-            publish_date = datetime.date.today()
-        return publish_date
-
-    def build_order_limits(self, organization_names_str, max_val):
-        """
-        Builds the order_limits list from a comma-separated string of organization names.
-        """
-        order_limits_list = []
-        if organization_names_str:
-            for org_name in [
-                org.strip() for org in organization_names_str.split(",") if org.strip()
-            ]:
-                order_limits_list.append(
-                    {"organization_name": org_name, "order_limit_value": max_val}
-                )
-        return order_limits_list
-
-    def clean_row_data(self, row):
-        """
-        Cleans and processes row data for numeric and comma-separated fields.
-        """
-
-        def clean_numeric_field(value):
-            if pd.notna(value):
-                try:
-                    if isinstance(value, str) and "," in value:
-                        return ",".join(
-                            str(int(float(item.strip())))
-                            if item.strip().replace(".", "", 1).isdigit()
-                            else item.strip()
-                            for item in value.split(",")
-                        )
-                    elif isinstance(value, (float, int)):
-                        return str(int(float(value)))
-                    elif (
-                        isinstance(value, str)
-                        and value.strip().replace(".", "", 1).isdigit()
-                    ):
-                        return str(int(float(value.strip())))
-                except ValueError:
-                    return None
-            return None
-
-        rt_zero = row.get("run_to_zero")
-        if isinstance(rt_zero, str):
-            rt_zero_lower = rt_zero.strip().lower()
-            if rt_zero_lower == "y":
-                run_to_zero_value = True
-            elif rt_zero_lower == "n":
-                run_to_zero_value = False
-            else:
-                run_to_zero_value = None
-            row["run_to_zero"] = run_to_zero_value
-
-        for col, val in row.items():
-            if isinstance(val, str) and val.strip().lower() in ["-", "nan"]:
-                row[col] = None
-
-        row["product_id"] = clean_numeric_field(row.get("product_id"))
-        row["unit_of_measure"] = clean_numeric_field(row.get("unit_of_measure"))
-        row["programme_id"] = clean_numeric_field(row.get("programme_id"))
-        row["language_id"] = clean_numeric_field(row.get("language_id"))
-        row["audience_id"] = clean_numeric_field(row.get("audience_id"))
-        row["where_to_use_id"] = clean_numeric_field(row.get("where_to_use_id"))
-        row["vaccination_id"] = clean_numeric_field(row.get("vaccination_id"))
-        row["disease_id"] = clean_numeric_field(row.get("disease_id"))
-        row["minimum_stock_level"] = clean_numeric_field(row.get("minimum_stock_level"))
-        return row
-
-    def convert_created_date(self, created_date_str):
-        """
-        Converts the 'created' field to a datetime object.
-        """
-        if isinstance(created_date_str, pd.Timestamp):
-            return created_date_str.to_pydatetime()
-        elif isinstance(created_date_str, str):
-            return datetime.datetime.strptime(created_date_str, "%d/%m/%Y %H:%M:%S")
-        else:
-            raise ValueError(
-                f"Unsupported type for 'created': {type(created_date_str)}"
-            )
-
-    def get_or_create_root_page(self):
-        """
-        Ensures the root page for products exists or creates it.
-        """
-        try:
-            root_page = Page.objects.get(slug="products-root")
-            logger.info("Root page 'products-root' found.")
-        except Page.DoesNotExist:
-            logger.warning("Root page 'products-root' not found. Creating it.")
-            wagtail_root = Page.objects.filter(depth=1).first()
-            if not wagtail_root:
-                raise ImproperlyConfigured(
-                    "Wagtail root page not found. Check Wagtail setup."
-                )
-            root_page = ProductUpdate(title="Products Root", slug="products-root")
-            wagtail_root.add_child(instance=root_page)
-            logger.info("Root page 'products-root' created successfully.")
-        return root_page
-
-    def fetch_instances_and_names(self, model, field_name, ids_str):
-        """
-        Given a model and a comma-separated string of IDs, fetches matching instances
-        and returns a tuple of (instances, list of instance names).
-        """
-        if not ids_str:
-            return [], []
-        ids = [id_val.strip() for id_val in ids_str.split(",") if id_val.strip()]
-        if not ids:
-            return [], []
-        instances = model.objects.filter(**{f"{field_name}__in": ids})
-        names = [inst.name for inst in instances]
-        return list(instances), names
-
-
-class ProductDetailView(ErrorHandlingMixin, View):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
-    def get(self, request, product_code, *args, **kwargs):
+    def retrieve(self, request, product_code=None, *args, **kwargs):
         product_code = unquote(product_code)
         logger.info("Fetching details for product with product_code: %s", product_code)
 
@@ -899,97 +958,17 @@ class ProductDetailView(ErrorHandlingMixin, View):
             return handle_error(
                 ErrorCode.PRODUCT_NOT_FOUND,
                 ErrorMessage.PRODUCT_NOT_FOUND,
-                status_code=HTTP_404_NOT_FOUND,
+                status_code=status.HTTP_404_NOT_FOUND,
             )
 
         serializer = ProductSerializer(product)
         response_data = serializer.data
 
-        # Process presigned URLs in a helper function.
+        # Process presigned URLs via the mixin.
         self._process_presigned_urls(response_data)
 
         logger.info("Returning product details for product_code: %s", product_code)
         return JsonResponse(response_data, status=200)
-
-    def _process_presigned_urls(self, response_data):
-        update_refs = response_data.get("update_ref")
-        if not isinstance(update_refs, dict):
-            return
-
-        product_downloads = update_refs.get("product_downloads")
-        if not isinstance(product_downloads, dict):
-            return
-
-        all_download_urls = self._collect_s3_urls(product_downloads)
-        logger.info(LOG_MSG_S3_URL_EXTRACTION, all_download_urls)
-
-        presigned_urls = generate_presigned_urls(all_download_urls)
-        inline_presigned_urls = generate_inline_presigned_urls(all_download_urls)
-
-        if "main_download_url" in product_downloads:
-            product_downloads["main_download_url"] = self._process_main_download(
-                product_downloads.get("main_download_url"),
-                presigned_urls,
-                inline_presigned_urls,
-            )
-
-        for download_type in [
-            "web_download_url",
-            "print_download_url",
-            "transcript_url",
-        ]:
-            downloads = product_downloads.get(download_type, [])
-            if isinstance(downloads, list):
-                for idx, item in enumerate(downloads):
-                    downloads[idx] = self._process_download_item(
-                        item, presigned_urls, inline_presigned_urls
-                    )
-
-    def _collect_s3_urls(self, product_downloads):
-        urls = []
-        main_download = product_downloads.get("main_download_url")
-        if isinstance(main_download, dict):
-            s3_url = main_download.get("s3_bucket_url")
-            if s3_url:
-                urls.append(s3_url)
-        for download_type in [
-            "web_download_url",
-            "print_download_url",
-            "transcript_url",
-        ]:
-            downloads = product_downloads.get(download_type, [])
-            if isinstance(downloads, list):
-                for item in downloads:
-                    if isinstance(item, dict):
-                        s3_url = item.get("s3_bucket_url")
-                        if s3_url:
-                            urls.append(s3_url)
-        return urls
-
-    def _process_main_download(
-        self, main_download, presigned_urls, inline_presigned_urls
-    ):
-        if not isinstance(main_download, dict):
-            return main_download
-        s3_url = main_download.get("s3_bucket_url", "")
-        if s3_url in presigned_urls:
-            main_download["URL"] = presigned_urls[s3_url]
-        if (
-            not main_download.get("inline_presigned_s3_url")
-            and s3_url in inline_presigned_urls
-        ):
-            main_download["inline_presigned_s3_url"] = inline_presigned_urls[s3_url]
-        return main_download
-
-    def _process_download_item(self, item, presigned_urls, inline_presigned_urls):
-        if not isinstance(item, dict):
-            return item
-        s3_url = item.get("s3_bucket_url", "")
-        if s3_url in presigned_urls:
-            item["URL"] = presigned_urls[s3_url]
-        if not item.get("inline_presigned_s3_url") and s3_url in inline_presigned_urls:
-            item["inline_presigned_s3_url"] = inline_presigned_urls[s3_url]
-        return item
 
 
 class ProductDetailDelete(ErrorHandlingMixin, View):

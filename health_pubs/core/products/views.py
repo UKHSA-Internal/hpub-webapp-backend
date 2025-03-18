@@ -2120,50 +2120,9 @@ class ProductUsersFilterView(APIView, ProductListMixin):
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            query = Q()
-            recently_updated = request.GET.get("recently_updated")
-            download_or_order = request.GET.get("download_or_order")
-            download_only = request.GET.get("download_only")
-            order_only = request.GET.get("order_only")
-            audience_names = request.GET.getlist("audiences", [])
-            program_names = request.GET.getlist("program_names", [])
-            disease_names = request.GET.getlist("diseases", [])
-            vaccination_names = request.GET.getlist("vaccinations", [])
-            product_types = request.GET.getlist("product_type", [])
-            language_names = request.GET.getlist("languages", [])
-            alternative_type = request.GET.getlist("alternative_type", [])
-            where_to_use_names = request.GET.getlist("where_to_use", [])
-            sort_by = request.GET.get("sort_by", "product_title")
-
-            if recently_updated:
-                try:
-                    query &= Q(updated_at__gte=recently_updated)
-                except ValueError:
-                    return _handle_invalid_query_param()
-            if download_only and download_only.lower() == "true":
-                query &= Q(tag__in=["download_only"])
-            elif download_or_order and download_or_order.lower() == "true":
-                query &= Q(tag__in=["download_and_order"])
-            elif order_only and order_only.lower() == "true":
-                query &= Q(tag__in=["order_only"])
-            if audience_names:
-                query &= Q(update_ref__audience_ref__name__in=audience_names)
-            if disease_names:
-                query &= Q(update_ref__diseases_ref__name__in=disease_names)
-            if vaccination_names:
-                query &= Q(update_ref__vaccination_ref__name__in=vaccination_names)
-            if program_names:
-                query &= Q(program_name__in=program_names)
-            if where_to_use_names:
-                query &= Q(update_ref__where_to_use_ref__name__in=where_to_use_names)
-            if alternative_type:
-                query &= Q(update_ref__alternative_type__in=alternative_type)
-            if product_types:
-                query &= Q(update_ref__product_type__in=product_types)
-            if language_names:
-                query &= Q(language_name__in=language_names)
-
+            query = self.build_query(request)
             products = Product.objects.filter(query, is_latest=True, status="live")
+            sort_by = request.GET.get("sort_by", "product_title")
             if sort_by not in VALID_SORT_FIELDS:
                 sort_by = "product_title"
             sorted_qs = products.order_by(sort_by)
@@ -2177,6 +2136,54 @@ class ProductUsersFilterView(APIView, ProductListMixin):
                 ErrorMessage.INTERNAL_SERVER_ERROR,
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+    def build_query(self, request):
+        query = Q()
+        recently_updated = request.GET.get("recently_updated")
+        download_or_order = request.GET.get("download_or_order")
+        download_only = request.GET.get("download_only")
+        order_only = request.GET.get("order_only")
+        audience_names = request.GET.getlist("audiences", [])
+        program_names = request.GET.getlist("program_names", [])
+        disease_names = request.GET.getlist("diseases", [])
+        vaccination_names = request.GET.getlist("vaccinations", [])
+        product_types = request.GET.getlist("product_type", [])
+        language_names = request.GET.getlist("languages", [])
+        alternative_type = request.GET.getlist("alternative_type", [])
+        where_to_use_names = request.GET.getlist("where_to_use", [])
+
+        if recently_updated:
+            query &= self.handle_recently_updated(recently_updated)
+        if download_only and download_only.lower() == "true":
+            query &= Q(tag__in=["download_only"])
+        elif download_or_order and download_or_order.lower() == "true":
+            query &= Q(tag__in=["download_and_order"])
+        elif order_only and order_only.lower() == "true":
+            query &= Q(tag__in=["order_only"])
+        if audience_names:
+            query &= Q(update_ref__audience_ref__name__in=audience_names)
+        if disease_names:
+            query &= Q(update_ref__diseases_ref__name__in=disease_names)
+        if vaccination_names:
+            query &= Q(update_ref__vaccination_ref__name__in=vaccination_names)
+        if program_names:
+            query &= Q(program_name__in=program_names)
+        if where_to_use_names:
+            query &= Q(update_ref__where_to_use_ref__name__in=where_to_use_names)
+        if alternative_type:
+            query &= Q(update_ref__alternative_type__in=alternative_type)
+        if product_types:
+            query &= Q(update_ref__product_type__in=product_types)
+        if language_names:
+            query &= Q(language_name__in=language_names)
+
+        return query
+
+    def handle_recently_updated(self, recently_updated):
+        try:
+            return Q(updated_at__gte=recently_updated)
+        except ValueError:
+            return _handle_invalid_query_param()
 
     def filter_languages(self, products_data):
         product_codes = {

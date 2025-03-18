@@ -2012,13 +2012,26 @@ class ProductUsersListView(APIView, ProductListMixin):
         return products_data
 
 
-class ProductSearchAdminView(APIView, ProductListMixin):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
+class BaseProductSearchView(APIView, ProductListMixin):
     pagination_class = CustomPagination
 
-    def get(self, request, *args, **kwargs):
+    def get_default_query(self) -> Q:
+        """
+        Returns the default query for the search.
+        Override in subclasses if necessary.
+        """
+        return Q()
+
+    def postprocess_response_data(self, response_data: dict, products) -> dict:
+        """
+        Hook to postprocess the response data before returning.
+        Override in subclasses to add extra keys.
+        """
+        return response_data
+
+    def get(self, request, *args, **kwargs) -> Response:
         try:
+            # Validate input parameters
             product_code = request.GET.get("product_code")
             product_title = request.GET.get("product_title")
             if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
@@ -2026,17 +2039,20 @@ class ProductSearchAdminView(APIView, ProductListMixin):
             if product_title and not isinstance(product_title, str):
                 return _handle_invalid_query_param()
 
-            query = Q()
+            # Build the query: start from a default that can be extended by subclasses
+            query = self.get_default_query()
             if product_code:
                 query &= Q(product_code_no_dashes__icontains=product_code)
             if product_title:
                 query &= Q(product_title__icontains=product_title)
+
             products = Product.objects.filter(query)
             if not products.exists():
                 return Response(
                     {"detail": ErrorMessage.PRODUCT_NOT_FOUND},
                     status=status.HTTP_404_NOT_FOUND,
                 )
+
             sorted_qs = self.get_sorted_queryset(products, request)
             data, paginator = self.paginate_and_serialize(
                 sorted_qs, request, use_direct_update=True
@@ -2044,7 +2060,7 @@ class ProductSearchAdminView(APIView, ProductListMixin):
             response_data = _prepare_response_data(
                 products, data, product_code, product_title
             )
-            response_data["recommended_products"] = get_recommended_products(products)
+            response_data = self.postprocess_response_data(response_data, products)
             return paginator.get_paginated_response(
                 response_data, status_code=status.HTTP_200_OK
             )
@@ -2063,54 +2079,27 @@ class ProductSearchAdminView(APIView, ProductListMixin):
             )
 
 
-class ProductSearchUserView(APIView, ProductListMixin):
+class ProductSearchAdminView(BaseProductSearchView):
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get_default_query(self) -> Q:
+        # Admin view doesn't restrict by latest/live status.
+        return Q()
+
+    def postprocess_response_data(self, response_data: dict, products) -> dict:
+        # Append recommended products for the admin view.
+        response_data["recommended_products"] = get_recommended_products(products)
+        return response_data
+
+
+class ProductSearchUserView(BaseProductSearchView):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
-    pagination_class = CustomPagination
 
-    def get(self, request, *args, **kwargs):
-        try:
-            product_code = request.GET.get("product_code")
-            product_title = request.GET.get("product_title")
-            if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
-                return _handle_invalid_query_param()
-            if product_title and not isinstance(product_title, str):
-                return _handle_invalid_query_param()
-
-            query = Q(is_latest=True, status="live")
-            if product_code:
-                query &= Q(product_code_no_dashes__icontains=product_code)
-            if product_title:
-                query &= Q(product_title__icontains=product_title)
-            products = Product.objects.filter(query)
-            if not products.exists():
-                return Response(
-                    {"detail": str(ErrorMessage.PRODUCT_NOT_FOUND)},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
-            sorted_qs = self.get_sorted_queryset(products, request)
-            data, paginator = self.paginate_and_serialize(
-                sorted_qs, request, use_direct_update=True
-            )
-            response_data = _prepare_response_data(
-                products, data, product_code, product_title
-            )
-            return paginator.get_paginated_response(
-                response_data, status_code=status.HTTP_200_OK
-            )
-        except DatabaseError:
-            return _handle_database_error()
-        except TimeoutError:
-            return _handle_timeout_error()
-        except ValidationError:
-            return _handle_invalid_query_param()
-        except Exception:
-            logger.exception(INTERNAL_ERROR_MSG)
-            return handle_error(
-                ErrorCode.INTERNAL_SERVER_ERROR,
-                ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+    def get_default_query(self) -> Q:
+        # User view only shows live, latest products.
+        return Q(is_latest=True, status="live")
 
 
 class ProductUsersFilterView(APIView, ProductListMixin):

@@ -2210,43 +2210,31 @@ class ProductAdminFilterView(APIView, ProductListMixin):
     permission_classes = [IsAuthenticated, IsAdminUser]
     pagination_class = CustomPagination
 
+    def _build_filter_query(self, request):
+        filter_mapping = {
+            "diseases": "update_ref__diseases_ref__name__in",
+            "vaccinations": "update_ref__vaccination_ref__name__in",
+            "audiences": "update_ref__audience_ref__name__in",
+            "where_to_use": "update_ref__where_to_use_ref__name__in",
+            "alternative_type": "update_ref__alternative_type__in",
+            "product_type": "update_ref__product_type__in",
+            "languages": "language_name__in",
+            "access_type": "tag__in",
+            "status": "status__in",
+        }
+        query = Q()
+        for param, lookup in filter_mapping.items():
+            values = request.GET.getlist(param, [])
+            if values:
+                query &= Q(**{lookup: values})
+        product_code = request.GET.get("product_code", None)
+        if product_code:
+            query &= Q(product_code_no_dashes__icontains=product_code)
+        return query
+
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            access_type = request.GET.getlist("access_type", [])
-            status_filter = request.GET.getlist("status", [])
-            # Ensure a default sort value is used.
-            request.GET.get("sort_by", "product_title")
-            product_code = request.GET.get("product_code", None)
-            disease_names = request.GET.getlist("diseases", [])
-            vaccination_names = request.GET.getlist("vaccinations", [])
-            audience_names = request.GET.getlist("audiences", [])
-            language_names = request.GET.getlist("languages", [])
-            alternative_type = request.GET.getlist("alternative_type", [])
-            where_to_use_names = request.GET.getlist("where_to_use", [])
-            product_types = request.GET.getlist("product_type", [])
-
-            query = Q()
-            if disease_names:
-                query &= Q(update_ref__diseases_ref__name__in=disease_names)
-            if vaccination_names:
-                query &= Q(update_ref__vaccination_ref__name__in=vaccination_names)
-            if audience_names:
-                query &= Q(update_ref__audience_ref__name__in=audience_names)
-            if where_to_use_names:
-                query &= Q(update_ref__where_to_use_ref__name__in=where_to_use_names)
-            if alternative_type:
-                query &= Q(update_ref__alternative_type__in=alternative_type)
-            if product_types:
-                query &= Q(update_ref__product_type__in=product_types)
-            if language_names:
-                query &= Q(language_name__in=language_names)
-            if access_type:
-                query &= Q(tag__in=access_type)
-            if status_filter:
-                query &= Q(status__in=status_filter)
-            if product_code:
-                query &= Q(product_code_no_dashes__icontains=product_code)
-
+            query = self._build_filter_query(request)
             products = Product.objects.filter(query)
             sorted_qs = self.get_sorted_queryset(products, request)
             data, paginator = self.paginate_and_serialize(sorted_qs, request)

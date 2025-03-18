@@ -2241,27 +2241,44 @@ class ProgramProductsView(APIView, ProductListMixin):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
+    def get_program_related_data(self, program):
+        """
+        Fetches related diseases and vaccinations for a given program.
+        """
+        diseases = Disease.objects.filter(programs=program)
+        vaccinations = Vaccination.objects.filter(programs=program)
+        return diseases, vaccinations
+
+    def get_program_products(self, program, diseases, vaccinations):
+        """
+        Builds the products queryset for a given program using related diseases and vaccinations.
+        """
+        diseases_q = Q(update_ref__diseases_ref__in=diseases)
+        vaccinations_q = Q(update_ref__vaccination_ref__in=vaccinations)
+        return (
+            Product.objects.filter(
+                Q(program_id=program) & (diseases_q | vaccinations_q)
+            )
+            .distinct()
+            .prefetch_related("update_ref__diseases_ref", "update_ref__vaccination_ref")
+        )
+
     def get(self, request, program_id):
         try:
+            # Get program or raise 404.
             program = get_object_or_404(Program, pk=program_id)
-            diseases = Disease.objects.filter(programs=program)
-            vaccinations = Vaccination.objects.filter(programs=program)
-            diseases_q = Q(update_ref__diseases_ref__in=diseases)
-            vaccinations_q = Q(update_ref__vaccination_ref__in=vaccinations)
-            products = Product.objects.filter(
-                Q(program_id=program) & (diseases_q | vaccinations_q)
-            ).distinct()
-            products = products.prefetch_related(
-                "update_ref__diseases_ref", "update_ref__vaccination_ref"
-            )
-            sorted_qs = self.get_sorted_queryset(products, request)
-            # This returns already serialized data along with the paginator.
+            # Fetch related data.
+            diseases, vaccinations = self.get_program_related_data(program)
+            # Build products queryset.
+            products_qs = self.get_program_products(program, diseases, vaccinations)
+            # Sort and paginate.
+            sorted_qs = self.get_sorted_queryset(products_qs, request)
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
-            all_download_urls = extract_s3_urls(data)
-            presigned_urls = generate_presigned_urls(all_download_urls)
+            # Process S3 URLs.
+            all_urls = extract_s3_urls(data)
+            presigned_urls = generate_presigned_urls(all_urls)
             update_product_urls(data, presigned_urls)
-
-            # Use the serialized data 'data' directly
+            # Prepare response.
             response_data = {
                 "products": data,
                 "diseases": DiseaseSerializer(diseases, many=True).data,

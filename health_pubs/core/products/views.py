@@ -446,30 +446,55 @@ class ErrorHandlingMixin:
     Any exception raised in the view method will be caught here.
     """
 
+    # Mapping exception types to their handling parameters:
+    # (log message format, error code, error message, status code, logger function)
+    EXCEPTION_HANDLERS = {
+        DatabaseError: (
+            "Database error: %s",
+            ErrorCode.DATABASE_ERROR,
+            ErrorMessage.DATABASE_ERROR,
+            500,
+            logger.exception,
+        ),
+        TimeoutError: (
+            "Timeout error: %s",
+            ErrorCode.TIMEOUT_ERROR,
+            ErrorMessage.TIMEOUT_ERROR,
+            504,
+            logger.exception,
+        ),
+        ValidationError: (
+            "Validation error: %s",
+            ErrorCode.INVALID_DATA,
+            ErrorMessage.INVALID_DATA,
+            400,
+            logger.exception,
+        ),
+        AttributeError: (
+            "Attribute error: %s",
+            ErrorCode.ATTRIBUTE_ERROR,
+            ErrorMessage.ATTRIBUTE_ERROR,
+            400,
+            logger.error,
+        ),
+    }
+
     def dispatch(self, request, *args, **kwargs):
         try:
             return super().dispatch(request, *args, **kwargs)
-        except DatabaseError as e:
-            logger.exception("Database error: %s", str(e))
-            return handle_error(
-                ErrorCode.DATABASE_ERROR, ErrorMessage.DATABASE_ERROR, status_code=500
-            )
-        except TimeoutError as e:
-            logger.exception("Timeout error: %s", str(e))
-            return handle_error(
-                ErrorCode.TIMEOUT_ERROR, ErrorMessage.TIMEOUT_ERROR, status_code=504
-            )
-        except ValidationError as e:
-            logger.exception("Validation error: %s", str(e))
-            return handle_error(
-                ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
-            )
-        except AttributeError as e:
-            logger.error("Attribute error: %s", str(e))
-            return handle_error(
-                ErrorCode.ATTRIBUTE_ERROR, ErrorMessage.ATTRIBUTE_ERROR, status_code=400
-            )
         except Exception as e:
+            # Loop through our mapping to see if the caught exception matches
+            for exc_type, (
+                log_fmt,
+                err_code,
+                err_msg,
+                status,
+                log_func,
+            ) in self.EXCEPTION_HANDLERS.items():
+                if isinstance(e, exc_type):
+                    log_func(log_fmt, str(e))
+                    return handle_error(err_code, err_msg, status_code=status)
+            # Fallback for unexpected exceptions
             logger.exception("Unexpected error: %s", str(e))
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,

@@ -73,6 +73,7 @@ PRODUCT_CODE_PATTERN = r"^[A-Za-z0-9_-]+$"
 LOG_MSG_S3_URL_EXTRACTION = "Extracted S3 URLs for presigned URL generation: %s"
 UNEXPECTED_ERROR_MSG = "An unexpected error occurred."
 INTERNAL_ERROR_MSG = "An unexpected error occurred while searching for products."
+PRODUCT_NOT_FOUND_LOG_MSG = "No product found with product_code: %s"
 
 # Global constant for valid sort fields
 VALID_SORT_FIELDS = [
@@ -895,7 +896,7 @@ class ProductDetailView(ErrorHandlingMixin, View):
 
         product = Product.objects.filter(product_code=product_code).first()
         if not product:
-            logger.warning("No product found with product_code: %s", product_code)
+            logger.warning(PRODUCT_NOT_FOUND_LOG_MSG, product_code)
             return handle_error(
                 ErrorCode.PRODUCT_NOT_FOUND,
                 ErrorMessage.PRODUCT_NOT_FOUND,
@@ -983,9 +984,7 @@ class ProductDetailDelete(ErrorHandlingMixin, View):
             product_code__startswith=decoded_product_code
         ).first()
         if not product:
-            logger.warning(
-                "No product found with product_code: %s", decoded_product_code
-            )
+            logger.warning(PRODUCT_NOT_FOUND_LOG_MSG, decoded_product_code)
             return handle_error(
                 ErrorCode.PRODUCT_NOT_FOUND,
                 ErrorMessage.PRODUCT_NOT_FOUND,
@@ -1359,9 +1358,7 @@ class ProductPatchView(ErrorHandlingMixin, View):
 
         product = get_product(decoded_product_code)
         if not product:
-            logger.warning(
-                "No product found with product_code: %s", decoded_product_code
-            )
+            logger.warning(PRODUCT_NOT_FOUND_LOG_MSG, decoded_product_code)
             return handle_error(
                 ErrorCode.PRODUCT_NOT_FOUND,
                 ErrorMessage.PRODUCT_NOT_FOUND,

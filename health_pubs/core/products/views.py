@@ -225,23 +225,46 @@ def get_next_version_number(program_id, product_key, iso_language_code):
         return 1  # Start with version 001
 
 
-def _extract_urls_from_downloads(product_downloads):
-    """Helper to extract s3_bucket_url values from a product_downloads dict."""
+def extract_s3_urls_from_downloads(downloads: dict) -> list:
+    """
+    Extract all S3 URLs from a downloads dictionary.
+    Consolidates logic from _extract_urls_from_downloads and _collect_s3_urls.
+    """
     urls = []
-    main_download = product_downloads.get("main_download_url")
+    main_download = downloads.get("main_download_url")
     if isinstance(main_download, dict):
         s3_url = main_download.get("s3_bucket_url")
         if s3_url:
             urls.append(s3_url)
-
-    # Use a list comprehension to extract s3_bucket_url values from other download types.
-    urls.extend(
-        item.get("s3_bucket_url")
-        for key in ("web_download_url", "print_download_url", "transcript_url")
-        for item in product_downloads.get(key, [])
-        if isinstance(item, dict) and item.get("s3_bucket_url")
-    )
+    for key in ["web_download_url", "print_download_url", "transcript_url"]:
+        items = downloads.get(key, [])
+        if isinstance(items, list):
+            urls.extend(
+                item.get("s3_bucket_url")
+                for item in items
+                if isinstance(item, dict) and item.get("s3_bucket_url")
+            )
     return urls
+
+
+def apply_presigned_to_item(
+    item: dict, presigned_urls: dict, inline_presigned_urls: dict
+) -> dict:
+    """
+    Update the given download item with presigned URLs if available.
+    """
+    if not isinstance(item, dict):
+        return item
+    s3_url = item.get("s3_bucket_url", "")
+    if s3_url in presigned_urls:
+        item["URL"] = presigned_urls[s3_url]
+    if not item.get("inline_presigned_s3_url") and s3_url in inline_presigned_urls:
+        item["inline_presigned_s3_url"] = inline_presigned_urls[s3_url]
+    return item
+
+
+def _extract_urls_from_downloads(product_downloads):
+    return extract_s3_urls_from_downloads(product_downloads)
 
 
 def _update_downloads_with_presigned(product_downloads, presigned_urls):
@@ -524,7 +547,7 @@ class PresignedUrlMixin:
 
         # Process main download
         if "main_download_url" in product_downloads:
-            product_downloads["main_download_url"] = self._apply_presigned_to_item(
+            product_downloads["main_download_url"] = apply_presigned_to_item(
                 product_downloads.get("main_download_url"),
                 presigned_urls,
                 inline_presigned_urls,
@@ -539,45 +562,12 @@ class PresignedUrlMixin:
             downloads = product_downloads.get(download_type, [])
             if isinstance(downloads, list):
                 product_downloads[download_type] = [
-                    self._apply_presigned_to_item(
-                        item, presigned_urls, inline_presigned_urls
-                    )
+                    apply_presigned_to_item(item, presigned_urls, inline_presigned_urls)
                     for item in downloads
                 ]
 
     def _collect_s3_urls(self, product_downloads):
-        urls = []
-        main_download = product_downloads.get("main_download_url")
-        if isinstance(main_download, dict):
-            s3_url = main_download.get("s3_bucket_url")
-            if s3_url:
-                urls.append(s3_url)
-        for download_type in [
-            "web_download_url",
-            "print_download_url",
-            "transcript_url",
-        ]:
-            downloads = product_downloads.get(download_type, [])
-            if isinstance(downloads, list):
-                urls.extend(
-                    [
-                        item.get("s3_bucket_url")
-                        for item in downloads
-                        if isinstance(item, dict) and item.get("s3_bucket_url")
-                    ]
-                )
-        return urls
-
-    def _apply_presigned_to_item(self, item, presigned_urls, inline_presigned_urls):
-        """Common helper to update a download item with presigned URLs."""
-        if not isinstance(item, dict):
-            return item
-        s3_url = item.get("s3_bucket_url", "")
-        if s3_url in presigned_urls:
-            item["URL"] = presigned_urls[s3_url]
-        if not item.get("inline_presigned_s3_url") and s3_url in inline_presigned_urls:
-            item["inline_presigned_s3_url"] = inline_presigned_urls[s3_url]
-        return item
+        return extract_s3_urls_from_downloads(product_downloads)
 
 
 class ProductUtilsMixin:

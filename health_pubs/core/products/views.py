@@ -557,11 +557,13 @@ class PresignedUrlMixin:
         ]:
             downloads = product_downloads.get(download_type, [])
             if isinstance(downloads, list):
-                for item in downloads:
-                    if isinstance(item, dict):
-                        s3_url = item.get("s3_bucket_url")
-                        if s3_url:
-                            urls.append(s3_url)
+                urls.extend(
+                    [
+                        item.get("s3_bucket_url")
+                        for item in downloads
+                        if isinstance(item, dict) and item.get("s3_bucket_url")
+                    ]
+                )
         return urls
 
     def _process_main_download(

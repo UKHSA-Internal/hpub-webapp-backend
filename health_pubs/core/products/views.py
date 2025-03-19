@@ -522,13 +522,15 @@ class PresignedUrlMixin:
         presigned_urls = generate_presigned_urls(all_download_urls)
         inline_presigned_urls = generate_inline_presigned_urls(all_download_urls)
 
+        # Process main download
         if "main_download_url" in product_downloads:
-            product_downloads["main_download_url"] = self._process_main_download(
+            product_downloads["main_download_url"] = self._apply_presigned_to_item(
                 product_downloads.get("main_download_url"),
                 presigned_urls,
                 inline_presigned_urls,
             )
 
+        # Process each download type in a loop
         for download_type in [
             "web_download_url",
             "print_download_url",
@@ -537,7 +539,7 @@ class PresignedUrlMixin:
             downloads = product_downloads.get(download_type, [])
             if isinstance(downloads, list):
                 product_downloads[download_type] = [
-                    self._process_download_item(
+                    self._apply_presigned_to_item(
                         item, presigned_urls, inline_presigned_urls
                     )
                     for item in downloads
@@ -566,22 +568,8 @@ class PresignedUrlMixin:
                 )
         return urls
 
-    def _process_main_download(
-        self, main_download, presigned_urls, inline_presigned_urls
-    ):
-        if not isinstance(main_download, dict):
-            return main_download
-        s3_url = main_download.get("s3_bucket_url", "")
-        if s3_url in presigned_urls:
-            main_download["URL"] = presigned_urls[s3_url]
-        if (
-            not main_download.get("inline_presigned_s3_url")
-            and s3_url in inline_presigned_urls
-        ):
-            main_download["inline_presigned_s3_url"] = inline_presigned_urls[s3_url]
-        return main_download
-
-    def _process_download_item(self, item, presigned_urls, inline_presigned_urls):
+    def _apply_presigned_to_item(self, item, presigned_urls, inline_presigned_urls):
+        """Common helper to update a download item with presigned URLs."""
         if not isinstance(item, dict):
             return item
         s3_url = item.get("s3_bucket_url", "")

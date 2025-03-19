@@ -795,50 +795,54 @@ class ProductUtilsMixin:
                 )
         return order_limits_list
 
-    def clean_row_data(self, row):
-        def clean_numeric_field(value):
-            if pd.notna(value):
-                try:
-                    if isinstance(value, str) and "," in value:
-                        return ",".join(
-                            str(int(float(item.strip())))
-                            if item.strip().replace(".", "", 1).isdigit()
-                            else item.strip()
-                            for item in value.split(",")
-                        )
-                    elif isinstance(value, (float, int)):
-                        return str(int(float(value)))
-                    elif (
-                        isinstance(value, str)
-                        and value.strip().replace(".", "", 1).isdigit()
-                    ):
-                        return str(int(float(value.strip())))
-                except ValueError:
-                    return None
+    def _clean_numeric_field(self, value):
+        if not pd.notna(value):
             return None
+        try:
+            if isinstance(value, str):
+                value = value.strip()
+                if "," in value:
+                    return ",".join(
+                        str(int(float(item.strip())))
+                        if item.strip().replace(".", "", 1).isdigit()
+                        else item.strip()
+                        for item in value.split(",")
+                    )
+                if value.replace(".", "", 1).isdigit():
+                    return str(int(float(value)))
+            elif isinstance(value, (int, float)):
+                return str(int(float(value)))
+        except ValueError:
+            return None
+        return None
 
-        rt_zero = row.get("run_to_zero")
-        if isinstance(rt_zero, str):
-            rt_zero_lower = rt_zero.strip().lower()
-            row["run_to_zero"] = (
-                True
-                if rt_zero_lower == "y"
-                else (False if rt_zero_lower == "n" else None)
-            )
+    def _clean_run_to_zero(self, val):
+        if isinstance(val, str):
+            return {"y": True, "n": False}.get(val.strip().lower())
+        return val
 
-        for col, val in row.items():
-            if isinstance(val, str) and val.strip().lower() in ["-", "nan"]:
-                row[col] = None
+    def _clean_invalid_strings(self, row_dict):
+        for key, value in row_dict.items():
+            if isinstance(value, str) and value.strip().lower() in {"-", "nan"}:
+                row_dict[key] = None
+        return row_dict
 
-        row["product_id"] = clean_numeric_field(row.get("product_id"))
-        row["unit_of_measure"] = clean_numeric_field(row.get("unit_of_measure"))
-        row["programme_id"] = clean_numeric_field(row.get("programme_id"))
-        row["language_id"] = clean_numeric_field(row.get("language_id"))
-        row["audience_id"] = clean_numeric_field(row.get("audience_id"))
-        row["where_to_use_id"] = clean_numeric_field(row.get("where_to_use_id"))
-        row["vaccination_id"] = clean_numeric_field(row.get("vaccination_id"))
-        row["disease_id"] = clean_numeric_field(row.get("disease_id"))
-        row["minimum_stock_level"] = clean_numeric_field(row.get("minimum_stock_level"))
+    def clean_row_data(self, row):
+        row["run_to_zero"] = self._clean_run_to_zero(row.get("run_to_zero"))
+        row = self._clean_invalid_strings(row)
+        numeric_fields = [
+            "product_id",
+            "unit_of_measure",
+            "programme_id",
+            "language_id",
+            "audience_id",
+            "where_to_use_id",
+            "vaccination_id",
+            "disease_id",
+            "minimum_stock_level",
+        ]
+        for key in numeric_fields:
+            row[key] = self._clean_numeric_field(row.get(key))
         return row
 
     def convert_created_date(self, created_date_str):
@@ -1077,50 +1081,11 @@ class ProductStatusUpdateView(View):
                     status_code=HTTP_404_NOT_FOUND,
                 )
 
-            new_status = self.get_status_from_request(request)
-            if not new_status:
-                return JsonResponse(
-                    {
-                        "error": "Invalid or missing 'status' field in request body.",
-                        "details": "Ensure the request includes a valid 'status' field.",
-                    },
-                    status=HTTP_400_BAD_REQUEST,
-                )
-
-            if not self.is_valid_status(new_status):
-                return JsonResponse(
-                    {
-                        "error": "Invalid status value.",
-                        "details": f"Allowed values are: {self.get_valid_statuses()}",
-                    },
-                    status=HTTP_400_BAD_REQUEST,
-                )
-
-            if self.is_invalid_status_transition(product.status, new_status):
-                return JsonResponse(
-                    {
-                        "error": "Invalid status transition.",
-                        "details": f"Cannot transition from '{product.status}' to '{new_status}'. Allowed transitions: {self.ALLOWED_TRANSITIONS.get(product.status, [])}",
-                    },
-                    status=HTTP_400_BAD_REQUEST,
-                )
-
-            if new_status == "live":
-                missing_fields = self.check_required_fields(product)
-                if missing_fields:
-                    logger.warning(
-                        f"Cannot change status to 'live' due to missing fields: {missing_fields}"
-                    )
-                    return JsonResponse(
-                        {
-                            "error": "Cannot change status to 'live'.",
-                            "missing_fields": missing_fields,
-                            "details": "Ensure all required fields are provided.",
-                        },
-                        status=HTTP_400_BAD_REQUEST,
-                    )
-                if not product.publish_date:
-                    product.publish_date = timezone.now()
+            # Validate and obtain the new status using a helper method.
+            validation = self._validate_status_update(product, request)
+            if isinstance(validation, JsonResponse):
+                return validation
+            new_status = validation
 
             product.status = new_status
             try:
@@ -1219,36 +1184,19 @@ class ProductStatusUpdateView(View):
         """
         missing_fields = []
 
-        # Fields to check in Product
-        required_product_fields = [
-            "product_title",
-            "language_id",
-            "program_id",
-            "update_ref",
-        ]
-        missing_fields.extend(
-            [field for field in required_product_fields if not getattr(product, field)]
-        )
+        # Check required fields in Product
+        for field in ["product_title", "language_id", "program_id", "update_ref"]:
+            if not getattr(product, field):
+                missing_fields.append(field)
 
-        # If update_ref is None, check required fields in ProductUpdateSerializer
-        if product.update_ref is None:
-            product_update_serializer = ProductUpdateSerializer(
-                context={"tag": product.tag}
-            )
-            for field in product_update_serializer.fields:
-                if product_update_serializer.fields[field].required:
-                    missing_fields.append(field)
-        else:
-            product_update_serializer = ProductUpdateSerializer(
-                product.update_ref, context={"tag": product.tag}
-            )
-            for field, field_value in product_update_serializer.data.items():
-                if (
-                    field_value in [None, "", [], {}]
-                    and field in product_update_serializer.fields
-                ):
-                    if product_update_serializer.fields[field].required:
-                        missing_fields.append(field)
+        serializer = (
+            ProductUpdateSerializer(product.update_ref, context={"tag": product.tag})
+            if product.update_ref
+            else ProductUpdateSerializer(context={"tag": product.tag})
+        )
+        for field, field_value in serializer.data.items():
+            if field_value in [None, "", [], {}] and serializer.fields[field].required:
+                missing_fields.append(field)
 
         return missing_fields
 

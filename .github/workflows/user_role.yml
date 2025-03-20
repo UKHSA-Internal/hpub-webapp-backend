@@ -1,6 +1,9 @@
 name: Update User role
 
 on:
+    pull_request:
+      types: [opened, synchronize]  # Triggers the workflow on PR creation or update
+  
     workflow_dispatch:
       inputs:
         email:

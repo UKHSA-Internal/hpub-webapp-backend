@@ -373,6 +373,34 @@ def _handle_timeout_error():
     )
 
 
+def filter_live_languages(products_data):
+    """
+    Given a list of serialized product dictionaries, filter the 'existing_languages'
+    field so that only languages with a live product (determined by the product code
+    extracted from the language's product_url) are retained.
+    """
+    # Gather all language product codes from every product.
+    product_codes = {
+        lang["product_url"].split("/")[-1]
+        for product in products_data
+        for lang in product.get("existing_languages", [])
+    }
+    # Bulk query: find all product codes that are live.
+    live_codes = set(
+        Product.objects.filter(
+            product_code__in=product_codes, status="live"
+        ).values_list("product_code", flat=True)
+    )
+    # Update each product's 'existing_languages' to keep only those with live codes.
+    for product in products_data:
+        product["existing_languages"] = [
+            lang
+            for lang in product.get("existing_languages", [])
+            if lang["product_url"].split("/")[-1] in live_codes
+        ]
+    return products_data
+
+
 class CustomPagination(PageNumberPagination):
     page_size = 10  # Set pagination to 10 items per page
 
@@ -1927,35 +1955,13 @@ class ProductUsersListView(APIView, ProductListMixin):
                 )
             sorted_qs = self.get_sorted_queryset(products, request)
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
-            data = self.filter_languages(data)
+            data = filter_live_languages(data)
             logger.info("Returning paginated response with %d products", len(data))
             return paginator.get_paginated_response(
                 data, status_code=status.HTTP_200_OK
             )
         except Exception as e:
             return handle_exceptions(e)
-
-    def filter_languages(self, products_data):
-        # Gather all language product codes in one pass
-        product_codes = {
-            lang["product_url"].split("/")[-1]
-            for product in products_data
-            for lang in product.get("existing_languages", [])
-        }
-        # Bulk query to check which codes are live
-        live_codes = set(
-            Product.objects.filter(
-                product_code__in=product_codes, status="live"
-            ).values_list("product_code", flat=True)
-        )
-        # Filter the languages in memory
-        for product in products_data:
-            product["existing_languages"] = [
-                lang
-                for lang in product.get("existing_languages", [])
-                if lang["product_url"].split("/")[-1] in live_codes
-            ]
-        return products_data
 
 
 class BaseProductSearchView(APIView, ProductListMixin):
@@ -2062,7 +2068,7 @@ class ProductUsersFilterView(APIView, ProductListMixin):
                 sort_by = "product_title"
             sorted_qs = products.order_by(sort_by)
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
-            data = self.filter_languages(data)
+            data = filter_live_languages(data)
             return paginator.get_paginated_response(data)
         except Exception:
             logger.exception(INTERNAL_ERROR_MSG)
@@ -2119,25 +2125,6 @@ class ProductUsersFilterView(APIView, ProductListMixin):
             return Q(updated_at__gte=recently_updated)
         except ValueError:
             return _handle_invalid_query_param()
-
-    def filter_languages(self, products_data):
-        product_codes = {
-            lang["product_url"].split("/")[-1]
-            for product in products_data
-            for lang in product.get("existing_languages", [])
-        }
-        live_codes = set(
-            Product.objects.filter(
-                product_code__in=product_codes, status="live"
-            ).values_list("product_code", flat=True)
-        )
-        for product in products_data:
-            product["existing_languages"] = [
-                lang
-                for lang in product.get("existing_languages", [])
-                if lang["product_url"].split("/")[-1] in live_codes
-            ]
-        return products_data
 
 
 class ProductAdminFilterView(APIView, ProductListMixin):

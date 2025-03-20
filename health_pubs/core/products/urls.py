@@ -26,7 +26,11 @@ urlpatterns = [
     path("create/", ProductCreateView.as_view(), name="create-product"),
     path("admin/all/", ProductAdminListView.as_view(), name="list-products-admin"),
     path("users/all/", ProductUsersListView.as_view(), name="list-products-user"),
-    path("<str:product_code>/", ProductDetailView.as_view(), name="product-detail"),
+    path(
+        "<str:product_code>/",
+        ProductDetailView.as_view({"get": "retrieve"}),
+        name="product-detail",
+    ),
     path(
         "put/<str:product_code>/",
         ProductUpdateView.as_view(),

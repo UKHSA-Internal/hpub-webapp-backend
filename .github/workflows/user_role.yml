@@ -11,6 +11,11 @@ on:
         required: true
         type: string
 
+permissions:
+  id-token: write
+  contents: write
+  actions: read
+  
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
 

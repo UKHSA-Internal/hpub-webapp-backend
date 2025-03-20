@@ -6,7 +6,6 @@ import uuid
 from typing import Optional, Union
 from urllib.parse import unquote
 
-import bcp47
 import pandas as pd
 from core.audiences.models import Audience
 from core.diseases.models import Disease
@@ -18,7 +17,6 @@ from core.languages.models import LanguagePage
 from core.order_limits.models import OrderLimitPage
 from core.organizations.models import Organization
 from core.programs.models import Program
-from core.roles.models import Role
 from core.users.models import User
 from core.users.permissions import (
     IsAdminUser,
@@ -88,53 +86,6 @@ VALID_SORT_FIELDS = [
     "version_number",
     "-version_number",
 ]
-
-
-def get_bcp47_language_code(language_name):
-    try:
-        # Retrieve the BCP 47 language code
-        language_code = bcp47.languages.get(language_name)
-        if not language_code:
-            return "UNKNOWN"
-
-        # Convert to uppercase and replace hyphen with underscore
-        language_code = language_code.upper().replace("-", "_")
-        return language_code
-    except Exception as e:
-        logger.error(f"Error retrieving BCP 47 language code: {str(e)}")
-        return "UNKNOWN"
-
-
-def check_user_permission(user, permission):
-    # Fetch the user's roles and check permissions
-    user_roles = Role.objects.filter(pages__in=user.page_set.all())
-    for role in user_roles:
-        if permission in [perm["value"] for perm in role.permissions.stream_data]:
-            return True
-    return False
-
-
-def product_view(request, product_id):
-    if not check_user_permission(request.user, "view_product"):
-        return Response({"error": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
-
-    # Your logic to handle product viewing
-    product = get_object_or_404(Product, id=product_id)
-    serializer = ProductSerializer(product)
-    return Response(serializer.data, status=status.HTTP_200_OK)
-
-
-def create_product(request):
-    if not check_user_permission(request.user, "create_product"):
-        return Response({"error": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
-
-    # Your logic to handle product creation
-    data = request.data
-    serializer = ProductSerializer(data=data)
-    if serializer.is_valid():
-        serializer.save()
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 def generate_product_key(last_key=None):

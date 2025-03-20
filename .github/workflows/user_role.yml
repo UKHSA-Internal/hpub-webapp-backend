@@ -30,4 +30,4 @@ jobs:
           pip install -r requirements.txt
           cd core/users/management/commands
           ls -lar
-          python update_user_role.py ${{ inputs.email }}
+          python manage.py update_user_role ${{ inputs.email }}

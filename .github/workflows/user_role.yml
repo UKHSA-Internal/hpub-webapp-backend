@@ -28,5 +28,6 @@ jobs:
           cd health_pubs
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          cd core/users/management/commands
           ls -lar
-          python core/users/management/commands/update_user_role.py ${{ inputs.email }}
+          python update_user_role.py ${{ inputs.email }}

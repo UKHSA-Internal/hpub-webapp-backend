@@ -1,15 +1,15 @@
 name: Update User role
 
 on:
-    pull_request:
-      types: [opened, synchronize]  # Triggers the workflow on PR creation or update
-  
-    workflow_dispatch:
-      inputs:
-        email:
-          description: "User email address"
-          required: true
-          type: string
+  pull_request:
+    types: [opened, synchronize]  # Trigger on PR creation or update
+
+  workflow_dispatch:  # This enables manual triggering
+    inputs:
+      email:
+        description: "User email address"
+        required: true
+        type: string
 
 jobs:
   update-role:

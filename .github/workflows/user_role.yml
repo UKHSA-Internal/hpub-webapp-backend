@@ -24,4 +24,8 @@ jobs:
           python-version: '3.11'
 
       - name: Run Update User role to admin
-        run: python health_pubs/core/users/management/commands/update_user_role.py ${{ inputs.email }}
+        run: |
+          cd health_pubs
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python core/users/management/commands/update_user_role.py ${{ inputs.email }}

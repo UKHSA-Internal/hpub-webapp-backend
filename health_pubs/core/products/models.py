@@ -334,18 +334,39 @@ class Product(Page):
     @property
     def existing_languages(self):
         config = Config()
-        related_products = Product.objects.filter(
-            program_id=self.program_id, product_key=self.product_key, is_latest=True
-        ).exclude(language_id=self.language_id, product_title=self.product_title)
-
         domain_name = config.get_hpub_base_api_url()
+        # Retrieve only needed fields to optimize the query.
+        products = (
+            Product.objects.filter(
+                program_id=self.program_id,
+                product_key=self.product_key,
+                is_latest=True,
+            )
+            .exclude(pk=self.pk)
+            .values("language_name", "product_title", "product_code")
+        )
+
+        # Ensure the current product_code is long enough for our check.
+        if len(self.product_code) < 2:
+            return []
+        self_core = self.product_code[
+            :-3
+        ]  # Core part of the code (excluding language suffix)
+
         existing_languages = []
-        for product in related_products:
+        for prod in products:
+            candidate_code = prod["product_code"]
+            if len(candidate_code) < 2:
+                continue  # Skip if candidate doesn't have a valid code format
+
+            candidate_core = candidate_code[:-3]
+            # Only include products with a similar code format (matching core parts)
+            if candidate_core != self_core:
+                continue
             product_url = (
-                f"{domain_name}/{slugify(product.product_title)}/{product.product_code}"
+                f"{domain_name}/{slugify(prod['product_title'])}/{candidate_code}"
             )
             existing_languages.append(
-                {"language_name": product.language_name, "product_url": product_url}
+                {"language_name": prod["language_name"], "product_url": product_url}
             )
-
         return existing_languages

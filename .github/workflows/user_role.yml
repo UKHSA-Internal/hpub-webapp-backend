@@ -22,6 +22,14 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
+          
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+            # AWS_ACCOUNT_ID_ECR_REGISTRY is used for pulling from a shared ECR repository
+            role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
+            role-session-name: retag-image-${{ github.sha }}
+            aws-region: ${{ env.AWS_REGION }}
 
       - name: Run Update User role to admin
         run: |

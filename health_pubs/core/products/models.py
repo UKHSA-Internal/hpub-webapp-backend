@@ -18,6 +18,9 @@ from django.utils.text import slugify
 from wagtail.admin.panels import FieldPanel
 from wagtail.fields import RichTextField
 from wagtail.models import Page
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class ProductUpdate(Page):
@@ -331,42 +334,97 @@ class Product(Page):
     def __str__(self):
         return self.product_title
 
+    def _get_core_code(self, code, required_length=3):
+        """
+        Extracts the core part of a product code.
+
+        Args:
+            code (str): The product code.
+            required_length (int): Minimum length needed to extract the core.
+
+        Returns:
+            str: The core of the product code, or an empty string if not valid.
+        """
+        if not isinstance(code, str):
+            return ""
+        if len(code) < required_length:
+            return ""
+        return code[:required_length]
+
     @property
     def existing_languages(self):
-        config = Config()
-        domain_name = config.get_hpub_base_api_url()
-        # Retrieve only needed fields to optimize the query.
-        products = (
-            Product.objects.filter(
-                program_id=self.program_id,
-                product_key=self.product_key,
-                is_latest=True,
-            )
-            .exclude(pk=self.pk)
-            .values("language_name", "product_title", "product_code")
-        )
+        """
+        Retrieves a list of available languages for the product.
 
-        # Ensure the current product_code is long enough for our check.
-        if len(self.product_code) < 2:
+        It filters products that share the same program and key, are marked as the latest,
+        and excludes the current product. Then, it builds a list of dictionaries containing the
+        language name and a generated URL if the candidate product's core code (first 3 characters)
+        matches the current product's code.
+
+        Returns:
+            list[dict]: List of dicts with keys "language_name" and "product_url".
+        """
+        # Retrieve base domain from config
+        try:
+            config = Config()
+            domain_name = config.get_hpub_base_api_url().rstrip("/")
+        except Exception as e:
+            logger.error("Error retrieving configuration: %s", e)
             return []
-        self_core = self.product_code[
-            :-3
-        ]  # Core part of the code (excluding language suffix)
+
+        # Validate self.product_code and extract its core
+        self_product_code = getattr(self, "product_code", None)
+        if not isinstance(self_product_code, str):
+            logger.error("Invalid or missing product_code attribute on %r", self)
+            return []
+        self_core = self._get_core_code(self_product_code)
+        if not self_core:
+            # Product code is too short to extract a valid core
+            return []
+
+        # Query related products, excluding the current one
+        try:
+            products_qs = (
+                Product.objects.filter(
+                    program_id=self.program_id,
+                    product_key=self.product_key,
+                    is_latest=True,
+                )
+                .exclude(pk=self.pk)
+                .values("language_name", "product_title", "product_code")
+            )
+        except Exception as e:
+            logger.error("Error querying products: %s", e)
+            return []
 
         existing_languages = []
-        for prod in products:
-            candidate_code = prod["product_code"]
-            if len(candidate_code) < 2:
-                continue  # Skip if candidate doesn't have a valid code format
-
-            candidate_core = candidate_code[:-3]
-            # Only include products with a similar code format (matching core parts)
-            if candidate_core != self_core:
+        for prod in products_qs:
+            candidate_code = prod.get("product_code", "")
+            candidate_core = self._get_core_code(candidate_code)
+            if not candidate_core:
+                # Skip candidates with invalid code format
                 continue
-            product_url = (
-                f"{domain_name}/{slugify(prod['product_title'])}/{candidate_code}"
-            )
+            if candidate_core != self_core:
+                # Skip products with non-matching core codes
+                continue
+
+            product_title = prod.get("product_title", "")
+            if not product_title or not isinstance(product_title, str):
+                logger.warning(
+                    "Missing or invalid product_title for product code %s",
+                    candidate_code,
+                )
+                continue
+
+            # Construct the product URL using a slug of the title
+            slug = slugify(product_title)
+            product_url = f"{domain_name}/{slug}/{candidate_code}"
+            language_name = prod.get("language_name", "")
             existing_languages.append(
-                {"language_name": prod["language_name"], "product_url": product_url}
+                {
+                    "language_name": language_name,
+                    "product_url": product_url,
+                }
             )
+
         return existing_languages

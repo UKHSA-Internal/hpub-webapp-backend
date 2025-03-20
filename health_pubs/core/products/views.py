@@ -1922,7 +1922,7 @@ class ProductAdminListView(APIView, ProductListMixin):
         try:
             products = Product.objects.all()
             if not products.exists():
-                logger.warning(ErrorMessage.PRODUCT_NOT_FOUND)
+                logger.warning(ErrorMessage.PRODUCT_NOT_FOUND.value)
                 return handle_error(
                     ErrorCode.PRODUCT_NOT_FOUND,
                     ErrorMessage.PRODUCT_NOT_FOUND,
@@ -2001,7 +2001,7 @@ class BaseProductSearchView(APIView, ProductListMixin):
             products = Product.objects.filter(query)
             if not products.exists():
                 return Response(
-                    {"detail": ErrorMessage.PRODUCT_NOT_FOUND},
+                    {"detail": ErrorMessage.PRODUCT_NOT_FOUND.value},
                     status=status.HTTP_404_NOT_FOUND,
                 )
 

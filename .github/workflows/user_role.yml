@@ -1,0 +1,24 @@
+name: Update User role
+
+on:
+    workflow_dispatch:
+      inputs:
+        email:
+          description: "User email address"
+          required: true
+          type: string
+
+jobs:
+  update-role:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Run Update User role to admin
+        run: python health_pubs/core/users/management/commands/update_user_role.py ${{ inputs.email }}

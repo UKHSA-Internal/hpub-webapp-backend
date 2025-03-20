@@ -1,9 +1,13 @@
 import uuid
 from rest_framework import serializers
+
+from core.users.serializers import UserSerializer
 from .models import Feedback
 
 
 class FeedbackSerializer(serializers.ModelSerializer):
+    user_info = serializers.SerializerMethodField()
+
     class Meta:
         model = Feedback
         fields = [
@@ -16,7 +20,14 @@ class FeedbackSerializer(serializers.ModelSerializer):
             "did_you_get_what_you_wanted",
             "improve_our_service",
             "submitted_at",
+            "user_info",
         ]
+
+    def get_user_info(self, obj):
+        if obj.user_ref:  # Check if a user reference exists
+            # Serialize and return user info
+            return UserSerializer(obj.user_ref).data
+        return None
 
     def create(self, validated_data):
         # If feedback_id wasn't provided, auto-generate

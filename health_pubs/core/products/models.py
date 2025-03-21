@@ -115,6 +115,7 @@ class ProductUpdate(Page):
             ("Easy read", "Easy read"),
             ("British Sign Language (BSL)", "British Sign Language (BSL)"),
             ("Large print", "Large print"),
+            ("not-accessible", "not-accessible"),
         ],
     )
 

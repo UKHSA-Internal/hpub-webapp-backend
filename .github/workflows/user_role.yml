@@ -14,7 +14,8 @@ on:
 env:
   APP_NAME: ${{ vars.APP_NAME }}
   AWS_REGION: ${{ vars.AWS_REGION }}
-  ECR_NAMRUN_UNIT_TESTSESPACE: ${{ vars.ECR_NAMESPACE }}
+  ECR_NAMESPACE: ${{ vars.ECR_NAMESPACE }}
+  RUN_UNIT_TESTS: ${{ vars.RUN_UNIT_TESTS }}
 
 jobs:
   update-role:

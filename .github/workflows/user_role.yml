@@ -11,17 +11,18 @@ on:
         required: true
         type: string
 
-permissions:
-  id-token: write
-  contents: write
-  actions: read
-  
 env:
+  APP_NAME: ${{ vars.APP_NAME }}
   AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_NAMRUN_UNIT_TESTSESPACE: ${{ vars.ECR_NAMESPACE }}
 
 jobs:
   update-role:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      actions: read  
     steps:
       - name: Checkout code
         uses: actions/checkout@v3

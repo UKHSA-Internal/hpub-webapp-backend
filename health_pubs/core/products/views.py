@@ -483,82 +483,6 @@ class ErrorHandlingMixin:
             )
 
 
-class PresignedUrlMixin:
-    """Handles presigned URL extraction and injection."""
-
-    def _process_presigned_urls(self, response_data):
-        update_refs = response_data.get("update_ref")
-        if not isinstance(update_refs, dict):
-            return
-
-        product_downloads = update_refs.get("product_downloads")
-        if not isinstance(product_downloads, dict):
-            return
-
-        all_download_urls = self._collect_s3_urls(product_downloads)
-        logger.info(LOG_MSG_S3_URL_EXTRACTION, all_download_urls)
-
-        presigned_urls = generate_presigned_urls(all_download_urls)
-        inline_presigned_urls = generate_inline_presigned_urls(all_download_urls)
-
-        # Process main download
-        if "main_download_url" in product_downloads:
-            product_downloads["main_download_url"] = self._apply_presigned_to_item(
-                product_downloads.get("main_download_url"),
-                presigned_urls,
-                inline_presigned_urls,
-            )
-
-        # Process each download type in a loop
-        for download_type in [
-            "web_download_url",
-            "print_download_url",
-            "transcript_url",
-        ]:
-            downloads = product_downloads.get(download_type, [])
-            if isinstance(downloads, list):
-                product_downloads[download_type] = [
-                    self._apply_presigned_to_item(
-                        item, presigned_urls, inline_presigned_urls
-                    )
-                    for item in downloads
-                ]
-
-    def _collect_s3_urls(self, product_downloads):
-        urls = []
-        main_download = product_downloads.get("main_download_url")
-        if isinstance(main_download, dict):
-            s3_url = main_download.get("s3_bucket_url")
-            if s3_url:
-                urls.append(s3_url)
-        for download_type in [
-            "web_download_url",
-            "print_download_url",
-            "transcript_url",
-        ]:
-            downloads = product_downloads.get(download_type, [])
-            if isinstance(downloads, list):
-                urls.extend(
-                    [
-                        item.get("s3_bucket_url")
-                        for item in downloads
-                        if isinstance(item, dict) and item.get("s3_bucket_url")
-                    ]
-                )
-        return urls
-
-    def _apply_presigned_to_item(self, item, presigned_urls, inline_presigned_urls):
-        """Common helper to update a download item with presigned URLs."""
-        if not isinstance(item, dict):
-            return item
-        s3_url = item.get("s3_bucket_url", "")
-        if s3_url in presigned_urls:
-            item["URL"] = presigned_urls[s3_url]
-        if not item.get("inline_presigned_s3_url") and s3_url in inline_presigned_urls:
-            item["inline_presigned_s3_url"] = inline_presigned_urls[s3_url]
-        return item
-
-
 class ProductUtilsMixin:
     """
     Contains common helper functions for product processing,
@@ -910,6 +834,105 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
                 {"error": f"Unexpected error: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+class PresignedUrlMixin:
+    """Handles presigned URL extraction and injection, including metadata."""
+
+    def _process_presigned_urls(self, response_data):
+        update_refs = response_data.get("update_ref")
+        if not isinstance(update_refs, dict):
+            return
+
+        product_downloads = update_refs.get("product_downloads")
+        if not isinstance(product_downloads, dict):
+            return
+
+        # 1. Collect all S3 URLs
+        all_download_urls = self._collect_s3_urls(product_downloads)
+        logger.info(LOG_MSG_S3_URL_EXTRACTION, all_download_urls)
+
+        # 2. Generate presigned URLs and inline presigned URLs
+        presigned_urls = generate_presigned_urls(all_download_urls)
+        inline_presigned_urls = generate_inline_presigned_urls(all_download_urls)
+
+        # 3. Retrieve metadata for the presigned URLs
+        metadata_list = get_file_metadata(list(presigned_urls.values()))
+        metadata_dict = {meta["URL"]: meta for meta in metadata_list}
+
+        # 4. Process the main download
+        if "main_download_url" in product_downloads:
+            product_downloads["main_download_url"] = self._apply_metadata_and_presigned(
+                product_downloads.get("main_download_url"),
+                presigned_urls,
+                inline_presigned_urls,
+                metadata_dict,
+            )
+
+        # 5. Process other download types
+        for download_type in [
+            "web_download_url",
+            "print_download_url",
+            "transcript_url",
+        ]:
+            downloads = product_downloads.get(download_type, [])
+            if isinstance(downloads, list):
+                product_downloads[download_type] = [
+                    self._apply_metadata_and_presigned(
+                        item, presigned_urls, inline_presigned_urls, metadata_dict
+                    )
+                    for item in downloads
+                ]
+
+    def _collect_s3_urls(self, product_downloads):
+        urls = []
+        main_download = product_downloads.get("main_download_url")
+        if isinstance(main_download, dict):
+            s3_url = main_download.get("s3_bucket_url")
+            if s3_url:
+                urls.append(s3_url)
+        for download_type in [
+            "web_download_url",
+            "print_download_url",
+            "transcript_url",
+        ]:
+            downloads = product_downloads.get(download_type, [])
+            if isinstance(downloads, list):
+                urls.extend(
+                    [
+                        item.get("s3_bucket_url")
+                        for item in downloads
+                        if isinstance(item, dict) and item.get("s3_bucket_url")
+                    ]
+                )
+        return urls
+
+    def _apply_metadata_and_presigned(
+        self, item, presigned_urls, inline_presigned_urls, metadata_dict
+    ):
+        """
+        Helper to update a download item with both presigned URLs and file metadata.
+        """
+        if not isinstance(item, dict):
+            return item
+
+        s3_url = item.get("s3_bucket_url", "")
+        if s3_url in presigned_urls:
+            presigned_url = presigned_urls[s3_url]
+            item["URL"] = presigned_url
+
+            # Merge metadata if available
+            if metadata_dict and presigned_url in metadata_dict:
+                # Merge existing metadata into the item.
+                meta = metadata_dict[presigned_url]
+                item.update(meta)
+            # Always keep the original S3 URL for reference.
+            item["s3_bucket_url"] = s3_url
+
+        if s3_url in inline_presigned_urls:
+            item["inline_presigned_s3_url"] = inline_presigned_urls[s3_url]
+
+        return item
 
 
 class ProductDetailView(ErrorHandlingMixin, PresignedUrlMixin, viewsets.ViewSet):

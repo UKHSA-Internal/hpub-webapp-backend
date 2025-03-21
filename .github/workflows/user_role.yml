@@ -46,14 +46,10 @@ jobs:
           role-session-name: build-${{ github.sha }}
           aws-region: ${{ env.AWS_REGION }}
       
-      - name: Download task definition
-        run: |
-          aws ecs describe-task-definition --task-definition aw-hpub-euw2-${{ matrix.environment }}-ecssvc-$APP_NAME --query taskDefinition > task-definition.json
-      
       - name: Get Latest Task Definition
         id: get-task-def
         run: |
-          TASK_DEF_ARN=$(aws ecs list-task-definitions --family-prefix aw-hpub-euw2-${{ matrix.environment }}-ecssvc-$APP_NAME --sort DESC --query 'taskDefinitionArns[0]' --output text)
+          TASK_DEF_ARN=$(aws ecs list-task-definitions --family-prefix aw-hpub-euw2-dev-ecssvc-$APP_NAME --sort DESC --query 'taskDefinitionArns[0]' --output text)
           echo "TASK_DEF_ARN=$TASK_DEF_ARN" >> $GITHUB_ENV
 
       # - name: Run Update User role to admin

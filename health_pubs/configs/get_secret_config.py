@@ -78,9 +78,12 @@ class Config:
     def get_value(key: str, is_secret: bool = False):
         """Retrieve the specified environment variable, handling errors and logging."""
         value = Config._get_value(key, is_secret)
+        logger.error(f"Environment variable {is_secret} is secret")
+        logger.error(f"Envivariable {key} is secret")
+        logger.error(f"Envivariable {value} is value")
         if value is None:
-            logger.error(f"Environment variable {key} is undefined or empty")
-            raise EnvironmentError(f"Environment variable {key} is undefined or empty")
+            logger.error(f"Environment variable {key} {is_secret} {value} is undefined or empty")
+            raise EnvironmentError(f"Environment variable {key} {is_secret} {value} is undefined or empty")
         # for debugging purposes
         logger.debug(f"Environment variable {key} retrieved successfully.")
         return value

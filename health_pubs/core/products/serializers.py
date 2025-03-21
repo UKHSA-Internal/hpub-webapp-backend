@@ -83,7 +83,7 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
             ("GIF", "GIF"),
             ("Slides", "Slides"),
             ("Factsheets", "Factsheets"),
-            ("Briefing Sheet", "Briefing Sheet"),
+            ("Briefing sheet", "Briefing sheet"),
             ("Flip Chart", "Flip Chart"),
             ("Immunisation Schedule", "Immunisation Schedule"),
             ("Booklet", "Booklet"),

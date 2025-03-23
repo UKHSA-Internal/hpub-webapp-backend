@@ -7,6 +7,7 @@ from typing import Optional, Union
 from urllib.parse import unquote
 
 import pandas as pd
+from sympy import true
 from core.audiences.models import Audience
 from core.diseases.models import Disease
 from core.diseases.serializers import DiseaseSerializer
@@ -1614,7 +1615,7 @@ class ProductPatchView(ErrorHandlingMixin, View):
             )
         update_data["title"] = "Product_Update Title"
         update_data["slug"] = slugify("product-update" + str(datetime.datetime.now()))
-        if update_data.get("run_to_zero"):
+        if update_data.get("run_to_zero") == true:
             update_data["minimum_stock_level"] = 0
         return update_data
 

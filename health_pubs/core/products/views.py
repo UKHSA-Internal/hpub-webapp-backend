@@ -206,7 +206,7 @@ def _update_downloads_with_presigned(product_downloads, presigned_urls):
             product_downloads = json.loads(product_downloads)
         except json.JSONDecodeError as e:
             # Log the error or handle it accordingly.
-            print("Failed to parse product_downloads JSON:", e)
+            logger.info(f"Failed to parse product_downloads JSON: {e}")
             return False
 
     updated = False
@@ -1367,7 +1367,7 @@ class ProductPatchView(ErrorHandlingMixin, View):
         product_downloads = data.get("product_downloads", {})
 
         # Process file URLs (validation, metadata, presigned URL generation)
-        file_urls = self.process_file_urls(product_type, product_downloads)
+        file_urls = self.process_file_urls(product_type, product_downloads, product)
 
         # Validate date fields based on provided choices
         available_from_choice = data.get("available_from_choice")
@@ -1422,7 +1422,9 @@ class ProductPatchView(ErrorHandlingMixin, View):
                     ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
                 )
 
-    def process_file_urls(self, product_type: str, product_downloads: dict) -> dict:
+    def process_file_urls(
+        self, product_type: str, product_downloads: dict, product: Product
+    ) -> dict:
         """
         Process file URLs by validating required downloads, initializing URLs,
         validating file extensions, and adding metadata (including presigned URLs).
@@ -1433,12 +1435,36 @@ class ProductPatchView(ErrorHandlingMixin, View):
             except json.JSONDecodeError:
                 raise ValidationError("Invalid JSON format for product_downloads")
 
-        self.validate_required_downloads(product_type, product_downloads)
+        # Use the product's tag to decide on validation logic.
+        self.validate_required_downloads(product_type, product_downloads, product)
         file_urls = self.initialize_file_urls(product_downloads)
         file_urls = self.validate_file_extensions(file_urls)
         return self.add_file_metadata(file_urls)
 
-    def validate_required_downloads(self, product_type: str, product_downloads: dict):
+    def validate_required_downloads(
+        self, product_type: str, product_downloads: dict, product: Product
+    ):
+        """
+        Validates that all required downloads are present.
+        If the product has a tag of 'order-only', only main_download is required.
+        """
+        # If the product is order-only, check the product.update_ref.product_downloads.
+        if product.tag and str(product.tag).lower() == "order-only":
+            downloads = product.update_ref.product_downloads
+            # If downloads is a string, attempt to convert it to a dict.
+            if isinstance(downloads, str):
+                try:
+                    downloads = json.loads(downloads)
+                except json.JSONDecodeError:
+                    raise ValidationError(
+                        "Invalid JSON format in product.update_ref.product_downloads"
+                    )
+            if not downloads["main_download_url"]:
+                raise ValidationError(
+                    "Missing required main_download for order-only product."
+                )
+            return
+
         required = {
             "Audio": ["main_download", "web_download", "transcript"],
             "Bulletins": ["main_download", "print_download", "web_download"],

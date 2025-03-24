@@ -447,6 +447,11 @@ class UserLoginView(APIView):
         # Debug print user information
         logger.info("User found: %s", user)
 
+        # Update the last_login field upon successful login.
+        user.update_last_login()
+        user.save(update_fields=["last_login"])
+        logger.info("Updated last_login for user: %s", user.user_id)
+
         # Retrieve role
         role_ref = user.role_ref
         if role_ref:

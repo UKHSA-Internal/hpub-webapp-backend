@@ -7,7 +7,6 @@ from typing import Optional, Union
 from urllib.parse import unquote
 
 import pandas as pd
-from sympy import true
 from core.audiences.models import Audience
 from core.diseases.models import Disease
 from core.diseases.serializers import DiseaseSerializer
@@ -1633,7 +1632,7 @@ class ProductPatchView(ErrorHandlingMixin, View):
             )
         update_data["title"] = "Product_Update Title"
         update_data["slug"] = slugify("product-update" + str(datetime.datetime.now()))
-        if update_data.get("run_to_zero") == true:
+        if update_data.get("run_to_zero") == True:  # Changed from "true" to "True"
             update_data["minimum_stock_level"] = 0
         return update_data
 
@@ -1650,8 +1649,9 @@ class ProductPatchView(ErrorHandlingMixin, View):
             Product.objects.filter(pk=product.pk).update(update_ref=product_update)
         else:
             logger.info("Updating existing ProductUpdate instance.")
+            # Only update fields that are explicitly provided and not None.
             for key, value in update_data.items():
-                if key in raw_data:
+                if key in raw_data and raw_data[key] is not None:
                     setattr(product_update, key, value)
             product_update.save()
         return product_update

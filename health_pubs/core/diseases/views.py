@@ -151,82 +151,45 @@ class DiseaseCreateViewSet(viewsets.ModelViewSet):
             )
 
 
-class DiseaseListViewSet(viewsets.ReadOnlyModelViewSet):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
-
-    queryset = Disease.objects.all()
-    serializer_class = DiseaseSerializer
-
-    def list(self, request, *args, **kwargs):
-        serializer = self.get_serializer(self.queryset, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-
-
 class DiseaseDeleteViewSet(viewsets.ViewSet):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
-    def destroy(self, request, pk=None):
+    def _delete_disease(self, pk):
+        """Helper method to delete a disease by pk."""
         try:
-            # Retrieve the specific disease by its primary key (id)
             disease = Disease.objects.get(pk=pk)
         except Disease.DoesNotExist:
             logger.error(f"Disease with id {pk} not found.")
-            return Response(
+            return None, Response(
                 {"error": "Disease not found."},
                 status=status.HTTP_404_NOT_FOUND,
             )
-
         try:
+            # Call delete() to remove the page. Depending on your Wagtail setup,
+            # this may mark the page as non‑live rather than fully removing it.
             disease.delete()
             logger.info(f"Deleted disease with id {pk}.")
-            return Response(
+            return disease, Response(
                 {"message": f"Successfully deleted disease with id {pk}."},
                 status=status.HTTP_204_NO_CONTENT,
             )
         except Exception as e:
             logger.error(f"Error deleting disease with id {pk}: {str(e)}")
-            return Response(
+            return None, Response(
                 {"error": "Failed to delete disease."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-
-
-class DiseaseDeleteAllViewSet(viewsets.ViewSet):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
 
     def destroy(self, request, pk=None):
-        try:
-            # Retrieve the specific disease by its primary key (id)
-            disease = Disease.objects.get(pk=pk)
-        except Disease.DoesNotExist:
-            logger.error(f"Disease with id {pk} not found.")
-            return Response(
-                {"error": "Disease not found."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        try:
-            disease.delete()
-            logger.info(f"Deleted disease with id {pk}.")
-            return Response(
-                {"message": f"Successfully deleted disease with id {pk}."},
-                status=status.HTTP_204_NO_CONTENT,
-            )
-        except Exception as e:
-            logger.error(f"Error deleting disease with id {pk}: {str(e)}")
-            return Response(
-                {"error": "Failed to delete disease."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+        # Use the helper to perform deletion
+        _, response = self._delete_disease(pk)
+        return response
 
     @action(detail=False, methods=["delete"], url_path="delete-all")
     def delete_all(self, request, *args, **kwargs):
         try:
-            # Delete all Disease records
-            count = Disease.objects.all().delete()
+            count, _ = Disease.objects.all().delete()
             logger.info(f"Deleted {count} disease(s).")
             return Response(
                 {"message": f"Successfully deleted {count} disease(s)."},
@@ -238,6 +201,21 @@ class DiseaseDeleteAllViewSet(viewsets.ViewSet):
                 {"error": "Failed to delete all diseases."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+class DiseaseListViewSet(viewsets.ReadOnlyModelViewSet):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+    serializer_class = DiseaseSerializer
+
+    def get_queryset(self):
+        # Return only live diseases so that deletions are reflected in the list.
+        return Disease.objects.filter(live=True)
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 #

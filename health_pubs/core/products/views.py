@@ -1455,32 +1455,7 @@ class ProductPatchView(ErrorHandlingMixin, View):
         If the product has a tag of 'order-only', only main_download is required.
         """
         if product.tag and str(product.tag).lower() == "order-only":
-            # If product.update_ref or product.update_ref.product_downloads is not present, return None.
-            if not product.update_ref:
-                logger.warning("product.update_ref is None. Returning None.")
-                return None
-
-            downloads = getattr(product.update_ref, "product_downloads", None)
-            if downloads is None:
-                logger.warning(
-                    "product.update_ref.product_downloads is None. Returning None."
-                )
-                return None
-
-            # If downloads is a string, attempt to convert it to a dict.
-            if isinstance(downloads, str):
-                try:
-                    downloads = json.loads(downloads)
-                except json.JSONDecodeError:
-                    raise ValidationError(
-                        "Invalid JSON format in product.update_ref.product_downloads"
-                    )
-
-            # Validate that the required main_download_url exists.
-            if not downloads.get("main_download_url"):
-                raise ValidationError(
-                    "Missing required main_download for order-only product."
-                )
+            self._validate_order_only_downloads(product)
             return
 
         required = {
@@ -1506,6 +1481,32 @@ class ProductPatchView(ErrorHandlingMixin, View):
                 raise ValidationError(
                     f"Missing required downloads for {product_type}: {', '.join(missing)}."
                 )
+
+    def _validate_order_only_downloads(self, product: Product):
+        """Validates downloads for products tagged as 'order-only'."""
+        if not product.update_ref:
+            logger.warning("product.update_ref is None. Returning None.")
+            return
+
+        downloads = getattr(product.update_ref, "product_downloads", None)
+        if downloads is None:
+            logger.warning(
+                "product.update_ref.product_downloads is None. Returning None."
+            )
+            return
+
+        if isinstance(downloads, str):
+            try:
+                downloads = json.loads(downloads)
+            except json.JSONDecodeError:
+                raise ValidationError(
+                    "Invalid JSON format in product.update_ref.product_downloads"
+                )
+
+        if not downloads.get("main_download_url"):
+            raise ValidationError(
+                "Missing required main_download for order-only product."
+            )
 
     def initialize_file_urls(self, product_downloads: dict) -> dict:
         return {

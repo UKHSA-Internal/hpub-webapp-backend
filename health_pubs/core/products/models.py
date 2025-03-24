@@ -49,7 +49,6 @@ class ProductUpdate(Page):
         null=True,
         blank=True,
         choices=AVAILABLE_FROM_CHOICES,
-        default="immediately",
     )
 
     order_from_date = models.DateField(null=True, blank=True)  # optional
@@ -65,7 +64,6 @@ class ProductUpdate(Page):
         null=True,
         blank=True,
         choices=AVAILABLE_UNTIL_CHOICES,
-        default="no_end_date",
     )
 
     order_end_date = models.DateField(blank=True, null=True)
@@ -91,7 +89,6 @@ class ProductUpdate(Page):
         null=True,
         blank=True,
         choices=COST_CENTRE_CHOICES,
-        default="10200",
     )
 
     local_code = models.CharField(
@@ -99,7 +96,6 @@ class ProductUpdate(Page):
         null=True,
         blank=True,
         choices=LOCAL_CODES_CHOICES,
-        default="0001",
     )
 
     unit_of_measure = models.IntegerField(null=True, blank=True)

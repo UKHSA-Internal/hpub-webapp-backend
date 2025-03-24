@@ -82,5 +82,6 @@ ALTERNATIVE_TYPE_CHOICE = [
     ("Easy read", "Easy read"),
     ("British Sign Language (BSL)", "British Sign Language (BSL)"),
     ("Large print", "Large print"),
+    ("Simple Text", "Simple Text"),
     ("not-accessible", "not-accessible"),
 ]

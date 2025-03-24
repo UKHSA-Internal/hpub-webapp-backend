@@ -1427,17 +1427,22 @@ class ProductPatchView(ErrorHandlingMixin, View):
         self, product_type: str, product_downloads: dict, product: Product
     ) -> dict:
         """
-        Process file URLs by validating required downloads, initializing URLs,
+        Process file URLs by validating required downloads (if provided), initializing URLs,
         validating file extensions, and adding metadata (including presigned URLs).
         """
+        # If no product_downloads are provided, simply return an empty dict.
+        if not product_downloads:
+            return {}
+
         if isinstance(product_downloads, str):
             try:
                 product_downloads = json.loads(product_downloads)
             except json.JSONDecodeError:
                 raise ValidationError("Invalid JSON format for product_downloads")
 
-        # Use the product's tag to decide on validation logic.
+        # Only validate required downloads if product_downloads is provided.
         self.validate_required_downloads(product_type, product_downloads, product)
+
         file_urls = self.initialize_file_urls(product_downloads)
         file_urls = self.validate_file_extensions(file_urls)
         return self.add_file_metadata(file_urls)
@@ -1449,9 +1454,19 @@ class ProductPatchView(ErrorHandlingMixin, View):
         Validates that all required downloads are present.
         If the product has a tag of 'order-only', only main_download is required.
         """
-        # If the product is order-only, check the product.update_ref.product_downloads.
         if product.tag and str(product.tag).lower() == "order-only":
-            downloads = product.update_ref.product_downloads
+            # If product.update_ref or product.update_ref.product_downloads is not present, return None.
+            if not product.update_ref:
+                logger.warning("product.update_ref is None. Returning None.")
+                return None
+
+            downloads = getattr(product.update_ref, "product_downloads", None)
+            if downloads is None:
+                logger.warning(
+                    "product.update_ref.product_downloads is None. Returning None."
+                )
+                return None
+
             # If downloads is a string, attempt to convert it to a dict.
             if isinstance(downloads, str):
                 try:
@@ -1460,7 +1475,9 @@ class ProductPatchView(ErrorHandlingMixin, View):
                     raise ValidationError(
                         "Invalid JSON format in product.update_ref.product_downloads"
                     )
-            if not downloads["main_download_url"]:
+
+            # Validate that the required main_download_url exists.
+            if not downloads.get("main_download_url"):
                 raise ValidationError(
                     "Missing required main_download for order-only product."
                 )

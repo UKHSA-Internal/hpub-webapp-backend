@@ -163,9 +163,64 @@ class DiseaseListViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+class DiseaseDeleteViewSet(viewsets.ViewSet):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+
+    def destroy(self, request, pk=None):
+        try:
+            # Retrieve the specific disease by its primary key (id)
+            disease = Disease.objects.get(pk=pk)
+        except Disease.DoesNotExist:
+            logger.error(f"Disease with id {pk} not found.")
+            return Response(
+                {"error": "Disease not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            disease.delete()
+            logger.info(f"Deleted disease with id {pk}.")
+            return Response(
+                {"message": f"Successfully deleted disease with id {pk}."},
+                status=status.HTTP_204_NO_CONTENT,
+            )
+        except Exception as e:
+            logger.error(f"Error deleting disease with id {pk}: {str(e)}")
+            return Response(
+                {"error": "Failed to delete disease."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
 class DiseaseDeleteAllViewSet(viewsets.ViewSet):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
+
+    def destroy(self, request, pk=None):
+        try:
+            # Retrieve the specific disease by its primary key (id)
+            disease = Disease.objects.get(pk=pk)
+        except Disease.DoesNotExist:
+            logger.error(f"Disease with id {pk} not found.")
+            return Response(
+                {"error": "Disease not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            disease.delete()
+            logger.info(f"Deleted disease with id {pk}.")
+            return Response(
+                {"message": f"Successfully deleted disease with id {pk}."},
+                status=status.HTTP_204_NO_CONTENT,
+            )
+        except Exception as e:
+            logger.error(f"Error deleting disease with id {pk}: {str(e)}")
+            return Response(
+                {"error": "Failed to delete disease."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
     @action(detail=False, methods=["delete"], url_path="delete-all")
     def delete_all(self, request, *args, **kwargs):

@@ -246,11 +246,17 @@ class ProgramUpdateViewSet(viewsets.ModelViewSet):
 
     def update(self, request, *args, **kwargs):
         instance = self.get_object()
-        serializer = self.get_serializer(instance, data=request.data, partial=True)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        data = request.data.copy()
+        # Remove the slug field if present to avoid triggering uniqueness validation.
+
+        serializer = self.get_serializer(instance, data=data, partial=True)
+        serializer.is_valid(raise_exception=True)
+
+        updated_instance = serializer.save()
+        # Optionally, if needed to trigger additional logic on save:
+        updated_instance.save()
+
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class ProgramDestroyViewSet(viewsets.ModelViewSet):

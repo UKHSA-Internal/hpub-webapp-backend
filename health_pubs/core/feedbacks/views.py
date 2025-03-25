@@ -27,7 +27,7 @@ class FeedbackViewSet(viewsets.ModelViewSet):
         if request.user.is_authenticated:
             user_instance = request.user
 
-        # If user_ref was explicitly provided, override the user
+        # If a user_ref is provided, override the user_instance
         user_ref_id = data.get("user_ref")
         if user_ref_id:
             try:
@@ -37,17 +37,14 @@ class FeedbackViewSet(viewsets.ModelViewSet):
                     {"error": f"User with ID {user_ref_id} does not exist"}, status=400
                 )
 
-        if not user_instance:
-            return Response(
-                {"error": "User must be authenticated or user_ref must be provided"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
         # Prepare feedback data from request
         feedback_data = {
             "feedback_id": data.get("feedback_id"),
             "title": "feedback_title",
-            "slug": slugify(f"feedback-{user_instance.id}-" + str(datetime.now())),
+            "slug": slugify(
+                f"feedback-{user_instance.id if user_instance else 'anonymous'}-"
+                + str(datetime.now())
+            ),
             "user_ref": user_instance,
             "how_satisfied": data.get("how_satisfied", ""),
             "would_recommend": data.get("would_recommend", ""),
@@ -60,7 +57,7 @@ class FeedbackViewSet(viewsets.ModelViewSet):
         parent_page = self._get_or_create_feedback_parent_page()
         feedback_instance = Feedback(**feedback_data)
 
-        # If parent page has no children, we must set path/depth manually
+        # If parent page has no children, set path/depth manually
         if not parent_page.get_children().exists():
             feedback_instance.depth = parent_page.depth + 1
             feedback_instance.path = parent_page.path + "0001"

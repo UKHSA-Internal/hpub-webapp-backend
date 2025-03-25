@@ -16,7 +16,10 @@ class ProgramSerializer(serializers.ModelSerializer):
             "program_term",
             "external_key",
         ]
-        read_only_fields = ["program_id"]
+        read_only_fields = [
+            "program_id",
+            "slug",
+        ]
 
     def create(self, validated_data):
         # Check if the 'program_id' is provided in the request

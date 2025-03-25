@@ -22,6 +22,7 @@ class FeedbackSerializer(serializers.ModelSerializer):
             "submitted_at",
             "user_info",
         ]
+        read_only_fields = ["feedback_id", "submitted_at", "user_info"]
 
     def get_user_info(self, obj):
         if obj.user_ref:  # Check if a user reference exists

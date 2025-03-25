@@ -18,6 +18,15 @@ from django.utils.text import slugify
 from wagtail.admin.panels import FieldPanel
 from wagtail.fields import RichTextField
 from wagtail.models import Page
+import logging
+from .choices import (
+    COST_CENTRE_CHOICES,
+    LOCAL_CODES_CHOICES,
+    PRODUCT_TYPE_CHOICE,
+    ALTERNATIVE_TYPE_CHOICE,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class ProductUpdate(Page):
@@ -40,7 +49,6 @@ class ProductUpdate(Page):
         null=True,
         blank=True,
         choices=AVAILABLE_FROM_CHOICES,
-        default="immediately",
     )
 
     order_from_date = models.DateField(null=True, blank=True)  # optional
@@ -56,7 +64,6 @@ class ProductUpdate(Page):
         null=True,
         blank=True,
         choices=AVAILABLE_UNTIL_CHOICES,
-        default="no_end_date",
     )
 
     order_end_date = models.DateField(blank=True, null=True)
@@ -66,53 +73,14 @@ class ProductUpdate(Page):
         max_length=50,
         null=True,
         blank=True,
-        choices=[
-            ("Audio", "Audio"),  # main download, transcript download, web_download
-            ("Transcript", "Transcript"),
-            ("Bulletins", "Bulletins"),  # main download, print download, web_download
-            ("Consent Form", "Consent Form"),
-            ("Images", "Images"),
-            ("Leaflets", "Leaflets"),
-            ("Postcards", "Postcards"),
-            ("Posters", "Posters"),
-            ("Pull-up Banners", "Pull-up Banners"),
-            ("Stickers", "Stickers"),
-            ("Record Cards", "Record Cards"),
-            ("Record Card", "Record Card"),  # singular version
-            ("Z-Card", "Z-Card"),
-            ("Fridge Magnet", "Fridge Magnet"),
-            ("Flyer", "Flyer"),
-            ("Invitation Letter", "Invitation Letter"),
-            ("Alternative", "Alternative"),
-            ("Memoire", "Memoire"),
-            ("Guidance", "Guidance"),
-            ("Video", "Video"),  # main download, web_download
-            ("GIF", "GIF"),
-            ("Slides", "Slides"),
-            ("Factsheets", "Factsheets"),
-            ("Briefing Sheet", "Briefing Sheet"),
-            ("Flip Chart", "Flip Chart"),
-            ("Immunisation Schedule", "Immunisation Schedule"),
-            ("Booklet", "Booklet"),
-            ("Envelope Label", "Envelope Label"),
-            ("Pack Sleeve", "Pack Sleeve"),  # Added
-            ("Slide", "Slide"),  # Singular Slide explicitly added
-            ("Audio Transcript", "Audio Transcript"),  # Derived from provided context
-        ],
+        choices=PRODUCT_TYPE_CHOICE,
     )
 
     alternative_type = models.CharField(
         max_length=50,
         null=True,
         blank=True,
-        choices=[
-            ("Video and Audio", "Video and Audio"),
-            ("Simple Text", "Simple Text"),
-            ("Braille", "Braille"),
-            ("Easy read", "Easy read"),
-            ("British Sign Language (BSL)", "British Sign Language (BSL)"),
-            ("Large print", "Large print"),
-        ],
+        choices=ALTERNATIVE_TYPE_CHOICE,
     )
 
     # Cost Centre and Local Code
@@ -120,56 +88,14 @@ class ProductUpdate(Page):
         max_length=50,
         null=True,
         blank=True,
-        choices=[
-            ("10200", "10200"),
-            ("22820", "22820"),
-            ("24839", "24839"),
-            ("25050", "25050"),
-            ("25430", "25430"),
-            ("25460", "25460"),
-            ("29415", "29415"),
-            ("KEA4", "KEA4"),
-            ("UFA8", "UFA8"),
-            ("UFB3", "UFB3"),
-            ("UGB6", "UGB6"),
-            ("UGB7", "UGB7"),
-            ("UGB9", "UGB9"),
-            ("UIA1", "UIA1"),
-            ("UIA4", "UIA4"),
-            ("UMA2", "UMA2"),
-            ("UMA5", "UMA5"),
-            ("UMA8", "UMA8"),
-            ("UMB8", "UMB8"),
-            ("VEA6", "VEA6"),
-            ("VEA7", "VEA7"),
-        ],
-        default="10200",
+        choices=COST_CENTRE_CHOICES,
     )
 
     local_code = models.CharField(
         max_length=50,
         null=True,
         blank=True,
-        choices=[
-            ("0001", "0001"),
-            ("1000", "1000"),
-            ("10000", "10000"),
-            ("1100", "1100"),
-            ("11000", "11000"),
-            ("14000", "14000"),
-            ("2000", "2000"),
-            ("3000", "3000"),
-            ("4000", "4000"),
-            ("51005", "51005"),
-            ("6000", "6000"),
-            ("7000", "7000"),
-            ("9000", "9000"),
-            ("9500", "9500"),
-            ("BE0026", "BE0026"),
-            ("CAB-1", "CAB-1"),
-            ("FID038", "FID038"),
-        ],
-        default="0001",
+        choices=LOCAL_CODES_CHOICES,
     )
 
     unit_of_measure = models.IntegerField(null=True, blank=True)
@@ -331,21 +257,97 @@ class Product(Page):
     def __str__(self):
         return self.product_title
 
+    def _get_core_code(self, code, required_length=3):
+        """
+        Extracts the core part of a product code.
+
+        Args:
+            code (str): The product code.
+            required_length (int): Minimum length needed to extract the core.
+
+        Returns:
+            str: The core of the product code, or an empty string if not valid.
+        """
+        if not isinstance(code, str):
+            return ""
+        if len(code) < required_length:
+            return ""
+        return code[:required_length]
+
     @property
     def existing_languages(self):
-        config = Config()
-        related_products = Product.objects.filter(
-            program_id=self.program_id, product_key=self.product_key, is_latest=True
-        ).exclude(language_id=self.language_id, product_title=self.product_title)
+        """
+        Retrieves a list of available languages for the product.
 
-        domain_name = config.get_hpub_base_api_url()
-        existing_languages = []
-        for product in related_products:
-            product_url = (
-                f"{domain_name}/{slugify(product.product_title)}/{product.product_code}"
+        It filters products that share the same program and key, are marked as the latest,
+        and excludes the current product. Then, it builds a list of dictionaries containing the
+        language name and a generated URL if the candidate product's core code (first 3 characters)
+        matches the current product's code.
+
+        Returns:
+            list[dict]: List of dicts with keys "language_name" and "product_url".
+        """
+        # Retrieve base domain from config
+        try:
+            config = Config()
+            domain_name = config.get_hpub_base_api_url().rstrip("/")
+        except Exception as e:
+            logger.error("Error retrieving configuration: %s", e)
+            return []
+
+        # Validate self.product_code and extract its core
+        self_product_code = getattr(self, "product_code", None)
+        if not isinstance(self_product_code, str):
+            logger.error("Invalid or missing product_code attribute on %r", self)
+            return []
+        self_core = self._get_core_code(self_product_code)
+        if not self_core:
+            # Product code is too short to extract a valid core
+            return []
+
+        # Query related products, excluding the current one
+        try:
+            products_qs = (
+                Product.objects.filter(
+                    program_id=self.program_id,
+                    product_key=self.product_key,
+                    is_latest=True,
+                )
+                .exclude(pk=self.pk)
+                .values("language_name", "product_title", "product_code")
             )
+        except Exception as e:
+            logger.error("Error querying products: %s", e)
+            return []
+
+        existing_languages = []
+        for prod in products_qs:
+            candidate_code = prod.get("product_code", "")
+            candidate_core = self._get_core_code(candidate_code)
+            if not candidate_core:
+                # Skip candidates with invalid code format
+                continue
+            if candidate_core != self_core:
+                # Skip products with non-matching core codes
+                continue
+
+            product_title = prod.get("product_title", "")
+            if not product_title or not isinstance(product_title, str):
+                logger.warning(
+                    "Missing or invalid product_title for product code %s",
+                    candidate_code,
+                )
+                continue
+
+            # Construct the product URL using a slug of the title
+            slug = slugify(product_title)
+            product_url = f"{domain_name}/{slug}/{candidate_code}"
+            language_name = prod.get("language_name", "")
             existing_languages.append(
-                {"language_name": product.language_name, "product_url": product_url}
+                {
+                    "language_name": language_name,
+                    "product_url": product_url,
+                }
             )
 
         return existing_languages

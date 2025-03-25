@@ -161,7 +161,7 @@ class ProgramListViewSet(viewsets.ReadOnlyModelViewSet):
             is_temporary=False,
         ).distinct()
 
-        if is_featured:
+        if is_featured is True:
             programs_with_diseases_or_vaccinations = (
                 programs_with_diseases_or_vaccinations.filter(is_featured=True)
             )
@@ -170,11 +170,15 @@ class ProgramListViewSet(viewsets.ReadOnlyModelViewSet):
         products_qs_disease = Product.objects.filter(
             program_id=OuterRef("pk"),
             update_ref__diseases_ref__programs=OuterRef("pk"),
+            status="live",
+            is_latest=True,
         )
 
         products_qs_vaccination = Product.objects.filter(
             program_id=OuterRef("pk"),
             update_ref__vaccination_ref__programs=OuterRef("pk"),
+            status="live",
+            is_latest=True,
         )
 
         # Annotate Programs with boolean flags indicating the existence of related Products

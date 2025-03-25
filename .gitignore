@@ -8,6 +8,7 @@ db.sqlite3
 **/.env
 **/core/utils/files/
 **/__pycache__/
+**/migrations/
 
 
 local_secrets.json
@@ -15,3 +16,4 @@ local_secrets.json
 **venv/
 ZscalerRootCA.crt
 dump.rdb
+.DS_Store

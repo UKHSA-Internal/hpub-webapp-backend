@@ -36,7 +36,7 @@ def generate_presigned_urls(urls: List[str], expiration: int = 3600) -> Dict[str
 
         try:
             presigned_url = s3_client.generate_presigned_url(
-                "get_object",
+                ClientMethod="get_object",
                 Params=params,
                 ExpiresIn=expiration,
             )

@@ -28,7 +28,27 @@ def generate_presigned_urls(urls: List[str], expiration: int = 3600) -> Dict[str
 
         # Only force download for video files by checking the file extension.
         if object_key.lower().endswith(
-            (".mp4", ".mov", ".avi", ".wmv", ".flv", ".mkv")
+            (
+                ".mp4",
+                ".mov",
+                ".avi",
+                ".wmv",
+                ".flv",
+                ".mp3",
+                ".mkv",
+                ".pdf",
+                ".doc",
+                ".docx",
+                ".ppt",
+                ".pptx",
+                ".xls",
+                ".xlsx",
+                ".jpeg",
+                ".jpg",
+                ".png",
+                ".odt",
+                ".gif",
+            )
         ):
             # You can set the filename dynamically based on object_key or any other logic.
             filename = object_key.split("/")[-1]

@@ -74,14 +74,20 @@ class AddressViewSet(viewsets.ModelViewSet):
         if user_ref_id:
             user_ref = get_object_or_404(User, user_id=user_ref_id)
 
-        # Check for existing address
+        normalized_address_line1 = data["address_line1"].strip().lower()
+        normalized_address_line2 = data.get("address_line2", "").strip().lower()
+        normalized_address_line3 = data.get("address_line3", "").strip().lower()
+        normalized_city = data["city"].strip().lower()
+        normalized_postcode = data["postcode"].strip().upper()
+        normalized_country = data["country"].strip().lower()
+
         existing_address = Address.objects.filter(
-            address_line1=data["address_line1"],
-            address_line2=data.get("address_line2", ""),
-            address_line3=data.get("address_line3", ""),
-            city=data["city"],
-            postcode=data["postcode"],
-            country=data["country"],
+            address_line1=normalized_address_line1,
+            address_line2=normalized_address_line2,
+            address_line3=normalized_address_line3,
+            city=normalized_city,
+            postcode=normalized_postcode,
+            country=normalized_country,
             user_ref=user_ref,
         ).first()
 
@@ -121,7 +127,7 @@ class AddressViewSet(viewsets.ModelViewSet):
                 address_line3=data.get("address_line3"),
                 city=data["city"],
                 county=data.get("county"),
-                postcode=data["postcode"],
+                postcode=data["postcode"].upper(),
                 country=data["country"],
                 is_default=data.get("is_default", False),
                 verified=False,
@@ -140,7 +146,7 @@ class AddressViewSet(viewsets.ModelViewSet):
                 address_line3=data.get("address_line3"),
                 city=data["city"],
                 county=data.get("county"),
-                postcode=data["postcode"],
+                postcode=data["postcode"].upper(),
                 country=data["country"],
                 is_default=data.get("is_default", False),
                 verified=False,
@@ -185,7 +191,7 @@ class AddressViewSet(viewsets.ModelViewSet):
         Custom action to verify an address by calling the matchAddress API.
         """
         data = request.data
-        postcode = data.get("postcode")
+        postcode = data.get("postcode").upper()
         building_number = data.get("building_number")
 
         if not postcode or not building_number:

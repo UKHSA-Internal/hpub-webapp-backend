@@ -75,50 +75,24 @@ class AddressViewSet(viewsets.ModelViewSet):
             "country": data["country"].strip(),
         }
 
-    def _create_address_instance(self, data, title, slug, parent_page, user_ref):
+    def _build_address_instance(self, data, title, slug, user_ref):
         """
-        Create an Address instance based on whether the parent page has any children.
-        If there are no children, manually set the path and depth; otherwise, use add_child.
+        Build an Address instance without saving it.
         """
-        if parent_page.get_last_child() is None:
-            # Manually create the path and depth for the first child
-            path = f"{parent_page.path}0001"
-            depth = parent_page.depth + 1
-            address_instance = Address(
-                title=title,
-                slug=slug,
-                address_line1=data["address_line1"],
-                address_line2=data.get("address_line2"),
-                address_line3=data.get("address_line3"),
-                city=data["city"],
-                county=data.get("county"),
-                postcode=data["postcode"].upper(),
-                country=data["country"],
-                is_default=data.get("is_default", False),
-                verified=False,
-                user_ref=user_ref,
-                path=path,
-                depth=depth,
-            )
-            address_instance.save()
-        else:
-            # Use add_child() for subsequent children
-            address_instance = Address(
-                title=title,
-                slug=slug,
-                address_line1=data["address_line1"],
-                address_line2=data.get("address_line2"),
-                address_line3=data.get("address_line3"),
-                city=data["city"],
-                county=data.get("county"),
-                postcode=data["postcode"].upper(),
-                country=data["country"],
-                is_default=data.get("is_default", False),
-                verified=False,
-                user_ref=user_ref,
-            )
-            parent_page.add_child(instance=address_instance)
-        return address_instance
+        return Address(
+            title=title,
+            slug=slug,
+            address_line1=data["address_line1"],
+            address_line2=data.get("address_line2"),
+            address_line3=data.get("address_line3"),
+            city=data["city"],
+            county=data.get("county"),
+            postcode=data["postcode"].upper(),
+            country=data["country"],
+            is_default=data.get("is_default", False),
+            verified=False,
+            user_ref=user_ref,
+        )
 
     def create(self, request, *args, **kwargs):
         data = request.data
@@ -154,8 +128,8 @@ class AddressViewSet(viewsets.ModelViewSet):
             )
 
         # Generate slug and title
-        slug = self.get_unique_slug(slugify(data["address_line1"]))
-        title = data["address_line1"]
+        slug = self.get_unique_slug(slugify(normalized["address_line1"]))
+        title = normalized["address_line1"]
 
         # Ensure parent page exists
         parent_page = self._get_or_create_parent_page("addresses")
@@ -165,20 +139,28 @@ class AddressViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Create the Address instance using the helper function
-        address_instance = self._create_address_instance(
-            data, title, slug, parent_page, user_ref
+        # Build the Address instance without saving
+        address_instance = self._build_address_instance(
+            normalized, title, slug, user_ref
         )
 
-        # Verify the address using the external API
-        verify_response = verify_address(address_instance)
-        if verify_response is None:
+        # Verify the address using the external API BEFORE saving it
+        if not verify_address(address_instance):
             return Response(
                 {"error": "Address verification failed."},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        # Serialize and return the response
+        # Now that verification has passed, save the instance.
+        # If there are no children, manually set the path and depth
+        if parent_page.get_last_child() is None:
+            address_instance.path = f"{parent_page.path}0001"
+            address_instance.depth = parent_page.depth + 1
+            address_instance.save()
+        else:
+            # For subsequent children, add the instance as a child.
+            parent_page.add_child(instance=address_instance)
+
         serializer = AddressSerializer(address_instance)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 

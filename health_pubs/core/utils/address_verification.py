@@ -1,6 +1,7 @@
 import os
 import sys
 
+
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
@@ -40,6 +41,7 @@ def get_oauth_token():
 def verify_address(address_instance):
     """Call the matchAddress API to verify the address."""
     full_address = f"{address_instance.address_line1}, {address_instance.address_line2 or ''}, {address_instance.postcode}"
+
     match_address_payload = {
         "operationId": "matchAddress",
         "callingApplication": "HPUB",
@@ -61,8 +63,15 @@ def verify_address(address_instance):
     )
 
     if match_response.status_code == 200:
-        matched_addresses = match_response.json().get("matchedAddresses", [])
-        if matched_addresses:
+        matched_addresses = match_response.json().get("matchedAddresses", [])[0]
+        if (
+            matched_addresses
+            and address_instance.postcode.strip().lower()
+            == matched_addresses.get("postcode").strip().lower()
+        ):
             address_instance.verified = True
+            return True
+
     else:
         logger.warning("Failed to verify address: %s", match_response.json())
+        return False

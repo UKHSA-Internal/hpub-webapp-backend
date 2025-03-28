@@ -172,6 +172,7 @@ class AddressViewSet(viewsets.ModelViewSet):
 
         # Verify the address using the external API
         verify_response = verify_address(address_instance)
+
         if verify_response is None:
             return Response(
                 {"error": "Address verification failed."},

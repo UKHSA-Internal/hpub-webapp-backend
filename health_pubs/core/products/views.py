@@ -1366,8 +1366,8 @@ class ProductPatchView(ErrorHandlingMixin, View):
         product_type = data.get("product_type")
         product_downloads = data.get("product_downloads", {})
 
-        # Process file URLs (validation, metadata, presigned URL generation)
-        file_urls = self.process_file_urls(product_type, product_downloads, product)
+        # Process file URLs based solely on the input data (not the product table)
+        file_urls = self.process_file_urls(product_type, data, product_downloads)
 
         # Validate date fields based on provided choices
         available_from_choice = data.get("available_from_choice")
@@ -1406,7 +1406,6 @@ class ProductPatchView(ErrorHandlingMixin, View):
                     product, product_update_data, data
                 )
                 # Update guidance-related foreign keys (audience_names, vaccination_names, disease_names, where_to_use_names)
-                # even if only the guidance fields are provided in the payload.
                 self.update_foreign_keys(product_update, data)
                 response_data = serializer.data
                 response_data["update_ref"] = ProductUpdateSerializer(
@@ -1425,7 +1424,7 @@ class ProductPatchView(ErrorHandlingMixin, View):
                 )
 
     def process_file_urls(
-        self, product_type: str, product_downloads: dict, product: Product
+        self, product_type: str, data: dict, product_downloads: dict
     ) -> dict:
         """
         Process file URLs by validating required downloads (if provided), initializing URLs,
@@ -1440,17 +1439,28 @@ class ProductPatchView(ErrorHandlingMixin, View):
             except json.JSONDecodeError:
                 raise ValidationError("Invalid JSON format for product_downloads")
 
-        self.validate_required_downloads(product_type, product_downloads, product)
+        # Validate based on the input payload—not the product table.
+        self.validate_required_downloads(product_type, data, product_downloads)
 
         file_urls = self.initialize_file_urls(product_downloads)
         file_urls = self.validate_file_extensions(file_urls)
         return self.add_file_metadata(file_urls)
 
     def validate_required_downloads(
-        self, product_type: str, product_downloads: dict, product: Product
+        self, product_type: str, data: dict, product_downloads: dict
     ):
-        if product.tag and str(product.tag).lower() == "order-only":
-            self._validate_order_only_downloads(product)
+        """
+        Validates that all required downloads are present.
+        For order-only products, as indicated by a tag in the request data,
+        the input product_downloads must include 'main_download'.
+        For other product types, the standard required downloads are enforced.
+        """
+        # Use the incoming request data rather than checking the product table.
+        if data.get("tag", "").lower() == "order-only":
+            if not product_downloads.get("main_download"):
+                raise ValidationError(
+                    "Missing required main_download for order-only product."
+                )
             return
 
         required = {
@@ -1476,31 +1486,6 @@ class ProductPatchView(ErrorHandlingMixin, View):
                 raise ValidationError(
                     f"Missing required downloads for {product_type}: {', '.join(missing)}."
                 )
-
-    def _validate_order_only_downloads(self, product: Product):
-        if not product.update_ref:
-            logger.warning("product.update_ref is None. Returning None.")
-            return
-
-        downloads = getattr(product.update_ref, "product_downloads", None)
-        if downloads is None:
-            logger.warning(
-                "product.update_ref.product_downloads is None. Returning None."
-            )
-            return
-
-        if isinstance(downloads, str):
-            try:
-                downloads = json.loads(downloads)
-            except json.JSONDecodeError:
-                raise ValidationError(
-                    "Invalid JSON format in product.update_ref.product_downloads"
-                )
-
-        if not downloads.get("main_download_url"):
-            raise ValidationError(
-                "Missing required main_download for order-only product."
-            )
 
     def initialize_file_urls(self, product_downloads: dict) -> dict:
         return {
@@ -1627,7 +1612,7 @@ class ProductPatchView(ErrorHandlingMixin, View):
             )
         update_data["title"] = "Product_Update Title"
         update_data["slug"] = slugify("product-update" + str(datetime.datetime.now()))
-        if update_data.get("run_to_zero") == True:
+        if update_data.get("run_to_zero") is True:
             update_data["minimum_stock_level"] = 0
         return update_data
 

@@ -1466,6 +1466,13 @@ class ProductPatchView(ErrorHandlingMixin, View):
         required = {
             "Audio": ["main_download", "web_download", "transcript"],
             "Bulletins": ["main_download", "print_download", "web_download"],
+            "Immunisation Schedule": ["main_download", "web_download"],
+            "Factsheets": ["main_download", "print_download", "web_download"],
+            "Briefing sheet": ["main_download", "web_download"],
+            "Flyer": ["main_download", "print_download", "web_download"],
+            "Guidance": ["main_download", "print_download", "web_download"],
+            "Memoire": ["main_download", "print_download", "web_download"],
+            "Alternative": ["main_download", "print_download", "web_download"],
             "Consent Form": ["main_download", "print_download", "web_download"],
             "Images": ["main_download", "web_download"],
             "Leaflets": ["main_download", "print_download", "web_download"],

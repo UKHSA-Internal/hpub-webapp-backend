@@ -17,7 +17,10 @@ class EventAnalytics(Page):
         max_length=50,
         choices=(
             ("basket_add", "Basket Add"),
+            ("basket_remove", "Basket Remove"),
+            ("basket_abandoned", "Basket Abandoned"),
             ("order", "Order"),
+            ("reorder", "Reorder"),
             ("download", "Download"),
         ),
     )

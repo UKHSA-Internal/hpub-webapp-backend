@@ -143,8 +143,12 @@ class ProgramCreateViewSet(viewsets.ModelViewSet):
 class ProgramListViewSet(viewsets.ReadOnlyModelViewSet):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
-    queryset = Program.objects.filter(is_temporary=False)
     serializer_class = ProgramSerializer
+
+    def get_queryset(self):
+        if self.action == "list":
+            return Program.objects.all()
+        return Program.objects.filter(is_temporary=False)
 
     def list(self, request, *args, **kwargs):
         queryset = self.get_queryset()

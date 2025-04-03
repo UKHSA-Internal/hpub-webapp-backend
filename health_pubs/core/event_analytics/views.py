@@ -4,6 +4,7 @@ import logging
 from django.http import JsonResponse
 from django.utils.text import slugify
 from django.core.exceptions import ObjectDoesNotExist
+from django.db.models import Count
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from wagtail.models import Page
@@ -13,6 +14,7 @@ from core.errors.enums import ErrorCode, ErrorMessage
 from rest_framework.authentication import SessionAuthentication
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from collections import defaultdict
 from core.users.permissions import (
     IsAdminUser,
 )
@@ -146,3 +148,92 @@ class EventAnalyticsAdminListView(APIView):
             events = EventAnalytics.objects.all()
         serializer = AnalyticsEventSerializer(events, many=True)
         return Response(serializer.data)
+
+
+class EventAnalyticsStatsViewPerSessionId(APIView):
+
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request, *args, **kwargs):
+        events = EventAnalytics.objects.all()
+
+        # Nested structure: session_id → product_code → counts
+        stats = defaultdict(
+            lambda: defaultdict(lambda: {"basket_add": 0, "order_completion": 0})
+        )
+
+        for event in events:
+            session_id = event.session_id
+            product_code = event.metadata.get("productCode")
+            if not product_code:
+                continue
+
+            if event.event_type in ["basket_add", "order_completion"]:
+                stats[session_id][product_code][event.event_type] += 1
+
+        # Add completion_rate to each nested group
+        for session_id, session_data in stats.items():
+            for product_code, counts in session_data.items():
+                adds = counts["basket_add"]
+                completes = counts["order_completion"]
+                counts["completion_rate"] = (
+                    round((completes / adds) * 100, 2) if adds else 0.0
+                )
+
+        return Response(stats)
+
+
+class EventAnalyticsStatsView(APIView):
+    """
+    Aggregates basket_add and order_completion events per product_code and/or session.
+    Used to calculate order completion rates.
+    """
+
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request, *args, **kwargs):
+        # Optional query filters (e.g., by date range)
+        start_date = request.query_params.get("start_date")  # format: YYYY-MM-DD
+        end_date = request.query_params.get("end_date")  # format: YYYY-MM-DD
+
+        filters = {}
+        if start_date and end_date:
+            filters["timestamp__range"] = [start_date, end_date]
+
+        # Get all events matching filter
+        events = EventAnalytics.objects.filter(**filters)
+
+        # Group and count events by product_code + event_type
+        grouped_counts = events.values("metadata__product_code", "event_type").annotate(
+            count=Count("id")
+        )
+
+        # Structure the result
+        stats = {}
+        for entry in grouped_counts:
+            product_code = entry["metadata__product_code"]
+            event_type = entry["event_type"]
+            count = entry["count"]
+
+            if product_code not in stats:
+                stats[product_code] = {
+                    "basket_add": 0,
+                    "order_completion": 0,
+                }
+
+            if event_type == "basket_add":
+                stats[product_code]["basket_add"] = count
+            elif event_type == "order_completion":
+                stats[product_code]["order_completion"] = count
+
+        # Add calculated completion rate per product
+        for product_code, data in stats.items():
+            added = data["basket_add"]
+            completed = data["order_completion"]
+            data["completion_rate"] = (
+                round((completed / added) * 100, 2) if added > 0 else 0.0
+            )
+
+        return Response(stats)

@@ -3,15 +3,15 @@ from enum import Enum
 
 
 class client(Enum):
-    client_name = "UKHSA"
+    client_name = "UK Health Security Agency"
 
 
 class invoicing_client(Enum):
-    invoice_client = "UKHSA"
+    invoice_client = "UK Health Security Agency"
 
 
 class product_group(Enum):
-    product_group_name = "UKHSA234"
+    product_group_name = "Immunisations (HPISD-I)"
 
 
 class required_event_fields_draft(Enum):

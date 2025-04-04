@@ -151,7 +151,6 @@ class EventAnalyticsAdminListView(APIView):
 
 
 class EventAnalyticsStatsViewPerSessionId(APIView):
-
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
 

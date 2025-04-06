@@ -1,5 +1,4 @@
 import datetime
-import json
 import logging
 from django.http import JsonResponse
 from django.utils.text import slugify
@@ -36,13 +35,7 @@ class EventAnalyticsCreateView(APIView):
 
     def post(self, request, *args, **kwargs):
         logger.info("EventAnalyticsCreateView POST method called")
-        try:
-            data = json.loads(request.body)
-        except json.JSONDecodeError as e:
-            logger.error("Invalid JSON: %s", str(e))
-            return handle_error(
-                ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
-            )
+        data = request.data
         logger.info("Data received: %s", data)
 
         required_fields = ["event_type", "metadata", "session_id"]

@@ -305,7 +305,7 @@ class OrderViewSet(viewsets.ModelViewSet):
         try:
             self.record_reorder_events(order_instance, request)
         except Exception as e:
-            logger.exception(f"Failed to record reorder events: {e}")
+            logger.exception(f"Failed to record reorder events for order {order_instance.order_id}: {e}")
 
     def record_reorder_events(self, order_instance, request):
         """

@@ -23,7 +23,7 @@ urlpatterns = [
         name="event_analytics_stats",
     ),
     path(
-        "event-analytics/stats/session-id",
+        "event-analytics/stats/session-id/",
         EventAnalyticsStatsViewPerSessionId.as_view(),
         name="event_analytics_stats_session_id",
     ),

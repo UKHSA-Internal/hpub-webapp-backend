@@ -59,7 +59,6 @@ class EventAnalyticsCreateView(APIView):
 
         # Optional: if a user_id is passed, fetch the corresponding user.
         user_id = data.get("user_id")
-        user_instance = self.get_user_instance(user_id) if user_id else None
 
         # Generate a title and slug if not provided in data
         title = data.get("title", f"{event_type} Event - {session_id}")
@@ -164,7 +163,7 @@ class EventAnalyticsStatsViewPerSessionId(APIView):
 
         for event in events:
             session_id = event.session_id
-            product_code = event.metadata.get("productCode")
+            product_code = event.metadata.get("product_code")
             if not product_code:
                 continue
 

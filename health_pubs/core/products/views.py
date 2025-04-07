@@ -2239,7 +2239,10 @@ class ProgramProductsView(APIView, ProductListMixin):
         vaccinations_q = Q(update_ref__vaccination_ref__in=vaccinations)
         return (
             Product.objects.filter(
-                Q(program_id=program) & (diseases_q | vaccinations_q)
+                Q(program_id=program)
+                & (diseases_q | vaccinations_q)
+                & Q(status="live")
+                & Q(is_latest=True)
             )
             .distinct()
             .prefetch_related("update_ref__diseases_ref", "update_ref__vaccination_ref")

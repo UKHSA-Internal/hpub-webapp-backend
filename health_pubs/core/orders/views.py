@@ -30,6 +30,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from wagtail.models import Page
 
+from core.event_analytics.models import EventAnalytics
+
 from .models import Address, Order, OrderItem, Page, User
 from .serializers import OrderItemSerializer, OrderSerializer
 
@@ -185,6 +187,10 @@ class OrderViewSet(viewsets.ModelViewSet):
                 # Send order confirmation via GOV.UK Notify API
                 self._send_order_confirmation(order_instance)
 
+                self.call_record_reorder_events(
+                    order_instance, request
+                )  # Record reorder events
+
                 # Serialize and return response
                 serializer = OrderSerializer(order_instance)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -280,6 +286,10 @@ class OrderViewSet(viewsets.ModelViewSet):
                 # Send order confirmation via GOV.UK Notify API
                 self._send_order_confirmation(order_instance)
 
+                self.call_record_reorder_events(
+                    order_instance, request
+                )  # Record reorder events
+
                 # Serialize and return response
                 serializer = OrderSerializer(order_instance)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -289,6 +299,47 @@ class OrderViewSet(viewsets.ModelViewSet):
             raise ValidationError({"detail": ErrorMessage.ORDER_CREATION_ERROR})
 
     # Helper methods
+
+    def call_record_reorder_events(self, order_instance, request):
+        # Now, record reorder events (if any) for this order.
+        try:
+            self.record_reorder_events(order_instance, request)
+        except Exception as e:
+            logger.exception(
+                f"Failed to record reorder events for order {order_instance.order_id}: {e}"
+            )
+
+    def record_reorder_events(self, order_instance, request):
+        """
+        For each order item in the given order, if the user has a previous order
+        for the same product, record a "reorder" event in EventAnalytics.
+        """
+        # Get the session_id from the request headers (it should be sent by the client)
+        session_id = request.headers.get("X-Session-ID", "unknown")
+        user = order_instance.user_ref
+        # Loop through each order item
+        for item in order_instance.order_items.all():
+            product = item.product_ref
+            # Exclude the current order and check if there are previous orders
+            previous_orders = Order.objects.filter(
+                user_ref=user, order_items__product_ref=product
+            ).exclude(order_id=order_instance.order_id)
+            if previous_orders.exists():
+                # Record a reorder event; you can include additional metadata as needed
+                EventAnalytics.objects.create(
+                    event_type="reorder",
+                    user_ref=user,
+                    session_id=session_id,
+                    metadata={
+                        "order_id": order_instance.order_id,
+                        "product_code": product.product_code,
+                        "quantity": item.quantity,
+                        "timestamp": str(datetime.now()),
+                    },
+                )
+                logger.info(
+                    f"Recorded reorder event for user {user.user_id} for product {product.product_code}"
+                )
 
     def _is_product_live(self, product_code):
         try:

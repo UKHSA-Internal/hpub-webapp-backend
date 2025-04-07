@@ -6,6 +6,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 from configs.get_secret_config import Config
 
+from corsheaders.defaults import default_headers
+
+
 config = Config()
 DB_NAME = config.get_db_name()
 DB_HOST = config.get_db_host()
@@ -43,6 +46,11 @@ CORS_ALLOWED_ORIGINS = [
     HPUB_FRONT_END_URL,
 ]
 
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    "x-session-id",
+]
+
+
 CSRF_TRUSTED_ORIGINS = ["http://127.0.0.1:8085"]
 
 CSRF_COOKIE_SECURE = False
@@ -52,6 +60,7 @@ CSRF_COOKIE_SECURE = False
 
 INSTALLED_APPS = [
     "django.contrib.sites",
+    "corsheaders",
     "rest_framework.authtoken",
     "allauth",
     "allauth.account",
@@ -85,6 +94,7 @@ INSTALLED_APPS = [
     "core.addresses",
     "core.order_limits",
     "core.feedbacks",
+    "core.event_analytics",
     "core.users",
     "core.audiences",
     "core.diseases",

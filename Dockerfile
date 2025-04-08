@@ -31,4 +31,4 @@ RUN chmod +x /app/entrypoint.sh
 EXPOSE 8000
 
 # Update the ENTRYPOINT to run migrations conditionally and start the application
-ENTRYPOINT ["/app/entrypoint.sh"]
+ENTRYPOINT ["sh", "-c", "echo 'Checking for pending migrations...'; if python manage.py showmigrations | grep '\[ \]'; then echo 'Applying migrations...'; python manage.py makemigrations && python manage.py migrate; else echo 'No migrations needed.'; fi; exec gunicorn health_pubs.wsgi:application --bind 0.0.0.0:8000 --timeout 600"]

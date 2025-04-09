@@ -229,7 +229,6 @@ class AddressViewSet(viewsets.ModelViewSet):
             "Match Address Response: %s", match_response.json()["matchedAddresses"]
         )
         if match_response.status_code == 200:
-
             matched_addresses = [
                 addr
                 for addr in match_response.json().get("matchedAddresses", [])

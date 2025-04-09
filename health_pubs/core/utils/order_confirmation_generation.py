@@ -1,17 +1,13 @@
 from datetime import datetime
-import random
+import secrets
 import string
 from core.orders.models import OrderItem
 
 
 def generate_order_confirmation(order_instance):
-    # Generating order confirmation info
-    random_suffix = "".join(
-        random.choice(string.ascii_uppercase + string.digits) for _ in range(5)
-    )
-    confirmation_number = (
-        "FHR" + random_suffix
-    )  # 8 characters in total: FHR prefix + 5 random alphanumerics
+    allowed_chars = string.ascii_uppercase + string.digits
+    random_suffix = "".join(secrets.choice(allowed_chars) for _ in range(5))
+    confirmation_number = "FHR" + random_suffix
     order_status = "Submitted"  # Assuming the status is "Submitted" for all orders
     confirmation_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 

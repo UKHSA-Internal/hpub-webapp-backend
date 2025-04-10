@@ -5,18 +5,18 @@ echo "Checking for pending migrations...."
 echo "Listing project files:"
 ls -al
 
-PENDING=$(python manage.py showmigrations --verbosity 3 2>&1) || {
+MIGRATIONS_OUTPUT=$(python manage.py showmigrations --verbosity 3 2>&1) || {
   echo "SHOWMIGRATIONS FAILED:"
-  echo "$PENDING"
+  echo "$MIGRATIONS_OUTPUT"
   exit 1
 }
 
 echo "Pending migrations output:"
-echo "$PENDING"
+echo "$MIGRATIONS_OUTPUT"
 
+PENDING_COUNT=$(echo "$MIGRATIONS_OUTPUT" | grep -c "\[ \]")
 
-
-if [ "$PENDING" -gt 0 ]; then
+if [ "$PENDING_COUNT" -gt 0 ]; then
   echo "Applying migrations...."
   python manage.py makemigrations || echo "MAKEMIGRATIONS FAILED"
   python manage.py migrate || echo "MIGRATE FAILED"

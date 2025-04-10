@@ -55,8 +55,14 @@ class AddressSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
     def get_user_info(self, obj):
-        if obj.user_ref:  # Check if a user reference exists
-            # Serialize and return user info
+        request = self.context.get("request", None)
+        # Only return full user info if the requesting user's role is "admin"
+        if (
+            request
+            and hasattr(request, "user")
+            and getattr(request.user, "rol_ref", None)
+            and request.user.rol_ref.name.lower() == "admin"
+        ):
             return UserSerializer(obj.user_ref).data
         return None
 

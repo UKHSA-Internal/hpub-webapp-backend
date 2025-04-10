@@ -1,9 +1,8 @@
 #!/bin/sh
-set -e
+set +e
 
 echo "Checking for pending migrations...."
 echo "Listing project files:"
-ls -al
 
 MIGRATIONS_OUTPUT=$(python manage.py showmigrations --verbosity 3 2>&1) || {
   echo "SHOWMIGRATIONS FAILED:"
@@ -15,9 +14,10 @@ echo "Pending migrations output:"
 echo "$MIGRATIONS_OUTPUT"
 
 PENDING_COUNT=$(echo "$MIGRATIONS_OUTPUT" | grep -c "\[ \]")
+echo "$PENDING_COUNT"
 
 if [ "$PENDING_COUNT" -gt 0 ]; then
-  echo "Applying migrations...."
+  echo "Applying migrations..."
   python manage.py makemigrations || echo "MAKEMIGRATIONS FAILED"
   python manage.py migrate || echo "MIGRATE FAILED"
 else

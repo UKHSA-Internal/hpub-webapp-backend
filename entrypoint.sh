@@ -3,12 +3,22 @@ set -e
 
 echo "Checking for pending migrations...."
 
-PENDING=$(python manage.py showmigrations --verbosity 3 | grep -c "\[ \]")
+PENDING=$(python manage.py showmigrations --verbosity 3 2>&1) || {
+  echo "SHOWMIGRATIONS FAILED:"
+  echo "$PENDING"
+  exit 1
+}
+
+echo "Pending migrations output:"
 echo "$PENDING"
+
+echo "Listing project files:"
+ls -al
+
 if [ "$PENDING" -gt 0 ]; then
   echo "Applying migrations...."
-  python manage.py makemigrations
-  python manage.py migrate
+  python manage.py makemigrations || echo "MAKEMIGRATIONS FAILED"
+  python manage.py migrate || echo "MIGRATE FAILED"
 else
   echo "No migrations needed.."
 fi

@@ -404,11 +404,19 @@ class UserSignUpView(APIView):
         response_data = {
             "user": user_response_data,
             "short_term_token": short_term_token,
-            "long_term_token": long_term_token,
         }
         if message:
             response_data["message"] = message
-        return Response(response_data, status=status_code)
+        response = Response(response_data, status=status_code)
+
+        return response.set_cookie(
+            key="long_term_token",
+            value=long_term_token,
+            httponly=True,
+            secure=True,
+            samesite="Lax",  # or "Strict"/"None" based on frontend-backend setup
+            max_age=86400,  # 1 day
+        )
 
 
 class UserLoginView(APIView):
@@ -476,14 +484,24 @@ class UserLoginView(APIView):
         )
         long_term_token = generate_long_term_token(user.user_id, user.email, role_name)
 
-        return Response(
-            {
-                "short_term_token": short_term_token,
-                "long_term_token": long_term_token,
-                "organization_name": organization_name,
-            },
-            status=status.HTTP_200_OK,
+        # Prepare response data (do not include long_term_token in body)
+        response_data = {
+            "short_term_token": short_term_token,
+            "organization_name": organization_name,
+        }
+        response = Response(response_data, status=status.HTTP_200_OK)
+
+        # Set long-term token as HTTP-only, secure cookie.
+        response.set_cookie(
+            key="long_term_token",
+            value=long_term_token,
+            httponly=True,
+            secure=True,  # Only send over HTTPS.
+            samesite="Lax",  # Adjust as needed ("Strict" or "None")
+            max_age=86400,  # Lifetime in seconds (here, 1 day)
         )
+
+        return response
 
 
 class UpdateUserView(APIView):

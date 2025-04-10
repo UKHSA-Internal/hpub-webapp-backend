@@ -19,6 +19,38 @@ from .choices import (
 )
 
 
+def parse_downloads(download_data):
+    """
+    Helper function to parse and format the product downloads.
+    It attempts to decode the JSON data if it is a string and returns a dictionary
+    with the expected structure.
+    """
+    try:
+        downloads = (
+            json.loads(download_data)
+            if isinstance(download_data, str)
+            else download_data
+        )
+    except json.JSONDecodeError:
+        downloads = {}
+
+    return {
+        "main_download_url": downloads.get("main_download_url"),
+        "video_url": downloads.get("video_url"),
+        "web_download_url": [
+            FileMetadataSerializer(m).data
+            for m in downloads.get("web_download_url", [])
+        ],
+        "print_download_url": [
+            FileMetadataSerializer(m).data
+            for m in downloads.get("print_download_url", [])
+        ],
+        "transcript_url": [
+            FileMetadataSerializer(m).data for m in downloads.get("transcript_url", [])
+        ],
+    }
+
+
 class FileMetadataSerializer(serializers.Serializer):
     URL = serializers.URLField(required=True)
     inline_presigned_s3_url = serializers.URLField(required=False)
@@ -178,7 +210,7 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, data):
-        # Add any additional validation logic here
+        # Additional validation logic
         if data.get("available_from_choice") == "specific_date" and not data.get(
             "order_from_date"
         ):
@@ -217,33 +249,8 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
         return data
 
     def get_product_downloads(self, obj):
-        """Ensure product_downloads is a dictionary before accessing it."""
-        try:
-            # Deserialize only if it's a string
-            downloads = (
-                json.loads(obj.product_downloads)
-                if isinstance(obj.product_downloads, str)
-                else obj.product_downloads
-            )
-        except json.JSONDecodeError:
-            downloads = {}
-
-        return {
-            "main_download_url": downloads.get("main_download_url"),
-            "video_url": downloads.get("video_url"),
-            "web_download_url": [
-                FileMetadataSerializer(m).data
-                for m in downloads.get("web_download_url", [])
-            ],
-            "print_download_url": [
-                FileMetadataSerializer(m).data
-                for m in downloads.get("print_download_url", [])
-            ],
-            "transcript_url": [
-                FileMetadataSerializer(m).data
-                for m in downloads.get("transcript_url", [])
-            ],
-        }
+        """Return the formatted product_downloads using the shared helper."""
+        return parse_downloads(obj.product_downloads)
 
     def to_representation(self, instance):
         representation = super().to_representation(instance)
@@ -340,32 +347,8 @@ class ProductUpdateSearchSerializer(serializers.ModelSerializer):
         fields = ("product_downloads", "summary_of_guidance")
 
     def get_product_downloads(self, obj):
-        """Ensure product_downloads is a dictionary before accessing it."""
-        try:
-            downloads = (
-                json.loads(obj.product_downloads)
-                if isinstance(obj.product_downloads, str)
-                else obj.product_downloads
-            )
-        except json.JSONDecodeError:
-            downloads = {}
-
-        return {
-            "main_download_url": downloads.get("main_download_url"),
-            "video_url": downloads.get("video_url"),
-            "web_download_url": [
-                FileMetadataSerializer(m).data
-                for m in downloads.get("web_download_url", [])
-            ],
-            "print_download_url": [
-                FileMetadataSerializer(m).data
-                for m in downloads.get("print_download_url", [])
-            ],
-            "transcript_url": [
-                FileMetadataSerializer(m).data
-                for m in downloads.get("transcript_url", [])
-            ],
-        }
+        """Return the formatted product_downloads using the shared helper."""
+        return parse_downloads(obj.product_downloads)
 
 
 class ProductSearchSerializer(serializers.ModelSerializer):

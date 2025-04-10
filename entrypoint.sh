@@ -2,6 +2,8 @@
 set -e
 
 echo "Checking for pending migrations...."
+echo "Listing project files:"
+ls -al
 
 PENDING=$(python manage.py showmigrations --verbosity 3 2>&1) || {
   echo "SHOWMIGRATIONS FAILED:"
@@ -12,8 +14,7 @@ PENDING=$(python manage.py showmigrations --verbosity 3 2>&1) || {
 echo "Pending migrations output:"
 echo "$PENDING"
 
-echo "Listing project files:"
-ls -al
+
 
 if [ "$PENDING" -gt 0 ]; then
   echo "Applying migrations...."

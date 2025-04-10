@@ -57,7 +57,14 @@ class OrderSerializer(serializers.ModelSerializer):
         ]
 
     def get_user_info(self, obj):
-        if obj.user_ref:
+        request = self.context.get("request", None)
+        # Only return full user info if the requesting user's role is "admin"
+        if (
+            request
+            and hasattr(request, "user")
+            and getattr(request.user, "rol_ref", None)
+            and request.user.rol_ref.name.lower() == "admin"
+        ):
             return UserSerializer(obj.user_ref).data
         return None
 

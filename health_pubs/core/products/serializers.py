@@ -6,7 +6,6 @@ from core.diseases.serializers import DiseaseSerializer
 from core.languages.models import LanguagePage
 from core.order_limits.serializers import OrderLimitPageSerializer
 from core.programs.models import Program
-from core.users.serializers import UserSerializer
 from core.vaccinations.serializers import VaccinationSerializer
 from core.where_to_use.serializers import WhereToUseSerializer
 from rest_framework import serializers
@@ -246,6 +245,16 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
             ],
         }
 
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        # Remove PII for non-admin users.
+        request = self.context.get("request", None)
+        if not (request and hasattr(request, "user") and request.user.is_staff):
+            # Remove sensitive fields from the representation.
+            representation.pop("order_referral_email_address", None)
+            representation.pop("stock_owner_email_address", None)
+        return representation
+
 
 class ProductSerializer(serializers.ModelSerializer):
     status = serializers.CharField(max_length=50, default="draft")
@@ -274,8 +283,6 @@ class ProductSerializer(serializers.ModelSerializer):
     update_ref = ProductUpdateSerializer(read_only=True)
     product_code_no_dashes = serializers.CharField(read_only=True)
 
-    user_info = serializers.SerializerMethodField()
-
     class Meta:
         model = Product
         fields = (
@@ -292,7 +299,6 @@ class ProductSerializer(serializers.ModelSerializer):
             "is_latest",
             "language_name",
             "user_ref",
-            "user_info",
             "program_name",
             "iso_language_code",
             "product_code",
@@ -320,8 +326,67 @@ class ProductSerializer(serializers.ModelSerializer):
             ] = uuid.uuid4()  # Generate a UUID if no id is provided
         return super().create(validated_data)
 
-    def get_user_info(self, obj):
-        if obj.user_ref:
-            # Serialize and return user info
-            return UserSerializer(obj.user_ref).data
-        return None
+
+class ProductUpdateSearchSerializer(serializers.ModelSerializer):
+    """
+    A lightweight serializer for nested update data, which only returns
+    product_downloads and summary_of_guidance.
+    """
+
+    product_downloads = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProductUpdate
+        fields = ("product_downloads", "summary_of_guidance")
+
+    def get_product_downloads(self, obj):
+        """Ensure product_downloads is a dictionary before accessing it."""
+        try:
+            downloads = (
+                json.loads(obj.product_downloads)
+                if isinstance(obj.product_downloads, str)
+                else obj.product_downloads
+            )
+        except json.JSONDecodeError:
+            downloads = {}
+
+        return {
+            "main_download_url": downloads.get("main_download_url"),
+            "video_url": downloads.get("video_url"),
+            "web_download_url": [
+                FileMetadataSerializer(m).data
+                for m in downloads.get("web_download_url", [])
+            ],
+            "print_download_url": [
+                FileMetadataSerializer(m).data
+                for m in downloads.get("print_download_url", [])
+            ],
+            "transcript_url": [
+                FileMetadataSerializer(m).data
+                for m in downloads.get("transcript_url", [])
+            ],
+        }
+
+
+class ProductSearchSerializer(serializers.ModelSerializer):
+    """
+    Serializer used only in search endpoints to return a restricted set
+    of fields.
+    """
+
+    update_ref = ProductUpdateSearchSerializer(read_only=True)
+
+    class Meta:
+        model = Product
+        fields = (
+            "product_title",
+            "product_code",
+            "update_ref",
+            "tag",
+            "status",
+            "program_id",
+            "product_key",
+            "language_id",
+            "language_name",
+            "product_code_no_dashes",
+        )

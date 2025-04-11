@@ -15,7 +15,6 @@ from core.roles.models import Role
 from core.users.models import User
 from core.users.permissions import IsAdminOrRegisteredUser
 from core.utils.custom_token_authentication import CustomTokenAuthentication
-from rest_framework.authentication import SessionAuthentication
 from core.utils.order_confirmation_generation import generate_order_confirmation
 from core.utils.send_order_confirmation import send_notification
 from django.contrib.contenttypes.models import ContentType
@@ -26,7 +25,7 @@ from django.utils.text import slugify
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import APIException, ValidationError
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from wagtail.models import Page
@@ -44,8 +43,8 @@ from django.db import transaction
 
 class OrderViewSet(viewsets.ModelViewSet):
 
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminOrRegisteredUser]
     queryset = Order.objects.all()
     serializer_class = OrderSerializer
 

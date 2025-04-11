@@ -15,6 +15,7 @@ from core.roles.models import Role
 from core.users.models import User
 from core.users.permissions import IsAdminOrRegisteredUser
 from core.utils.custom_token_authentication import CustomTokenAuthentication
+from rest_framework.authentication import SessionAuthentication
 from core.utils.order_confirmation_generation import generate_order_confirmation
 from core.utils.send_order_confirmation import send_notification
 from django.contrib.contenttypes.models import ContentType
@@ -25,7 +26,7 @@ from django.utils.text import slugify
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import APIException, ValidationError
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from wagtail.models import Page
@@ -43,8 +44,8 @@ from django.db import transaction
 
 class OrderViewSet(viewsets.ModelViewSet):
 
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminOrRegisteredUser]
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
     queryset = Order.objects.all()
     serializer_class = OrderSerializer
 
@@ -464,15 +465,13 @@ class OrderViewSet(viewsets.ModelViewSet):
                 raise APIException(ErrorMessage.INTERNAL_SERVER_ERROR)
 
     def _get_or_create_user(self, user_data, parent_page):
-        """
-        Retrieves or creates a user instance based on the provided user data.
-        """
         user_instance = User.objects.filter(email=user_data.get("email")).first()
         role_instance = Role.objects.filter(name="User").first()
         if not role_instance:
             return Response(
                 {"error": "Role not found"}, status=status.HTTP_400_BAD_REQUEST
             )
+
         if not user_instance:
             unique_slug = self.get_unique_slug(
                 slugify(
@@ -480,6 +479,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                 )
             )
             user_instance = User(
+                user_id=str(uuid.uuid4()),
                 first_name=user_data.get("first_name"),
                 last_name=user_data.get("last_name"),
                 role_ref=role_instance,
@@ -489,11 +489,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                 title="user_info_title",
             )
 
-            password = user_data.get("password")
-
-            if password:
-                user_instance.set_password(password)
-
+            # Only add if the user does not already exist in the tree.
             parent_page.add_child(instance=user_instance)
             user_instance.save()
             user_instance.refresh_from_db()

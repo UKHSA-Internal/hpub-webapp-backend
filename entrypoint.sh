@@ -5,23 +5,6 @@ echo "=============================="
 echo "== Starting entrypoint.sh   =="
 echo "=============================="
 
-# -----------------------------------------------------------------------------
-# Step 1: (Optional) Generate or update migration files for your own apps only.
-# -----------------------------------------------------------------------------
-# In production, it is best to ship your migration files rather than
-# running makemigrations at container startup.
-#
-# Uncomment and update the following block if you wish to generate migrations
-# for specific apps (e.g. your own apps) at runtime.
-#
-# echo "=============================="
-# echo "Running makemigrations for custom apps only..."
-# makemigrations_output=$(python manage.py makemigrations myapp1 myapp2 --verbosity=2 2>&1) || {
-#   echo "MAKEMIGRATIONS FAILED:"
-#   echo "$makemigrations_output"
-#   exit 1
-# }
-# echo "$makemigrations_output"
 
 # -----------------------------------------------------------------------------
 # Step 2: List current migration status

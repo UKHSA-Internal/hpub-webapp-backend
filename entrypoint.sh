@@ -10,7 +10,7 @@ echo "=============================="
 # Step 1: Generate (or update) migration files
 echo "=============================="
 echo "Running makemigrations..."
-makemigrations_output=$(python manage.py makemigrations --verbosity 2 2>&1) || {
+makemigrations_output=$(python manage.py makemigrations --noinput --verbosity 2 2>&1) || {
   echo "MAKEMIGRATIONS FAILED:"
   echo "$makemigrations_output"
   exit 1
@@ -20,16 +20,12 @@ echo "$makemigrations_output"
 # Step 2: Show migrations status
 echo "=============================="
 echo "Listing migrations..."
-migrations_output=$(python manage.py showmigrations --verbosity 2 2>&1) || {
+migrations_output=$(python manage.py showmigrations --noinput --verbosity 2 2>&1) || {
   echo "SHOWMIGRATIONS FAILED:"
   echo "$migrations_output"
   exit 1
 }
 echo "$migrations_output"
-
-# Debug: output each line numbered to check formatting (optional)
-echo "Detailed migration output:"
-echo "$migrations_output" | nl
 
 # Step 3: Count pending migrations by searching for pending markers "[ ]"
 pending_count=$(echo "$migrations_output" | grep -c "\[ \]")
@@ -39,7 +35,7 @@ echo "Number of pending migrations: $pending_count"
 if [ "$pending_count" -gt 0 ]; then
   echo "=============================="
   echo "Applying pending migrations..."
-  migrate_output=$(python manage.py migrate --verbosity 2 2>&1) || {
+  migrate_output=$(python manage.py migrate --noinput --verbosity 2 2>&1) || {
     echo "MIGRATE FAILED:"
     echo "$migrate_output"
     exit 1

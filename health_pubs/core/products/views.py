@@ -1451,18 +1451,21 @@ class ProductPatchView(ErrorHandlingMixin, View):
     ):
         """
         Validates that all required downloads are present.
-        For order-only products, as indicated by a tag in the request data,
-        the input product_downloads must include 'main_download'.
+        For order-only products, the input product_downloads must include only 'main_download'.
+        For download-only products, the 'print_download' requirement will be ignored while validating.
         For other product types, the standard required downloads are enforced.
         """
-        # Use the incoming request data rather than checking the product table.
-        if data.get("tag", "").lower() == "order-only":
+        tag = data.get("tag", "").lower()
+
+        # For order-only, require only the main_download.
+        if tag == "order-only":
             if not product_downloads.get("main_download"):
                 raise ValidationError(
                     "Missing required main_download for order-only product."
                 )
             return
 
+        # Define the standard required downloads for each product type.
         required = {
             "Audio": ["main_download", "web_download", "transcript"],
             "Bulletins": ["main_download", "print_download", "web_download"],
@@ -1487,8 +1490,15 @@ class ProductPatchView(ErrorHandlingMixin, View):
             "GIF": ["main_download", "web_download"],
             "Slides": ["main_download", "web_download"],
         }
+
+        # Only adjust the requirements if there is a predefined list for the product_type.
         if product_type in required:
-            missing = [d for d in required[product_type] if d not in product_downloads]
+            # Make a copy to modify the required keys.
+            required_downloads = required[product_type].copy()
+            # For download-only products, remove 'print_download' from the required keys.
+            if tag == "download-only" and "print_download" in required_downloads:
+                required_downloads.remove("print_download")
+            missing = [d for d in required_downloads if d not in product_downloads]
             if missing:
                 raise ValidationError(
                     f"Missing required downloads for {product_type}: {', '.join(missing)}."

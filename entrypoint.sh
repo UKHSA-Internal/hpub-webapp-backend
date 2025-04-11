@@ -1,28 +1,56 @@
 #!/bin/sh
-set +e
+# Enable strict error handling:
+set -eo pipefail
 
-echo "Checking for pending migrations...."
-echo "Listing project files:"
+echo "=============================="
+echo "== Starting entrypoint.sh   =="
+echo "=============================="
 
-MIGRATIONS_OUTPUT=$(python manage.py showmigrations --verbosity 3 2>&1) || {
-  echo "SHOWMIGRATIONS FAILED:"
-  echo "$MIGRATIONS_OUTPUT"
+
+
+# Step 1: Generate (or update) migration files
+echo "=============================="
+echo "Running makemigrations..."
+makemigrations_output=$(python manage.py makemigrations --verbosity 2 2>&1) || {
+  echo "MAKEMIGRATIONS FAILED:"
+  echo "$makemigrations_output"
   exit 1
 }
+echo "$makemigrations_output"
 
-echo "Pending migrations output:"
-echo "$MIGRATIONS_OUTPUT"
+# Step 2: Show migrations status
+echo "=============================="
+echo "Listing migrations..."
+migrations_output=$(python manage.py showmigrations --verbosity 2 2>&1) || {
+  echo "SHOWMIGRATIONS FAILED:"
+  echo "$migrations_output"
+  exit 1
+}
+echo "$migrations_output"
 
-PENDING_COUNT=$(echo "$MIGRATIONS_OUTPUT" | grep -c "\[ \]")
-echo "$PENDING_COUNT"
+# Debug: output each line numbered to check formatting (optional)
+echo "Detailed migration output:"
+echo "$migrations_output" | nl
 
-if [ "$PENDING_COUNT" -gt 0 ]; then
-  echo "Applying migrations..."
-  python manage.py makemigrations || echo "MAKEMIGRATIONS FAILED"
-  python manage.py migrate || echo "MIGRATE FAILED"
+# Step 3: Count pending migrations by searching for pending markers "[ ]"
+pending_count=$(echo "$migrations_output" | grep -c "\[ \]")
+echo "Number of pending migrations: $pending_count"
+
+# Step 4: If there are pending migrations, apply them
+if [ "$pending_count" -gt 0 ]; then
+  echo "=============================="
+  echo "Applying pending migrations..."
+  migrate_output=$(python manage.py migrate --verbosity 2 2>&1) || {
+    echo "MIGRATE FAILED:"
+    echo "$migrate_output"
+    exit 1
+  }
+  echo "$migrate_output"
 else
-  echo "No migrations needed.."
+  echo "No pending migrations found. Skipping migrate step."
 fi
 
+# Step 5: Start Gunicorn
+echo "=============================="
 echo "Starting Gunicorn..."
 exec gunicorn health_pubs.wsgi:application --bind 0.0.0.0:8000 --timeout 600

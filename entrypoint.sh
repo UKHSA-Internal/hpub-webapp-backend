@@ -17,6 +17,7 @@ migrations_output=$(python manage.py showmigrations --verbosity=2 --no-color 2>&
   exit 1
 }
 echo "$migrations_output"
+echo "DB USER: $DB_USER"
 
 # -----------------------------------------------------------------------------
 # Step 3: Count pending migrations

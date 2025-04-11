@@ -21,7 +21,7 @@ echo "$makemigrations_output"
 # Step 2: Show migrations status
 echo "=============================="
 echo "Listing migrations..."
-migrations_output=$(python manage.py showmigrations --verbosity 2 --no-color 2>&1) || {
+migrations_output=$(python manage.py showmigrations --verbosity=2 --no-color 2>&1) || {
   echo "SHOWMIGRATIONS FAILED:"
   echo "$migrations_output"
   exit 1

@@ -1,5 +1,4 @@
-#!/bin/sh
-# Enable strict error handling:
+#!/bin/bash
 set -eo pipefail
 
 echo "=============================="

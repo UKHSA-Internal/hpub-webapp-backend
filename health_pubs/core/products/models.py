@@ -182,7 +182,7 @@ class Product(Page):
         related_name="products",
     )
     product_key = models.CharField(max_length=50)
-    product_key_testss = models.CharField(max_length=50, null=True, blank=True)
+    product_key_testsss = models.CharField(max_length=50, null=True, blank=True)
     publish_date = models.DateField(null=True, blank=True)
     program_name = models.CharField(max_length=255)
     iso_language_code = models.CharField(max_length=10)
@@ -232,7 +232,7 @@ class Product(Page):
         FieldPanel("user_ref"),
         FieldPanel("program_id"),
         FieldPanel("product_key"),
-        FieldPanel("product_key_testss"),
+        FieldPanel("product_key_testsss"),
         FieldPanel("publish_date"),
         FieldPanel("program_name"),
         FieldPanel("iso_language_code"),

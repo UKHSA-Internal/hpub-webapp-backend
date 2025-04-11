@@ -464,15 +464,13 @@ class OrderViewSet(viewsets.ModelViewSet):
                 raise APIException(ErrorMessage.INTERNAL_SERVER_ERROR)
 
     def _get_or_create_user(self, user_data, parent_page):
-        """
-        Retrieves or creates a user instance based on the provided user data.
-        """
         user_instance = User.objects.filter(email=user_data.get("email")).first()
         role_instance = Role.objects.filter(name="User").first()
         if not role_instance:
             return Response(
                 {"error": "Role not found"}, status=status.HTTP_400_BAD_REQUEST
             )
+
         if not user_instance:
             unique_slug = self.get_unique_slug(
                 slugify(
@@ -480,6 +478,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                 )
             )
             user_instance = User(
+                user_id=str(uuid.uuid4()),
                 first_name=user_data.get("first_name"),
                 last_name=user_data.get("last_name"),
                 role_ref=role_instance,
@@ -489,11 +488,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                 title="user_info_title",
             )
 
-            password = user_data.get("password")
-
-            if password:
-                user_instance.set_password(password)
-
+            # Only add if the user does not already exist in the tree.
             parent_page.add_child(instance=user_instance)
             user_instance.save()
             user_instance.refresh_from_db()

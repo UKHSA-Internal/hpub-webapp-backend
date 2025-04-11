@@ -17,6 +17,7 @@ makemigrations_output=$(python manage.py makemigrations --verbosity 2 2>&1) || {
 }
 echo "$makemigrations_output"
 
+
 # Step 2: Show migrations status
 echo "=============================="
 echo "Listing migrations..."

@@ -1508,6 +1508,9 @@ class ProductPatchView(ErrorHandlingMixin, View):
             "main_download_url": ["jpg", "jpeg", "png", "gif"],
             "transcript_url": ["pdf", "txt", "srt"],
             "web_download_url": [
+                "jpg",
+                "jpeg",
+                "png",
                 "mp4",
                 "mov",
                 "avi",

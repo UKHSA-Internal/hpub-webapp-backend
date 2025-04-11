@@ -5,20 +5,27 @@ echo "=============================="
 echo "== Starting entrypoint.sh   =="
 echo "=============================="
 
+# -----------------------------------------------------------------------------
+# Step 1: (Optional) Generate or update migration files for your own apps only.
+# -----------------------------------------------------------------------------
+# In production, it is best to ship your migration files rather than
+# running makemigrations at container startup.
+#
+# Uncomment and update the following block if you wish to generate migrations
+# for specific apps (e.g. your own apps) at runtime.
+#
+# echo "=============================="
+# echo "Running makemigrations for custom apps only..."
+# makemigrations_output=$(python manage.py makemigrations myapp1 myapp2 --verbosity=2 2>&1) || {
+#   echo "MAKEMIGRATIONS FAILED:"
+#   echo "$makemigrations_output"
+#   exit 1
+# }
+# echo "$makemigrations_output"
 
-
-# Step 1: Generate (or update) migration files
-echo "=============================="
-echo "Running makemigrations..."
-makemigrations_output=$(python manage.py makemigrations --verbosity 2 2>&1) || {
-  echo "MAKEMIGRATIONS FAILED:"
-  echo "$makemigrations_output"
-  exit 1
-}
-echo "$makemigrations_output"
-
-
-# Step 2: Show migrations status
+# -----------------------------------------------------------------------------
+# Step 2: List current migration status
+# -----------------------------------------------------------------------------
 echo "=============================="
 echo "Listing migrations..."
 migrations_output=$(python manage.py showmigrations --verbosity=2 --no-color 2>&1) || {
@@ -28,17 +35,22 @@ migrations_output=$(python manage.py showmigrations --verbosity=2 --no-color 2>&
 }
 echo "$migrations_output"
 
-# Step 3: Count pending migrations by searching for pending markers "[ ]"
+# -----------------------------------------------------------------------------
+# Step 3: Count pending migrations
+# -----------------------------------------------------------------------------
+# Remove any ANSI color codes (just in case)
 clean_output=$(echo "$migrations_output" | sed 's/\x1B\[[0-9;]*[a-zA-Z]//g')
+# Count lines that have the pending migration marker, assuming lines start with optional whitespace then "[ ]"
 pending_count=$(echo "$clean_output" | grep -E -c "^\s*\[ \]")
 echo "Number of pending migrations: $pending_count"
 
-
-# Step 4: If there are pending migrations, apply them
+# -----------------------------------------------------------------------------
+# Step 4: Apply pending migrations if needed
+# -----------------------------------------------------------------------------
 if [ "$pending_count" -gt 0 ]; then
   echo "=============================="
   echo "Applying pending migrations..."
-  migrate_output=$(python manage.py migrate --verbosity 2 2>&1) || {
+  migrate_output=$(python manage.py migrate --verbosity=2 2>&1) || {
     echo "MIGRATE FAILED:"
     echo "$migrate_output"
     exit 1
@@ -48,7 +60,9 @@ else
   echo "No pending migrations found. Skipping migrate step."
 fi
 
-# Step 5: Start Gunicorn
+# -----------------------------------------------------------------------------
+# Step 5: Start the Gunicorn WSGI server
+# -----------------------------------------------------------------------------
 echo "=============================="
 echo "Starting Gunicorn..."
 exec gunicorn health_pubs.wsgi:application --bind 0.0.0.0:8000 --timeout 600

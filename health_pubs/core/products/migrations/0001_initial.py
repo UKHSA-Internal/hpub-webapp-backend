@@ -13,7 +13,6 @@ from ..choices import (
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
     dependencies = [

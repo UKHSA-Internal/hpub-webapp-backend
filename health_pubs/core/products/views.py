@@ -1490,8 +1490,7 @@ class ProductPatchView(ErrorHandlingMixin, View):
             "GIF": ["main_download", "web_download"],
             "Slides": ["main_download", "web_download"],
         }
-
-        # Only adjust the requirements if there is a predefined list for the product_type.
+        # Check if the product type is in the required downloads.
         if product_type in required:
             # Make a copy to modify the required keys.
             required_downloads = required[product_type].copy()

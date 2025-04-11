@@ -1,11 +1,15 @@
 from datetime import datetime
-
+import secrets
+import string
 from core.orders.models import OrderItem
 
 
 def generate_order_confirmation(order_instance):
-    # Generating order confirmation info
-    confirmation_number = "HPUB_Order_" + str(order_instance.order_id)
+    # Generate a unique confirmation number for the order
+    # The confirmation number is a combination of "FHR" and a random 5-character string
+    allowed_chars = string.ascii_uppercase + string.digits
+    random_suffix = "".join(secrets.choice(allowed_chars) for _ in range(5))
+    confirmation_number = "FHR" + random_suffix
     order_status = "Submitted"  # Assuming the status is "Submitted" for all orders
     confirmation_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 

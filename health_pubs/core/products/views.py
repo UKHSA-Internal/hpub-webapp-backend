@@ -2206,13 +2206,20 @@ class ProductAdminFilterView(APIView, ProductListMixin):
             "status": "status__in",
         }
         query = Q()
+        # Process other filters using getlist
         for param, lookup in filter_mapping.items():
             values = request.GET.getlist(param, [])
             if values:
                 query &= Q(**{lookup: values})
-        product_code = request.GET.get("product_code", None)
-        if product_code:
-            query &= Q(product_code_no_dashes__icontains=product_code)
+
+        # Updated product_code handling for multiple values
+        product_codes = request.GET.getlist("product_code")
+        if product_codes:
+            code_query = Q()
+            for code in product_codes:
+                code_query |= Q(product_code_no_dashes__icontains=code)
+            query &= code_query
+
         return query
 
     def get(self, request, *args, **kwargs) -> Response:

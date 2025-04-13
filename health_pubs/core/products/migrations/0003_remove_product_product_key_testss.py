@@ -2,7 +2,6 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("products", "0002_remove_product_product_key_testss_and_more"),
     ]

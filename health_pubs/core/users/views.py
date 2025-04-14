@@ -39,6 +39,7 @@ from django.db import transaction, DatabaseError, IntegrityError
 
 from .models import InvalidatedToken, User
 from .serializers import UserSerializer
+import health_pubs.settings as settings
 
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -413,9 +414,9 @@ class UserSignUpView(APIView):
             key="long_term_token",
             value=long_term_token,
             httponly=True,
-            secure=True,
+            secure=(not settings.DEBUG),
             samesite="Lax",  # or "Strict"/"None" based on frontend-backend setup
-            max_age=600,  # 10 mins
+            max_age=86400,  # 10 mins
         )
 
 
@@ -496,9 +497,9 @@ class UserLoginView(APIView):
             key="long_term_token",
             value=long_term_token,
             httponly=True,
-            secure=True,  # Only send over HTTPS.
+            secure=(not settings.DEBUG),  # Only send over HTTPS.
             samesite="Lax",  # Adjust as needed ("Strict" or "None")
-            max_age=600,  # Lifetime in seconds (here, 1 day)
+            max_age=86400,  # Lifetime in seconds (here, 1 day)
         )
 
         return response
@@ -552,51 +553,166 @@ class UpdateUserView(APIView):
             )
 
 
-class LogoutView(APIView):
-    permission_classes = [IsAuthenticated]
+class TokenRefresh(APIView):
+    """
+    Refresh endpoint:
+      - Manually extracts the refresh token from the Authorization header or cookies.
+      - Validates the refresh token (handling expiration as needed).
+      - Issues a new short-term token.
+      - IMPORTANTLY: It sets (or resets) the long‑term refresh token cookie on the response.
+    """
+
+    # Remove default authentication so expired tokens can be processed.
+    authentication_classes = []
+    permission_classes = []
 
     def post(self, request):
-        # Get the token from the request headers
+        logger.info("Request COOKIE header: %s", request.META.get("HTTP_COOKIE"))
+        # Extract token from header if available; otherwise use cookie.
         auth_header = request.headers.get("Authorization", "")
-        if not auth_header:
+        if auth_header and " " in auth_header:
+            refresh_token = auth_header.split(" ")[1]
+            logger.info("Refresh token from header: %s", refresh_token)
+        else:
+            refresh_token = request.COOKIES.get("long_term_token")
+            logger.info("Refresh token from cookies: %s", refresh_token)
+
+        if not refresh_token:
             return Response(
-                {"error": "Authorization token missing"},
-                status=status.HTTP_401_UNAUTHORIZED,
+                {"error": "Refresh token missing"}, status=status.HTTP_400_BAD_REQUEST
             )
 
         try:
-            # Extract token
-            token = auth_header.split(" ")[1]
+            # Validate the refresh token.
+            payload = validate_token_refresh(refresh_token, token_type="refresh")
+        except jwt.ExpiredSignatureError:
+            # For example, if using Azure B2C flow: attempt to refresh the underlying token.
+            try:
+                new_access_token, new_refresh_token = refresh_b2c_token(refresh_token)
+                payload = validate_token(new_access_token, token_type="access")
+                # Optionally update refresh_token variable with new_refresh_token:
+                refresh_token = new_refresh_token
+                # Proceed with the new access token payload.
+            except Exception as e:
+                logger.error("Token refresh error: %s", e)
+                return Response(
+                    {"error": "Unable to refresh token"},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+        except Exception as e:
+            logger.error("Token validation error: %s", e)
+            return Response({"error": str(e)}, status=status.HTTP_401_UNAUTHORIZED)
 
-            # Decode token without verification to extract user_id
-            unverified_payload = jwt.decode(token, options={"verify_signature": False})
-            user_id = unverified_payload.get("user_id")
+        user_id = payload.get("user_id")
+        email = payload.get("email")
+        role = payload.get("role")
 
-            # Get the user from the User model
+        try:
             user = User.objects.get(user_id=user_id)
-
-            # Create and save an InvalidatedToken page as a child of the root page
-            root_page = (
-                Page.get_first_root_node()
-            )  # You can change this to a different parent page as needed
-            invalidated_token_page = InvalidatedToken(
-                title=f"Invalidated Token for {user.email}",
-                slug=slugify(f"user-{user.email}-{timezone.now().timestamp()}"),
-                users=user,
-                token=token,
+        except User.DoesNotExist:
+            return Response(
+                {"error": "User does not exist"}, status=status.HTTP_404_NOT_FOUND
             )
-            root_page.add_child(instance=invalidated_token_page)
-            invalidated_token_page.save()
 
-        except (jwt.DecodeError, IndexError, User.DoesNotExist) as e:
+        if not user.is_authorized:
+            return Response(
+                {"error": "User is not authorized"}, status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Generate a new short-term (access) token.
+        new_short_term_token = generate_short_term_token(user_id, email, role)
+
+        # Prepare the response and set the long-term refresh token cookie.
+        response = Response(
+            {"short_term_token": new_short_term_token}, status=status.HTTP_200_OK
+        )
+        # This call sets the "long_term_token" cookie with your current refresh token.
+        response.set_cookie(
+            key="long_term_token",
+            value=refresh_token,  # Use the new refresh token if applicable
+            httponly=True,
+            secure=(not settings.DEBUG),  # Set to True if using HTTPS
+            samesite="Lax",  # Adjust samesite if necessary (or use "Lax" or "Strict")
+            max_age=86400,  # 1 day (or adjust as needed)
+        )
+
+        return response
+
+
+class LogoutView(APIView):
+    """
+    Logout endpoint:
+      - Extracts and decodes the token (even if expired) to identify the user.
+      - Invalidates the token to prevent reuse.
+      - Optionally instructs the client to remove the refresh token cookie.
+    """
+
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header or " " not in auth_header:
+            return Response(
+                {"error": "Authorization token missing or improperly formatted"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        token = auth_header.split(" ")[1]
+        try:
+            # Decode token ignoring expiration so we can process even if expired.
+            payload = jwt.decode(
+                token, options={"verify_signature": False, "verify_exp": False}
+            )
+            user_id = payload.get("user_id")
+        except Exception as e:
+            logger.error("Error decoding token: %s", str(e))
             return Response(
                 {"error": f"Error processing logout: {str(e)}"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        return Response(
+        try:
+            user = User.objects.get(user_id=user_id)
+        except User.DoesNotExist:
+            return Response(
+                {"error": "User does not exist"}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Check if this token has already been invalidated.
+        if InvalidatedToken.objects.filter(token=token).exists():
+            logger.info("Token already invalidated. Skipping duplicate invalidation.")
+        else:
+            try:
+                root_page = Page.get_first_root_node()
+                invalidated_token_page = InvalidatedToken(
+                    title=f"Invalidated Token for {user.email}",
+                    slug=slugify(f"user-{user.email}-{timezone.now().timestamp()}"),
+                    users=user,
+                    token=token,
+                )
+                try:
+                    root_page.add_child(instance=invalidated_token_page)
+                except IntegrityError as e:
+                    if "wagtailcore_page_path_key" in str(e):
+                        logger.info(
+                            "Duplicate page path encountered during invalidation; ignoring error."
+                        )
+                    else:
+                        raise
+            except Exception as e:
+                logger.error("Error saving invalidated token: %s", str(e))
+                return Response(
+                    {"error": "Error processing logout"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+        # Optionally: instruct the client to remove the long-term cookie.
+        response = Response(
             {"message": "Successfully logged out"}, status=status.HTTP_200_OK
         )
+        response.delete_cookie("long_term_token")
+        return response
 
 
 class UserDetailView(GenericAPIView):
@@ -622,79 +738,6 @@ class UserDetailView(GenericAPIView):
             serializer.save()
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
-class TokenRefresh(APIView):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        # logger.info(f"Authorization header: {request.headers.get('Authorization')}") # for debugging
-
-        # Extract the refresh token from the Authorization header
-        auth_header = request.headers.get("Authorization")
-        if not auth_header or " " not in auth_header:
-            return Response(
-                {"error": "Refresh token missing"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        refresh_token = auth_header.split(" ")[1]
-
-        try:
-            # Attempt to validate the refresh token
-            payload = validate_token_refresh(refresh_token, token_type="refresh")
-            user_id = payload.get("user_id")
-            email = payload.get("email")
-            role_name = payload.get("role")
-
-            user = User.objects.get(user_id=user_id)
-            if not user.is_authorized:
-                return Response(
-                    {"error": "User is not authorized"},
-                    status=status.HTTP_403_FORBIDDEN,
-                )
-
-            # Generate a new short-term token
-            new_short_term_token = generate_short_term_token(user_id, email, role_name)
-            return Response(
-                {"short_term_token": new_short_term_token}, status=status.HTTP_200_OK
-            )
-
-        except jwt.ExpiredSignatureError:
-            # Refresh the Azure B2C token
-            try:
-                new_access_token, new_refresh_token = refresh_b2c_token(refresh_token)
-                payload = validate_token(new_access_token, token_type="access")
-
-                # Extract user info from the new token
-                user_id = payload.get("user_id")
-                email = payload.get("email")
-                role_name = payload.get("role")
-
-                # Generate a new short-term token using updated access token data
-                new_short_term_token = generate_short_term_token(
-                    user_id, email, role_name
-                )
-
-                return Response(
-                    {
-                        "short_term_token": new_short_term_token,
-                        "new_access_token": new_access_token,
-                        "new_refresh_token": new_refresh_token,
-                    },
-                    status=status.HTTP_200_OK,
-                )
-            except ValueError as e:
-                logger.error(f"Token refresh error: {e}")
-                return Response(
-                    {"error": "Unable to refresh token"},
-                    status=status.HTTP_401_UNAUTHORIZED,
-                )
-
-        except ValueError as e:
-            logger.error(f"Token validation error: {e}")
-            return Response({"error": str(e)}, status=status.HTTP_401_UNAUTHORIZED)
 
 
 class CustomPagination(PageNumberPagination):

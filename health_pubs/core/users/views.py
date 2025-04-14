@@ -415,7 +415,7 @@ class UserSignUpView(APIView):
             httponly=True,
             secure=True,
             samesite="Lax",  # or "Strict"/"None" based on frontend-backend setup
-            max_age=86400,  # 1 day
+            max_age=600,  # 10 mins
         )
 
 
@@ -498,7 +498,7 @@ class UserLoginView(APIView):
             httponly=True,
             secure=True,  # Only send over HTTPS.
             samesite="Lax",  # Adjust as needed ("Strict" or "None")
-            max_age=86400,  # Lifetime in seconds (here, 1 day)
+            max_age=600,  # Lifetime in seconds (here, 1 day)
         )
 
         return response

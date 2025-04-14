@@ -49,7 +49,7 @@ def generate_short_term_token(user_id, email, role_name):
         "role": role_name,
         "type": "access",
         "jti": str(uuid.uuid4()),
-        "exp": timezone.now() + timedelta(minutes=30),
+        "exp": timezone.now() + timedelta(minutes=3),
         "iat": timezone.now(),
     }
     return jwt.encode(payload, settings.PRIVATE_KEY, algorithm="RS256")
@@ -63,7 +63,7 @@ def generate_long_term_token(user_id, email, role_name):
         "role": role_name,
         "type": "refresh",
         "jti": str(uuid.uuid4()),
-        "exp": timezone.now() + timedelta(days=1),
+        "exp": timezone.now() + timedelta(minutes=10),
         "iat": timezone.now(),
     }
     return jwt.encode(payload, settings.PRIVATE_KEY, algorithm="RS256")

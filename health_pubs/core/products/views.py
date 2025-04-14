@@ -1080,6 +1080,10 @@ class ProductStatusUpdateView(View):
             new_status = validation
 
             product.status = new_status
+
+            # If transitioning to "live" and publish_date is not already set, update it to today's date.
+            if new_status == "live" and not product.publish_date:
+                product.publish_date = timezone.now().date()
             try:
                 product.save()
                 logger.info(
@@ -1736,7 +1740,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         program_name = data["program_name"]
         product_id = data.get("product_id")
         tag = data.get("tag")
-        publish_date = data.get("publish_date") or timezone.now().date()
+        publish_date = data.get("publish_date") or None
 
         if not LanguagePage.objects.filter(language_id=language_id).exists():
             logger.warning("Language ID %s does not exist.", language_id)

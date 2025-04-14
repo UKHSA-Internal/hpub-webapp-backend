@@ -1711,8 +1711,8 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
     Optimized view to handle product creation via POST requests.
     """
 
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
 
     def post(self, request, *args, **kwargs):
         logger.info("ProductCreateView POST method called")

@@ -103,7 +103,6 @@ class CustomTokenAuthentication(BaseAuthentication):
         and falls back to the "long_term_token" cookie.
         """
         auth_header = request.headers.get("Authorization")
-        logger.info("Authorization header: %s", auth_header)
         if auth_header:
             parts = auth_header.split(" ")
             if len(parts) == 2:
@@ -114,7 +113,6 @@ class CustomTokenAuthentication(BaseAuthentication):
 
         # Fallback: try to retrieve token from cookies.
         token = request.COOKIES.get("long_term_token")
-        logger.info("Cookie token: %s", token)
         if token:
             logger.info("Token found in cookies.")
         return token

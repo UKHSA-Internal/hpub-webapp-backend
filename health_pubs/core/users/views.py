@@ -661,9 +661,12 @@ class LogoutView(APIView):
 
         token = auth_header.split(" ")[1]
         try:
-            # Decode token ignoring expiration so we can process even if expired.
+            # Decode token ignoring expiration while still verifying its signature.
             payload = jwt.decode(
-                token, options={"verify_signature": False, "verify_exp": False}
+                token,
+                settings.PUBLIC_KEY,  # Verify signature using the public key
+                algorithms=["RS256"],
+                options={"verify_exp": False},  # Only ignore expiration
             )
             user_id = payload.get("user_id")
         except Exception as e:

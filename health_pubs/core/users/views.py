@@ -410,7 +410,7 @@ class UserSignUpView(APIView):
             response_data["message"] = message
         response = Response(response_data, status=status_code)
 
-        return response.set_cookie(
+        response.set_cookie(
             key="long_term_token",
             value=long_term_token,
             httponly=True,
@@ -418,6 +418,7 @@ class UserSignUpView(APIView):
             samesite="Lax",  # or "Strict"/"None" based on frontend-backend setup
             max_age=86400,  # 10 mins
         )
+        return response
 
 
 class UserLoginView(APIView):

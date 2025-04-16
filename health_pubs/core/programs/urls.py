@@ -6,12 +6,16 @@ from .views import (
     ProgramCreateViewSet,
     ProgramDestroyViewSet,
     ProgramListViewSet,
+    ProgramNameCheckViewSet,
     ProgramUpdateViewSet,
 )
 
 router = DefaultRouter()
 router.register(r"programs/create", ProgramCreateViewSet, basename="program-create")
 router.register(r"programs", ProgramListViewSet, basename="program")
+router.register(
+    r"programs/name", ProgramNameCheckViewSet, basename="programme-name-check"
+)
 router.register(r"programs/update", ProgramUpdateViewSet, basename="program-update")
 router.register(r"programs/destroy", ProgramDestroyViewSet, basename="program-destroy")
 router.register(

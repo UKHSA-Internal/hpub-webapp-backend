@@ -39,7 +39,6 @@ from django.db import DatabaseError, transaction
 from django.db.models import Q
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404
-from django.utils import timezone
 from django.utils.text import slugify
 from django.views import View
 from django.core.exceptions import ImproperlyConfigured
@@ -60,7 +59,11 @@ from rest_framework.views import APIView
 from wagtail.models import Page
 
 from .models import Product, ProductUpdate
-from .serializers import ProductSerializer, ProductUpdateSerializer
+from .serializers import (
+    ProductSearchSerializer,
+    ProductSerializer,
+    ProductUpdateSerializer,
+)
 from django.core.serializers.json import DjangoJSONEncoder
 
 
@@ -387,9 +390,9 @@ def filter_live_languages(products_data):
     }
     # Bulk query: find all product codes that are live.
     live_codes = set(
-        Product.objects.filter(
-            product_code__in=product_codes, status="live"
-        ).values_list("product_code", flat=True)
+        Product.objects.filter(product_code__in=product_codes, status="live")
+        .values_list("product_code", flat=True)
+        .distinct()
     )
     # Update each product's 'existing_languages' to keep only those with live codes.
     for product in products_data:
@@ -1201,10 +1204,11 @@ class ProductStatusUpdateView(View):
     ) -> Union[str, JsonResponse]:
         """
         Validates the status update request. It ensures that:
-          - A new status is provided in the request.
-          - The new status is one of the valid statuses.
-          - The status transition from the current product status to the new status is allowed.
-          - For a transition to "live", all required fields are present.
+        - A new status is provided in the request.
+        - The new status is one of the valid statuses.
+        - The status transition from the current product status to the new status is allowed.
+        - For a transition to "live", all required fields are present.
+        - No other product with the same product_code is already in the target status.
 
         Returns:
             new_status (str): If the update is valid.
@@ -1236,6 +1240,21 @@ class ProductStatusUpdateView(View):
                 f"Cannot transition from {product.status} to {new_status}.",
                 status_code=HTTP_400_BAD_REQUEST,
             )
+
+        # Extra Check: Ensure no duplicate product with the same product_code and new_status exists.
+        if product.status != new_status:
+            duplicate = Product.objects.filter(
+                product_code=product.product_code, status=new_status
+            ).exclude(pk=product.pk)
+            if duplicate.exists():
+                logger.warning(
+                    f"Cannot update product {product.product_code} to {new_status}: another product with the same product_code already has this status."
+                )
+                return handle_error(
+                    ErrorCode.DUPLICATE_STATUS,  # Ensure this error code is defined in your project.
+                    f"Product with product_code {product.product_code} already exists in status {new_status}.",
+                    status_code=HTTP_400_BAD_REQUEST,
+                )
 
         # Additional check: if transitioning to "live", ensure that all required fields are set.
         if new_status == "live":
@@ -2010,7 +2029,7 @@ class ProductUsersListView(APIView, ProductListMixin):
     def get(self, request, *args, **kwargs):
         logger.info("ProductUsersListView GET method called")
         try:
-            products = Product.objects.filter(status="live")
+            products = Product.objects.filter(status="live").distinct()
             if not products.exists():
                 logger.warning("No published products found.")
                 return handle_error(
@@ -2027,6 +2046,15 @@ class ProductUsersListView(APIView, ProductListMixin):
             )
         except Exception as e:
             return handle_exceptions(e)
+
+
+class ProductSearchListMixin(ProductListMixin):
+    """
+    A specialized mixin for search endpoints. Inherits the functionality of
+    ProductListMixin but overrides the serializer_class to use ProductSearchSerializer.
+    """
+
+    serializer_class = ProductSearchSerializer
 
 
 class BaseProductSearchView(APIView, ProductListMixin):
@@ -2063,7 +2091,7 @@ class BaseProductSearchView(APIView, ProductListMixin):
             if product_title:
                 query &= Q(product_title__icontains=product_title)
 
-            products = Product.objects.filter(query)
+            products = Product.objects.filter(query).distinct()
             if not products.exists():
                 return Response(
                     {"detail": ErrorMessage.PRODUCT_NOT_FOUND.value},
@@ -2071,9 +2099,7 @@ class BaseProductSearchView(APIView, ProductListMixin):
                 )
 
             sorted_qs = self.get_sorted_queryset(products, request)
-            data, paginator = self.paginate_and_serialize(
-                sorted_qs, request, use_direct_update=True
-            )
+            data, paginator = self.paginate_and_serialize(sorted_qs, request)
             response_data = _prepare_response_data(
                 products, data, product_code, product_title
             )
@@ -2127,7 +2153,9 @@ class ProductUsersFilterView(APIView, ProductListMixin):
     def get(self, request, *args, **kwargs) -> Response:
         try:
             query = self.build_query(request)
-            products = Product.objects.filter(query, is_latest=True, status="live")
+            products = Product.objects.filter(
+                query, is_latest=True, status="live"
+            ).distinct()
             sort_by = request.GET.get("sort_by", "product_title")
             if sort_by not in VALID_SORT_FIELDS:
                 sort_by = "product_title"
@@ -2229,7 +2257,10 @@ class ProductAdminFilterView(APIView, ProductListMixin):
     def get(self, request, *args, **kwargs) -> Response:
         try:
             query = self._build_filter_query(request)
-            products = Product.objects.filter(query)
+            products = Product.objects.filter(
+                query, is_latest=True, status="live"
+            ).distinct()
+
             sorted_qs = self.get_sorted_queryset(products, request)
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
             return paginator.get_paginated_response(data)
@@ -2269,7 +2300,7 @@ class ProgramProductsView(APIView, ProductListMixin):
             )
             .distinct()
             .prefetch_related("update_ref__diseases_ref", "update_ref__vaccination_ref")
-        )
+        ).distinct()
 
     def get(self, request, program_id):
         try:

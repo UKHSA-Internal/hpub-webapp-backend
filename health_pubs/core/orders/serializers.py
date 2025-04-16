@@ -4,6 +4,8 @@ from core.addresses.serializers import AddressSerializer
 from core.users.serializers import UserSerializer
 from rest_framework import serializers
 
+from core.utils.get_user_info import get_user_info
+
 from .models import Order, OrderItem
 
 
@@ -57,9 +59,8 @@ class OrderSerializer(serializers.ModelSerializer):
         ]
 
     def get_user_info(self, obj):
-        if obj.user_ref:
-            return UserSerializer(obj.user_ref).data
-        return None
+        request = self.context.get("request", None)
+        return get_user_info(obj, request)
 
     def get_address(self, obj):
         if obj.address_ref:

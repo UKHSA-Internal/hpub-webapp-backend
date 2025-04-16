@@ -37,7 +37,7 @@ class CustomTokenAuthentication(BaseAuthentication):
             unverified_payload = jwt.decode(
                 token, options={"verify_signature": False, "verify_aud": False}
             )
-            logger.info("Unverified token payload: %s", unverified_payload)
+            logger.debug("Unverified token payload: %s", unverified_payload)
 
             # If the token contains an issuer claim, we assume it's an Azure B2C token.
             if "iss" in unverified_payload:
@@ -91,8 +91,6 @@ class CustomTokenAuthentication(BaseAuthentication):
             raise AuthenticationFailed("Token has expired")
         except jwt.DecodeError:
             raise AuthenticationFailed("Invalid token")
-        except User.DoesNotExist:
-            raise AuthenticationFailed("User does not exist")
         except ValueError as e:
             logger.error("Authentication error: %s", e)
             raise AuthenticationFailed(str(e))

@@ -1,5 +1,7 @@
 import uuid
 import json
+import logging
+from venv import logger
 
 from core.audiences.serializers import AudienceSerializer
 from core.diseases.serializers import DiseaseSerializer
@@ -18,6 +20,8 @@ from .choices import (
     ALTERNATIVE_TYPE_CHOICE,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def parse_downloads(download_data):
     """
@@ -25,13 +29,25 @@ def parse_downloads(download_data):
     It attempts to decode the JSON data if it is a string and returns a dictionary
     with the expected structure.
     """
+
+    if download_data is None:
+        # Optionally log that there was no data provided.
+        logger.warning("No download_data provided; returning default values")
+        return {
+            "main_download_url": None,
+            "video_url": None,
+            "web_download_url": [],
+            "print_download_url": [],
+            "transcript_url": [],
+        }
     try:
         downloads = (
             json.loads(download_data)
             if isinstance(download_data, str)
             else download_data
         )
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        logger.error("Error parsing downloads data: %s", e)
         downloads = {}
 
     return {
@@ -250,9 +266,27 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
 
     def get_product_downloads(self, obj):
         """Return the formatted product_downloads using the shared helper."""
+        if obj.product_downloads is None:
+            # Return a default structure if product_downloads is None
+            return {
+                "main_download_url": None,
+                "video_url": None,
+                "web_download_url": [],
+                "print_download_url": [],
+                "transcript_url": [],
+            }
         return parse_downloads(obj.product_downloads)
 
     def to_representation(self, instance):
+        """
+        Return the serialized representation of the instance with sensitive fields removed for non-admin users.
+
+        :param instance: The model instance being serialized.
+        :type instance: Any
+        :return: A dictionary containing the serialized data. Sensitive fields are removed if the requesting user is not an admin.
+        :rtype: dict
+        """
+        # Call the parent class's to_representation method
         representation = super().to_representation(instance)
         # Remove PII for non-admin users.
         request = self.context.get("request", None)

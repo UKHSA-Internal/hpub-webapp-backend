@@ -39,7 +39,6 @@ from django.db import DatabaseError, transaction
 from django.db.models import Q
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404
-from django.utils import timezone
 from django.utils.text import slugify
 from django.views import View
 from django.core.exceptions import ImproperlyConfigured
@@ -1744,7 +1743,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         program_name = data["program_name"]
         product_id = data.get("product_id")
         tag = data.get("tag")
-        publish_date = data.get("publish_date") or timezone.now().date()
+        publish_date = data.get("publish_date") or None
 
         if not LanguagePage.objects.filter(language_id=language_id).exists():
             logger.warning("Language ID %s does not exist.", language_id)

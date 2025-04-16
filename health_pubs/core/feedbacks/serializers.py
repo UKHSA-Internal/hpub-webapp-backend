@@ -1,7 +1,7 @@
 import uuid
 from rest_framework import serializers
 
-from core.users.serializers import UserSerializer
+from core.utils.get_user_info import get_user_info
 from .models import Feedback
 
 
@@ -26,15 +26,7 @@ class FeedbackSerializer(serializers.ModelSerializer):
 
     def get_user_info(self, obj):
         request = self.context.get("request", None)
-        # Only return full user info if the requesting user's role is "admin"
-        if (
-            request
-            and hasattr(request, "user")
-            and getattr(request.user, "rol_ref", None)
-            and request.user.rol_ref.name.lower() == "admin"
-        ):
-            return UserSerializer(obj.user_ref).data
-        return None
+        return get_user_info(obj, request)
 
     def create(self, validated_data):
         # If feedback_id wasn't provided, auto-generate

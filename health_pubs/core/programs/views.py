@@ -363,4 +363,31 @@ class BulkProgramDeleteViewSet(viewsets.ViewSet):
             )
 
 
+class ProgramNameCheckViewSet(viewsets.ViewSet):
+    """
+    API endpoint to check the uniqueness of a given programme name.
+    The client sends a GET request with a query parameter `programme_name`,
+    and the endpoint returns a JSON response indicating if the name is unique.
+    """
+
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    @action(detail=False, methods=["get"], url_path="check")
+    def check_programme_name(self, request):
+        programme_name = request.query_params.get("programme_name")
+        if not programme_name:
+            return Response(
+                {"error": "The query parameter 'programme_name' is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Check case-insensitively if a program with the same name already exists.
+        exists = Program.objects.filter(programme_name__iexact=programme_name).exists()
+        return Response({"unique": not exists}, status=status.HTTP_200_OK)
+
+
+#
+
+
 #

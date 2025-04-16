@@ -2257,9 +2257,7 @@ class ProductAdminFilterView(APIView, ProductListMixin):
     def get(self, request, *args, **kwargs) -> Response:
         try:
             query = self._build_filter_query(request)
-            products = Product.objects.filter(
-                query, is_latest=True, status="live"
-            ).distinct()
+            products = Product.objects.filter(query).distinct()
 
             sorted_qs = self.get_sorted_queryset(products, request)
             data, paginator = self.paginate_and_serialize(sorted_qs, request)

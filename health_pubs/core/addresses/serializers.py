@@ -1,9 +1,8 @@
 import uuid
 
 from core.users.models import User
-from core.users.serializers import UserSerializer
 from rest_framework import serializers
-
+from core.utils.get_user_info import get_user_info
 from .models import Address
 
 
@@ -55,10 +54,8 @@ class AddressSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
     def get_user_info(self, obj):
-        if obj.user_ref:  # Check if a user reference exists
-            # Serialize and return user info
-            return UserSerializer(obj.user_ref).data
-        return None
+        request = self.context.get("request", None)
+        return get_user_info(obj, request)
 
     def validate(self, data):
         required_fields = ["address_line1", "city", "postcode", "country"]

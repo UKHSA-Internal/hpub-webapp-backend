@@ -1,24 +1,40 @@
 from datetime import datetime
 import secrets
 import string
-from core.orders.models import OrderItem
+from core.orders.models import OrderItem, Order
 
 
 def generate_order_confirmation(order_instance):
-    # Generate a unique confirmation number for the order
-    # The confirmation number is a combination of "FHR" and a random 5-character string
+    """
+    Generate a unique order confirmation number and format the order details.
+    Args:
+        order_instance (Order): The order instance for which to generate the confirmation.
+    Returns:
+        dict: A dictionary containing the formatted order details.
+    """
+    # Define allowed characters for random suffix generation
     allowed_chars = string.ascii_uppercase + string.digits
+
+    # Generate initial confirmation number
     random_suffix = "".join(secrets.choice(allowed_chars) for _ in range(5))
     confirmation_number = "FHR" + random_suffix
+
+    # Ensure the confirmation number is unique by querying existing orders
+    while Order.objects.filter(confirmation_number=confirmation_number).exists():
+        random_suffix = "".join(secrets.choice(allowed_chars) for _ in range(5))
+        confirmation_number = "FHR" + random_suffix
+
+    # Order status and confirmation timestamp setup
     order_status = "Submitted"  # Assuming the status is "Submitted" for all orders
     confirmation_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Building ordered products list in a table format
+    # Build the ordered products list in a table-like format
     items_table = "\n".join(
         f" - Item: {item.product_ref.title} - Quantity: {item.quantity}"
         for item in OrderItem.objects.filter(order_ref=order_instance)
     )
-    # Shipping address details
+
+    # Retrieve shipping address and user details
     user = order_instance.user_ref
     address = order_instance.address_ref
     shipping_address = {
@@ -34,7 +50,7 @@ def generate_order_confirmation(order_instance):
         "telephone": user.mobile_number or "-",
     }
 
-    # Construct the response object to match the email template format
+    # Construct and return the result as a dictionary matching the email template format
     result = {
         "confirmation_number": confirmation_number,
         "order_id": str(order_instance.order_id),

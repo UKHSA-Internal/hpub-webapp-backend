@@ -416,7 +416,7 @@ class UserSignUpView(APIView):
             httponly=True,
             secure=(not settings.DEBUG),
             samesite="Lax",  # or "Strict"/"None" based on frontend-backend setup
-            max_age=86400,  # 10 mins
+            max_age=86400,  # 1 day
         )
         return response
 

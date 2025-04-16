@@ -225,13 +225,12 @@ class AddressViewSet(viewsets.ModelViewSet):
             match_address_url, json=match_address_payload, headers=headers
         )
 
-        logger.info(
-            "Match Address Response: %s", match_response.json()["matchedAddresses"]
-        )
+        json_data = match_response.json()
+        logger.info("Match Address Response: %s", json_data.get("matchedAddresses", []))
         if match_response.status_code == 200:
             matched_addresses = [
                 addr
-                for addr in match_response.json().get("matchedAddresses", [])
+                for addr in json_data.get("matchedAddresses", [])
                 if addr.get("countryCode") in ["E", "England"]
                 and (addr.get("postcode").strip()).lower() == postcode.strip().lower()
                 and building_number.lower() in addr.get("addressString", "").lower()

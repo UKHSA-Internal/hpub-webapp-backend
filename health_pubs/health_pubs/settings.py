@@ -43,8 +43,12 @@ ALLOWED_HOSTS = ["localhost", "127.0.0.1", "testserver", "0.0.0.0", "*"]
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:5173",
+    "http://127.0.0.1:5173",
     HPUB_FRONT_END_URL,
 ]
+
+CORS_ALLOW_CREDENTIALS = True
+
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
     "x-session-id",
@@ -113,6 +117,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -120,7 +125,6 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "django.middleware.common.CommonMiddleware",
     "allauth.account.middleware.AccountMiddleware",
-    "corsheaders.middleware.CorsMiddleware",
 ]
 
 

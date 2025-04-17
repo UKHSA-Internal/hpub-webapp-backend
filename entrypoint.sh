@@ -48,14 +48,14 @@ echo "=============================="
 echo "Starting cron service..."
 service cron start
 
-# Create a cron job that runs the command daily at midnight
-echo "0 0 * * * python /app/manage.py check_upcoming_drafts" > /etc/cron.d/check_upcoming_drafts
+# Start cron and schedule the job at 7 AM container-local time
+echo "0 7 * * * python /app/manage.py check_upcoming_drafts" > /etc/cron.d/check_upcoming_drafts
 
 # Set proper permissions for the cron job file
 chmod 0644 /etc/cron.d/check_upcoming_drafts
 
 # Ensure the cron job is executed at the scheduled time
-echo "Cron job scheduled: 'python /app/manage.py check_upcoming_drafts' at midnight every day."
+echo "Cron job scheduled: 'python /app/manage.py check_upcoming_drafts' at 7AM every day."
 
 
 # -----------------------------------------------------------------------------

@@ -42,21 +42,23 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 4: Start the cron service and schedule the cron job for checking incomplete drafts every day
+# Step 4: Start the cron service and schedule the cron jobs
 # -----------------------------------------------------------------------------
-echo "=============================="
-echo "Starting cron service..."
-service cron start
-
-# Start cron and schedule the job at 7 AM container-local time
-echo "0 7 * * * python /app/manage.py check_upcoming_drafts" > /etc/cron.d/check_upcoming_drafts
-
-# Set proper permissions for the cron job file
+# ───────────────────────────────────────────────────────────────────────────────
+# Schedule: check upcoming drafts at 07:00
+# ───────────────────────────────────────────────────────────────────────────────
+echo "0 7 * * * root cd /app && python manage.py check_upcoming_drafts \
+    >> /var/log/check_upcoming_drafts.log 2>&1" > /etc/cron.d/check_upcoming_drafts
 chmod 0644 /etc/cron.d/check_upcoming_drafts
+echo "Scheduled: check_upcoming_drafts at 07:00 daily."
 
-# Ensure the cron job is executed at the scheduled time
-echo "Cron job scheduled: 'python /app/manage.py check_upcoming_drafts' at 7AM every day."
-
+# ───────────────────────────────────────────────────────────────────────────────
+# Schedule: publish scheduled products at 00:00
+# ───────────────────────────────────────────────────────────────────────────────
+echo "0 0 * * * root cd /app && python manage.py publish_scheduled_products \
+    >> /var/log/publish_scheduled_products.log 2>&1" > /etc/cron.d/publish_scheduled_products
+chmod 0644 /etc/cron.d/publish_scheduled_products
+echo "Scheduled: publish_scheduled_products at 00:00 daily."
 
 # -----------------------------------------------------------------------------
 # Step 5: Start the Gunicorn WSGI server

@@ -2,6 +2,7 @@ from django.urls import path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
+    IncompleteProductsView,
     ProductAdminFilterView,
     ProductAdminListView,
     ProductCreateView,
@@ -60,5 +61,10 @@ urlpatterns = [
         "<str:program_id>/products",
         ProgramProductsView.as_view(),
         name="program-products",
+    ),
+    path(
+        "incomplete-products/",
+        IncompleteProductsView.as_view(),
+        name="incomplete-products",
     ),
 ] + router.urls

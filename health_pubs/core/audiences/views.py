@@ -11,7 +11,7 @@ from django.utils.timezone import now
 from rest_framework import status, viewsets
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from wagtail.models import Page
 
@@ -242,6 +242,30 @@ class AudienceBulkDeleteViewSet(viewsets.ViewSet):
                 {"error": f"Failed to delete entries: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+class AudienceNameCheckViewSet(viewsets.ViewSet):
+    """
+    API endpoint to check the uniqueness of a given audience name.
+    The client sends a GET request with a query parameter `audience_name`,
+    and the endpoint returns a JSON response indicating if the name is unique.
+    """
+
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    @action(detail=False, methods=["get"], url_path="check")
+    def check_audience_name(self, request):
+        audience_name = request.query_params.get("audience_name")
+        if not audience_name:
+            return Response(
+                {"error": "The query parameter 'audience_name' is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Check case-insensitively if a audience with the same name already exists.
+        exists = Audience.objects.filter(name__iexact=audience_name).exists()
+        return Response({"unique": not exists}, status=status.HTTP_200_OK)
 
 
 #

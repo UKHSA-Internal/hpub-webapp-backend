@@ -218,4 +218,28 @@ class DiseaseListViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+class DiseaseNameCheckViewSet(viewsets.ViewSet):
+    """
+    API endpoint to check the uniqueness of a given disease name.
+    The client sends a GET request with a query parameter `disease_name`,
+    and the endpoint returns a JSON response indicating if the name is unique.
+    """
+
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    @action(detail=False, methods=["get"], url_path="check")
+    def check_disease_name(self, request):
+        disease_name = request.query_params.get("disease_name")
+        if not disease_name:
+            return Response(
+                {"error": "The query parameter 'disease_name' is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Check case-insensitively if a disease with the same name already exists.
+        exists = Disease.objects.filter(name__iexact=disease_name).exists()
+        return Response({"unique": not exists}, status=status.HTTP_200_OK)
+
+
 #

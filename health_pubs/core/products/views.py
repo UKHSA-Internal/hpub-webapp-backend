@@ -5,6 +5,8 @@ import re
 import uuid
 from typing import Optional, Union
 from urllib.parse import unquote
+from django.utils import timezone
+from datetime import timedelta
 
 import pandas as pd
 from core.audiences.models import Audience
@@ -2337,6 +2339,41 @@ class ProgramProductsView(APIView, ProductListMixin):
                 {"detail": UNEXPECTED_ERROR_MSG},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+class IncompleteProductsView(View):
+    def get(self, request, *args, **kwargs):
+        # Get the current date and the target date range
+        current_date = timezone.now().date()
+        target_date = current_date + timedelta(days=7)
+
+        # Query products that are in Draft status and have a publish_date within the next 7 days
+        products = Product.objects.filter(
+            status="draft",
+            publish_date__gte=current_date,
+            publish_date__lte=target_date,
+        )
+
+        # Initialize the ProductStatusUpdateView for field checking
+        status_update_view = ProductStatusUpdateView()
+
+        incomplete_products = []
+
+        # Iterate over the products and check for incomplete fields
+        for product in products:
+            missing_fields = status_update_view.check_required_fields(product)
+
+            # If there are missing fields, append the product to the list
+            if missing_fields:
+                incomplete_products.append(
+                    {
+                        "product_title": product.product_title,
+                        "product_code": product.product_code,
+                    }
+                )
+
+        # Return the data as JSON
+        return JsonResponse(incomplete_products, safe=False)
 
 
 #

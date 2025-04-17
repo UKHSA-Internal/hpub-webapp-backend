@@ -6,6 +6,7 @@ from .views import (
     WhereToUseBulkUploadViewSet,
     WhereToUseCreateViewSet,
     WhereToUseListViewSet,
+    WhereToUseNameCheckViewSet,
 )
 
 router = DefaultRouter()
@@ -14,6 +15,9 @@ router.register(
 )
 router.register(
     r"where-to-use/list", WhereToUseListViewSet, basename="where-to-use-list"
+)
+router.register(
+    r"where-to-use/name", WhereToUseNameCheckViewSet, basename="where-to-use-name-check"
 )
 router.register(
     r"where-to-use/bulk-upload",

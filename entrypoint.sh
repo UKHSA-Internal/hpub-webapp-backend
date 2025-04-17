@@ -6,7 +6,7 @@ echo "== Starting entrypoint.sh   =="
 echo "=============================="
 echo "DB USER: $DB_USER"
 # -----------------------------------------------------------------------------
-# Step 2: List current migration status
+# Step 1: List current migration status
 # -----------------------------------------------------------------------------
 echo "=============================="
 echo "Listing migrations..."
@@ -17,7 +17,7 @@ migrations_output=$(python manage.py showmigrations --verbosity=2 --no-color 2>&
 }
 echo "$migrations_output"
 # -----------------------------------------------------------------------------
-# Step 3: Count pending migrations
+# Step 2: Count pending migrations
 # -----------------------------------------------------------------------------
 # Remove any ANSI color codes (just in case)
 clean_output=$(echo "$migrations_output" | sed 's/\x1B\[[0-9;]*[a-zA-Z]//g')
@@ -26,7 +26,7 @@ pending_count=$(echo "$clean_output" | grep -E -c "^\s*\[ \]")
 echo "Number of pending migrations: $pending_count"
 
 # -----------------------------------------------------------------------------
-# Step 4: Apply pending migrations if needed
+# Step 3: Apply pending migrations if needed
 # -----------------------------------------------------------------------------
 if [ "$pending_count" -gt 0 ]; then
   echo "=============================="
@@ -40,6 +40,23 @@ if [ "$pending_count" -gt 0 ]; then
 else
   echo "No pending migrations found. Skipping migrate step."
 fi
+
+# -----------------------------------------------------------------------------
+# Step 4: Start the cron service and schedule the cron job for checking incomplete drafts every day
+# -----------------------------------------------------------------------------
+echo "=============================="
+echo "Starting cron service..."
+service cron start
+
+# Create a cron job that runs the command daily at midnight
+echo "0 0 * * * python /app/manage.py check_upcoming_drafts" > /etc/cron.d/check_upcoming_drafts
+
+# Set proper permissions for the cron job file
+chmod 0644 /etc/cron.d/check_upcoming_drafts
+
+# Ensure the cron job is executed at the scheduled time
+echo "Cron job scheduled: 'python /app/manage.py check_upcoming_drafts' at midnight every day."
+
 
 # -----------------------------------------------------------------------------
 # Step 5: Start the Gunicorn WSGI server

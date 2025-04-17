@@ -2371,6 +2371,7 @@ class IncompleteProductsView(View):
             if missing_fields:
                 incomplete_products.append(
                     {
+                        "tag": product.tag,
                         "product_title": product.product_title,
                         "product_code": product.product_code,
                     }

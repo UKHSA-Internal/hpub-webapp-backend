@@ -7,15 +7,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TZ=Europe/London
 
 # Install system dependencies (including tzdata for timezone support)
-RUN apt update && apt install -y --no-install-recommends \
-    libmagic1 \
-    cron \
-    tzdata \
-    && apt clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Ensure container uses the right timezone
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+RUN apt update && apt install -y cron tzdata \
+    # Link the container’s timezone so cron runs in Europe/London time
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
+    && echo $TZ > /etc/timezone \
+    # Remove package lists to reduce image size
+    && apt clean && rm -rf /var/lib/apt/lists/*
 
 # Set the working directory in the container
 WORKDIR /app

@@ -214,6 +214,7 @@ class Product(Page):
     language_name = models.CharField(max_length=30)
 
     file_url = models.URLField(max_length=255, null=True, blank=True)
+    suppress_event = models.BooleanField(default=False)
 
     # Reference to ProductUpdate (optional)
     update_ref = models.OneToOneField(
@@ -245,6 +246,7 @@ class Product(Page):
         FieldPanel("file_url"),
         FieldPanel("update_ref"),
         FieldPanel("tag"),
+        FieldPanel("suppress_event"),
     ]
 
     def save(self, *args, **kwargs):

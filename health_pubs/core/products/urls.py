@@ -24,6 +24,11 @@ router = DefaultRouter()
 router.register(r"products", ProductViewSet, basename="products")
 
 urlpatterns = [
+    path(
+        "incomplete-products/",
+        IncompleteProductsView.as_view(),
+        name="incomplete-products",
+    ),
     path("create/", ProductCreateView.as_view(), name="create-product"),
     path("admin/all/", ProductAdminListView.as_view(), name="list-products-admin"),
     path("users/all/", ProductUsersListView.as_view(), name="list-products-user"),
@@ -61,10 +66,5 @@ urlpatterns = [
         "<str:program_id>/products",
         ProgramProductsView.as_view(),
         name="program-products",
-    ),
-    path(
-        "incomplete-products",
-        IncompleteProductsView.as_view(),
-        name="incomplete-products",
     ),
 ] + router.urls

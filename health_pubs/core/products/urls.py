@@ -63,7 +63,7 @@ urlpatterns = [
         name="program-products",
     ),
     path(
-        "incomplete-products/",
+        "incomplete-products",
         IncompleteProductsView.as_view(),
         name="incomplete-products",
     ),

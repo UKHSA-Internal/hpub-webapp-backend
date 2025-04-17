@@ -1,6 +1,7 @@
 import os
 import sys
 import uuid
+from django.utils import timezone
 
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -253,6 +254,13 @@ class Product(Page):
                 " ", ""
             )
         super().save(*args, **kwargs)
+
+    def is_due_to_publish(self):
+        return (
+            self.status == "draft"
+            and self.publish_date is not None
+            and self.publish_date <= timezone.now()
+        )
 
     def __str__(self):
         return self.product_title

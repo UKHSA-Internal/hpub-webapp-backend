@@ -2353,6 +2353,10 @@ class IncompleteProductsView(View):
             publish_date__gte=current_date,
             publish_date__lte=target_date,
         )
+        logger.info(
+            "Found %d products in Draft status with publish_date within the next 7 days",
+            products.count(),
+        )
 
         # Initialize the ProductStatusUpdateView for field checking
         status_update_view = ProductStatusUpdateView()

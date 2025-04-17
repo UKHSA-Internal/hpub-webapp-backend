@@ -299,7 +299,7 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
 
 class ProductSerializer(serializers.ModelSerializer):
     status = serializers.CharField(max_length=50, default="draft")
-    suppress_event = serializers.BooleanField(default=False)
+    suppress_event = serializers.BooleanField(default=False, required=False)
     product_key = serializers.CharField(max_length=50)
     program_id = serializers.SlugRelatedField(
         slug_field="program_id", queryset=Program.objects.all()

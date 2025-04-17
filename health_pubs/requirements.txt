@@ -41,6 +41,7 @@ distro==1.9.0
 dj-rest-auth==7.0.0
 django==5.1.4
 django-allauth==65.1.0
+django-crontab>=0.7.1
 django-cors-headers==4.6.0
 django-extensions==3.2.3
 django-filter==24.3

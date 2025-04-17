@@ -5,10 +5,12 @@ from django.core.cache import caches
 from django.db import transaction
 from core.products.models import Product
 from core.products.serializers import ProductUpdateSerializer
+from core.utils.cron_lock import singleton_cron
 
 logger = logging.getLogger(__name__)
 
 
+@singleton_cron(lock_id=20240415)
 def _find_missing_fields(product):
     missing = []
     for f in ["product_title", "language_id", "program_id", "update_ref"]:

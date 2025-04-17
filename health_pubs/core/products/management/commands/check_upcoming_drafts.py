@@ -7,6 +7,7 @@ from django.utils import timezone
 
 from core.products.models import Product
 from core.products.views import ProductStatusUpdateView
+from core.utils.cron_lock import singleton_cron
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 class Command(BaseCommand):
     help = "Find draft products with missing fields and publish_date within the next 7 days."
 
+    @singleton_cron(lock_id=20250417)
     def handle(self, *args, **options):
         today = timezone.now().date()
         deadline = today + timedelta(days=7)

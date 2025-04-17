@@ -1051,7 +1051,7 @@ class ProductStatusUpdateView(View):
 
     ALLOWED_TRANSITIONS = {
         "draft": ["live", "withdrawn"],
-        "live": ["archived", "withdrawn"],
+        "live": ["archived", "withdrawn", "draft"],
         "archived": ["withdrawn"],
     }
 
@@ -1082,6 +1082,12 @@ class ProductStatusUpdateView(View):
                 return validation
             new_status = validation
 
+            # if we’re moving from live → draft, set suppress_event so no signals fire
+            if product.status == "live" and new_status == "draft":
+                product.suppress_event = True
+                logger.info(
+                    f"Moving product {product.product_code} live→draft; suppress_event set to True"
+                )
             product.status = new_status
 
             # If transitioning to "live" and publish_date is not already set, update it to today's date.
@@ -1479,6 +1485,7 @@ class ProductPatchView(ErrorHandlingMixin, View):
         For other product types, the standard required downloads are enforced.
         """
         tag = data.get("tag", "").lower()
+        logger.info("data: %s", data)
 
         # For order-only, require only the main_download.
         if tag == "order-only":
@@ -1513,10 +1520,14 @@ class ProductPatchView(ErrorHandlingMixin, View):
             "GIF": ["main_download", "web_download"],
             "Slides": ["main_download", "web_download"],
         }
+
         # Check if the product type is in the required downloads.
         if product_type in required:
+            logger.info("Product type found in required downloads: %s", product_type)
             # Make a copy to modify the required keys.
             required_downloads = required[product_type].copy()
+            logger.info("required_downloads: %s", required_downloads)
+            logger.info("tag: %s", tag)
             # For download-only products, remove 'print_download' from the required keys.
             if tag == "download-only" and "print_download" in required_downloads:
                 required_downloads.remove("print_download")
@@ -1527,12 +1538,37 @@ class ProductPatchView(ErrorHandlingMixin, View):
                 )
 
     def initialize_file_urls(self, product_downloads: dict) -> dict:
+        """
+        Pull out just the raw URL strings (so later code can safely do .split('.'))
+        whether the user passed ["https://…", …] or [{"URL": "https://…", …}, …].
+        """
+
+        def extract_str(key):
+            raw = product_downloads.get(key, "")
+            if isinstance(raw, dict):
+                return raw.get("URL", "")
+            return raw or ""
+
+        def extract_list(key):
+            raw = product_downloads.get(key, [])
+            if not isinstance(raw, list):
+                return []
+            normalized = []
+            for item in raw:
+                if isinstance(item, dict):
+                    url = item.get("URL")
+                    if url:
+                        normalized.append(url)
+                elif isinstance(item, str):
+                    normalized.append(item)
+            return normalized
+
         return {
-            "main_download_url": product_downloads.get("main_download", ""),
-            "web_download_url": product_downloads.get("web_download", []),
-            "print_download_url": product_downloads.get("print_download", []),
-            "transcript_url": product_downloads.get("transcript", []),
-            "video_url": product_downloads.get("video_url", ""),
+            "main_download_url": extract_str("main_download"),
+            "web_download_url": extract_list("web_download"),
+            "print_download_url": extract_list("print_download"),
+            "transcript_url": extract_list("transcript"),
+            "video_url": extract_str("video_url"),
         }
 
     def validate_file_extensions(self, file_urls: dict) -> dict:
@@ -1571,16 +1607,23 @@ class ProductPatchView(ErrorHandlingMixin, View):
                 "xlsx",
             ],
         }
-        if file_urls["main_download_url"]:
-            ext = file_urls["main_download_url"].split(".")[-1]
+
+        # single string
+        main = file_urls["main_download_url"]
+        if main:
+            ext = main.rsplit(".", 1)[-1].lower()
             if ext not in allowed["main_download_url"]:
                 file_urls["main_download_url"] = ""
+
+        # lists
         for key in ["web_download_url", "print_download_url", "transcript_url"]:
-            file_urls[key] = [
-                url
-                for url in file_urls[key]
-                if url.split(".")[-1] in allowed.get(key, [])
-            ]
+            filtered = []
+            for url in file_urls[key]:
+                ext = url.rsplit(".", 1)[-1].lower()
+                if ext in allowed[key]:
+                    filtered.append(url)
+            file_urls[key] = filtered
+
         return file_urls
 
     def add_file_metadata(self, file_urls: dict) -> dict:

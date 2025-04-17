@@ -1995,6 +1995,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
                     program_name=data["program_name"],
                     tag=data["tag"],
                     publish_date=data.get("publish_date"),
+                    suppress_event=False,
                 )
                 parent_page.add_child(instance=product_instance)
                 logger.info("Product instance created successfully.")

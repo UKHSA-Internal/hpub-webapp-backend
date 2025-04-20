@@ -4,15 +4,17 @@ FROM python:3.12-slim
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    TZ=Europe/London
+    TZ=Europe/London \
+    DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies (including tzdata for timezone support)
-RUN apt update && apt install -y cron tzdata \
-    # Link the container’s timezone so cron runs in Europe/London time
+# Install only what we need (cron + tzdata), in Europe/London without prompts,
+# then clean up to keep the image small.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cron tzdata \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo $TZ > /etc/timezone \
-    # Remove package lists to reduce image size
-    && apt clean && rm -rf /var/lib/apt/lists/*
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set the working directory in the container
 WORKDIR /app

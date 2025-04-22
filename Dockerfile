@@ -10,6 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Install only what we need (cron + tzdata), in Europe/London without prompts,
 # then clean up to keep the image small.
 RUN apt-get update \
+    && libmagic1 \
     && apt-get install -y --no-install-recommends cron tzdata \
     && ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime \
     && echo "$TZ" > /etc/timezone \

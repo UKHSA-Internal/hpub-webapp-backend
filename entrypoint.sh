@@ -55,7 +55,7 @@ echo "Scheduled: check_upcoming_drafts at 07:00 daily."
 # ───────────────────────────────────────────────────────────────────────────────
 # Schedule: publish scheduled products at 00:00
 # ───────────────────────────────────────────────────────────────────────────────
-echo "0 0 * * * root cd /app && python manage.py publish_scheduled_products \
+echo "13 45 * * * root cd /app && python manage.py publish_scheduled_products \
     >> /var/log/publish_scheduled_products.log 2>&1" > /etc/cron.d/publish_scheduled_products
 chmod 0644 /etc/cron.d/publish_scheduled_products
 echo "Scheduled: publish_scheduled_products at 00:00 daily."

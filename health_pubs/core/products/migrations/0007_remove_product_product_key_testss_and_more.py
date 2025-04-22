@@ -9,14 +9,6 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RemoveField(
-            model_name="product",
-            name="product_key_testss",
-        ),
-        migrations.RemoveField(
-            model_name="product",
-            name="product_key_testsss",
-        ),
         migrations.AddField(
             model_name="product",
             name="suppress_event",

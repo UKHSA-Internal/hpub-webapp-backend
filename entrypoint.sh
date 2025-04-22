@@ -55,10 +55,10 @@ echo "Scheduled: check_upcoming_drafts at 07:00 daily."
 # ───────────────────────────────────────────────────────────────────────────────
 # Schedule: publish scheduled products at 00:00
 # ───────────────────────────────────────────────────────────────────────────────
-echo "25 17 * * * root cd /app && python manage.py publish_scheduled_products \
+echo "50 16 * * * root cd /app && python manage.py publish_scheduled_products \
     >> /var/log/publish_scheduled_products.log 2>&1" > /etc/cron.d/publish_scheduled_products
 chmod 0644 /etc/cron.d/publish_scheduled_products
-echo "Scheduled: publish_scheduled_products at 25:17 daily."
+echo "Scheduled: publish_scheduled_products at 16:50 GMT daily."
 
 # -----------------------------------------------------------------------------
 # Step 5: Start the Gunicorn WSGI server

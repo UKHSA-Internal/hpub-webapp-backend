@@ -1,7 +1,6 @@
 from datetime import datetime
-import secrets
-import string
-from core.orders.models import OrderItem, Order
+from .confirmation_generator import generate_confirmation_number
+from core.orders.models import OrderItem
 
 
 def generate_order_confirmation(order_instance):
@@ -12,17 +11,8 @@ def generate_order_confirmation(order_instance):
     Returns:
         dict: A dictionary containing the formatted order details.
     """
-    # Define allowed characters for random suffix generation
-    allowed_chars = string.ascii_uppercase + string.digits
-
-    # Generate initial confirmation number
-    random_suffix = "".join(secrets.choice(allowed_chars) for _ in range(5))
-    confirmation_number = "FHR" + random_suffix
-
-    # Ensure the confirmation number is unique by querying existing orders
-    while Order.objects.filter(confirmation_number=confirmation_number).exists():
-        random_suffix = "".join(secrets.choice(allowed_chars) for _ in range(5))
-        confirmation_number = "FHR" + random_suffix
+    # Generate unique confirmation number
+    confirmation_number = generate_confirmation_number()
 
     # Order status and confirmation timestamp setup
     order_status = "Submitted"  # Assuming the status is "Submitted" for all orders

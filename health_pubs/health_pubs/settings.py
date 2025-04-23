@@ -145,7 +145,7 @@ REST_FRAMEWORK = {
 CRONJOBS = [
     ("0 7 * * *", "core.products.cron.CheckDraftProductsCronJob.do"),  # 07:00 daily
     (
-        "50 16 * * *",
+        "0 0 * * *",
         "core.products.cron.PublishScheduledProductsCronJob.do",
     ),  # 00:00 daily
 ]

@@ -4,18 +4,17 @@ FROM python:3.12-slim
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    TZ=Europe/London
+    TZ=Europe/London \
+    DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies (including tzdata for timezone support)
-RUN apt update && apt install -y --no-install-recommends \
-    libmagic1 \
-    cron \
-    tzdata \
-    && apt clean \
+# Install only what we need (cron + tzdata), in Europe/London without prompts,
+# then clean up to keep the image small.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cron libmagic-dev libmagic1 tzdata \
+    && ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime \
+    && echo "$TZ" > /etc/timezone \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-
-# Ensure container uses the right timezone
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # Set the working directory in the container
 WORKDIR /app

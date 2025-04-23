@@ -1954,6 +1954,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
                     program_name=data["program_name"],
                     tag=data["tag"],
                     publish_date=data.get("publish_date"),
+                    suppress_event=False,
                 )
                 parent_page.add_child(instance=product_instance)
                 logger.info("Product instance created successfully.")
@@ -2353,6 +2354,10 @@ class IncompleteProductsView(View):
             publish_date__gte=current_date,
             publish_date__lte=target_date,
         )
+        logger.info(
+            "Found %d products in Draft status with publish_date within the next 7 days",
+            products.count(),
+        )
 
         # Initialize the ProductStatusUpdateView for field checking
         status_update_view = ProductStatusUpdateView()
@@ -2367,6 +2372,7 @@ class IncompleteProductsView(View):
             if missing_fields:
                 incomplete_products.append(
                     {
+                        "tag": product.tag,
                         "product_title": product.product_title,
                         "product_code": product.product_code,
                     }

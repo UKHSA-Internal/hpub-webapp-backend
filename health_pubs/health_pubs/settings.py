@@ -63,6 +63,7 @@ CSRF_COOKIE_SECURE = False
 # Application definition
 
 INSTALLED_APPS = [
+    "django_crontab",
     "django.contrib.sites",
     "corsheaders",
     "rest_framework.authtoken",
@@ -141,6 +142,13 @@ REST_FRAMEWORK = {
     ],
 }
 
+CRONJOBS = [
+    ("0 7 * * *", "core.products.cron.CheckDraftProductsCronJob.do"),  # 07:00 daily
+    (
+        "0 0 * * *",
+        "core.products.cron.PublishScheduledProductsCronJob.do",
+    ),  # 00:00 daily
+]
 
 ROOT_URLCONF = "health_pubs.urls"
 

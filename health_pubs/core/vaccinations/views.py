@@ -112,7 +112,7 @@ class VaccinationCreateViewSet(viewsets.ModelViewSet):
     def _get_or_create_parent_page_or_error(self):
         try:
             return self._get_or_create_parent_page()
-        except Exception as e:
+        except Exception:
             raise ValidationError({"error": "Error creating/retrieving parent page."})
 
 
@@ -153,3 +153,30 @@ class VaccinationDeleteViewSet(viewsets.ViewSet):
                 {"error": "Failed to delete all vaccinations."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+class VaccinationNameCheckViewSet(viewsets.ViewSet):
+    """
+    API endpoint to check the uniqueness of a given vaccination name.
+    The client sends a GET request with a query parameter `vaccination_name`,
+    and the endpoint returns a JSON response indicating if the name is unique.
+    """
+
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    @action(detail=False, methods=["get"], url_path="check")
+    def check_vaccination_name(self, request):
+        vaccination_name = request.query_params.get("vaccination_name")
+        if not vaccination_name:
+            return Response(
+                {"error": "The query parameter 'vaccination_name' is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Check case-insensitively if a vaccination with the same name already exists.
+        exists = Vaccination.objects.filter(name__iexact=vaccination_name).exists()
+        return Response({"unique": not exists}, status=status.HTTP_200_OK)
+
+
+#

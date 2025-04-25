@@ -6,11 +6,15 @@ from .views import (
     AudienceBulkUploadViewSet,
     AudienceCreateViewSet,
     AudienceListViewSet,
+    AudienceNameCheckViewSet,
 )
 
 router = DefaultRouter()
 router.register(r"audiences/create", AudienceCreateViewSet, basename="audience-create")
 router.register(r"audiences/list", AudienceListViewSet, basename="audience-list")
+router.register(
+    r"audiences/name", AudienceNameCheckViewSet, basename="audience-name-check"
+)
 router.register(
     r"audiences/bulk-upload", AudienceBulkUploadViewSet, basename="audience-bulk-upload"
 )

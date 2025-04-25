@@ -321,7 +321,7 @@ class ProductSerializer(serializers.ModelSerializer):
         ],
         required=True,
     )
-    suppress_events = serializers.BooleanField(default=False, required=False)
+    suppress_event = serializers.BooleanField(default=False, required=False)
 
     update_ref = ProductUpdateSerializer(read_only=True)
     product_code_no_dashes = serializers.CharField(read_only=True)

@@ -1398,7 +1398,9 @@ class ProductPatchView(ErrorHandlingMixin, View):
         product_downloads = data.get("product_downloads", {})
 
         # Process file URLs based solely on the input data (not the product table)
-        file_urls = self.process_file_urls(product_type, data, product_downloads)
+        file_urls = self.process_file_urls(
+            product_type, data, product_downloads, product.tag
+        )
 
         # Validate date fields based on provided choices
         available_from_choice = data.get("available_from_choice")
@@ -1455,7 +1457,7 @@ class ProductPatchView(ErrorHandlingMixin, View):
                 )
 
     def process_file_urls(
-        self, product_type: str, data: dict, product_downloads: dict
+        self, product_type: str, data: dict, product_downloads: dict, product_tag: str
     ) -> dict:
         """
         Process file URLs by validating required downloads (if provided), initializing URLs,
@@ -1471,14 +1473,16 @@ class ProductPatchView(ErrorHandlingMixin, View):
                 raise ValidationError("Invalid JSON format for product_downloads")
 
         # Validate based on the input payload—not the product table.
-        self.validate_required_downloads(product_type, data, product_downloads)
+        self.validate_required_downloads(
+            product_type, data, product_downloads, product_tag
+        )
 
         file_urls = self.initialize_file_urls(product_downloads)
         file_urls = self.validate_file_extensions(file_urls)
         return self.add_file_metadata(file_urls)
 
     def validate_required_downloads(
-        self, product_type: str, data: dict, product_downloads: dict
+        self, product_type: str, data: dict, product_downloads: dict, product_tag: str
     ):
         """
         Validates that all required downloads are present.
@@ -1486,8 +1490,12 @@ class ProductPatchView(ErrorHandlingMixin, View):
         For download-only products, the 'print_download' requirement will be ignored while validating.
         For other product types, the standard required downloads are enforced.
         """
-        tag = data.get("tag", "").lower()
-        logger.info("data: %s", data)
+        tag = product_tag.lower()
+        logger.info(
+            "Validating required downloads for product_type: %s, tag: %s",
+            product_type,
+            tag,
+        )  # for debugging
 
         # For order-only, require only the main_download.
         if tag == "order-only":
@@ -1522,14 +1530,10 @@ class ProductPatchView(ErrorHandlingMixin, View):
             "GIF": ["main_download", "web_download"],
             "Slides": ["main_download", "web_download"],
         }
-
         # Check if the product type is in the required downloads.
         if product_type in required:
-            logger.info("Product type found in required downloads: %s", product_type)
             # Make a copy to modify the required keys.
             required_downloads = required[product_type].copy()
-            logger.info("required_downloads: %s", required_downloads)
-            logger.info("tag: %s", tag)
             # For download-only products, remove 'print_download' from the required keys.
             if tag == "download-only" and "print_download" in required_downloads:
                 required_downloads.remove("print_download")

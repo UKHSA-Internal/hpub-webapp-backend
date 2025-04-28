@@ -68,7 +68,6 @@ from .serializers import (
 )
 from django.core.serializers.json import DjangoJSONEncoder
 
-
 logger = logging.getLogger(__name__)
 
 PRODUCT_CODE_PATTERN = r"^[A-Za-z0-9_-]+$"
@@ -93,64 +92,72 @@ VALID_SORT_FIELDS = [
 ]
 
 
-def generate_product_key(last_key=None):
+_DIGITS = list("123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_BASE = len(_DIGITS)
+
+
+def generate_product_key(last_key: str | None) -> str:
     """
-    Generates the next product_key in sequence from 1-9, then A-Z.
-
-    Args:
-        last_key (str): The last used product_key. If None, starts with '1'.
-
-    Returns:
-        str: The next product_key.
+    Increments a 'base-35' number whose digits run 1–9, A–Z.
+    If last_key is None, returns '1'. Otherwise rolls over
+    so that '9'→'A', 'Z'→'11', '1Z'→'21', etc.
     """
-    if last_key is None:
-        return "1"  # Start with '1' if no last_key is provided
+    if not last_key:
+        return _DIGITS[0]
 
-    # Handle single digits 1-9
-    if last_key.isdigit() and int(last_key) < 9:
-        return str(int(last_key) + 1)
+    # turn into list of integer positions
+    try:
+        positions = [_DIGITS.index(ch) for ch in last_key]
+    except ValueError:
+        raise ValueError(f"Invalid last_key: {last_key!r}")
 
-    # Handle transition from 9 to A
-    if last_key == "9":
-        return "A"
+    # add one, carrying through
+    i = len(positions) - 1
+    carry = 1
+    while i >= 0 and carry:
+        positions[i] += carry
+        if positions[i] >= _BASE:
+            positions[i] = 0
+            carry = 1
+        else:
+            carry = 0
+        i -= 1
 
-    # Handle letters A-Z
-    if last_key.isalpha() and last_key != "Z":
-        return chr(ord(last_key) + 1)
+    # if we still have a carry, prepend a new '1' digit
+    if carry:
+        positions.insert(0, 0)
 
-    # If last_key was 'Z', raise an exception (or handle the overflow if necessary)
-    if last_key == "Z":
-        raise ValueError("No more product keys available. Maximum limit 'Z' reached.")
-
-    raise ValueError(f"Invalid last_key: {last_key}")
+    return "".join(_DIGITS[pos] for pos in positions)
 
 
-def get_next_product_key(program_name):
+def get_next_product_key(program_name: str) -> str:
     """
-    Retrieves the next available product_key for a given program_id.
-
-    Args:
-        program_id (int): The ID of the program to generate a product_key for.
-
-    Returns:
-        str: The next available product_key.
+    Looks up all existing keys for this program, finds the
+    max in our custom ordering, and returns the next one.
     """
-
-    last_product = (
-        Product.objects.filter(program_name=program_name)
-        .order_by("-product_key")
-        .first()
+    # pull all keys into Python so we can do a proper numeric max
+    keys = list(
+        Product.objects.filter(program_name=program_name).values_list(
+            "product_key", flat=True
+        )
     )
-    logging.info("last product:", last_product)
 
-    if last_product:
-        last_key = last_product.product_key
-    else:
-        last_key = None  # No products exist yet for this program
-
-    next_key = generate_product_key(last_key)
-    logging.info(f"Last Key: {last_key}, Next Key: {next_key}")  # Debug print
+    last = max(keys, key=lambda k: _key_to_int(k)) if keys else None
+    next_key = generate_product_key(last)
+    logging.info("get_next_product_key: %r → %r", last, next_key)
     return next_key
+
+
+def _key_to_int(key: str) -> int:
+    """
+    Converts a key like '1', '9', 'A', 'Z', '11', '1Z', etc.
+    into a plain integer so we can compare them properly.
+    """
+    value = 0
+    for ch in key:
+        idx = _DIGITS.index(ch)
+        value = value * _BASE + idx
+    return value
 
 
 def get_next_version_number(program_id, product_key, iso_language_code):

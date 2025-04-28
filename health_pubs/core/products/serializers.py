@@ -283,9 +283,21 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
         request = self.context.get("request", None)
         if request and hasattr(request, "user"):
             user = request.user
-            role_name = getattr(user.role_ref, "name", "No role assigned")
-            logger.info(f"User '{user.email}' with role '{role_name}' accessed fields.")
-            if not user.role_ref or user.role_ref.name.lower() != "admin":
+            logger.info(f"User: {user}")
+            logger.info(f"Request: {request}")
+            if user.is_authenticated:
+                role_name = getattr(user.role_ref, "name", "No role assigned")
+                logger.info(
+                    f"User '{user.email}' with role '{role_name}' accessed fields."
+                )
+                if not user.role_ref or user.role_ref.name.lower() not in [
+                    "admin",
+                    "user",
+                ]:
+                    data.pop("order_referral_email_address", None)
+                    data.pop("stock_owner_email_address", None)
+            else:
+                logger.warning("Anonymous user accessed fields.")
                 data.pop("order_referral_email_address", None)
                 data.pop("stock_owner_email_address", None)
         else:

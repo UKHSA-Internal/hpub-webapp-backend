@@ -29,6 +29,7 @@ from core.utils.generate_s3_presigned_url import (
     generate_inline_presigned_urls,
     generate_presigned_urls,
 )
+from rest_framework.views import APIView
 
 from core.utils.product_recommendation_system import get_recommended_products
 from core.vaccinations.models import Vaccination
@@ -953,7 +954,7 @@ class ProductDetailView(ErrorHandlingMixin, PresignedUrlMixin, viewsets.ViewSet)
     Note: This example uses ViewSet for consistency, but you can also use a plain View.
     """
 
-    authentication_classes = [SessionAuthentication]
+    authentication_classes = [CustomTokenAuthentication, SessionAuthentication]
     permission_classes = [AllowAny]
 
     def retrieve(self, request, product_code=None, *args, **kwargs):
@@ -969,7 +970,7 @@ class ProductDetailView(ErrorHandlingMixin, PresignedUrlMixin, viewsets.ViewSet)
                 status_code=status.HTTP_404_NOT_FOUND,
             )
 
-        serializer = ProductSerializer(product)
+        serializer = ProductSerializer(product, context={"request": request})
         response_data = serializer.data
 
         # Process presigned URLs via the mixin.
@@ -1381,7 +1382,7 @@ class ProductUpdateView(View):
             )
 
 
-class ProductPatchView(ErrorHandlingMixin, View):
+class ProductPatchView(ErrorHandlingMixin, APIView):
     """
     Optimized view to handle product updates via PATCH requests.
     """
@@ -1440,7 +1441,9 @@ class ProductPatchView(ErrorHandlingMixin, View):
             if data.get("order_limits"):
                 self.update_order_limits(product, data.get("order_limits"))
 
-            serializer = ProductSerializer(product, data=data, partial=True)
+            serializer = ProductSerializer(
+                product, data=data, partial=True, context={"request": request}
+            )
             if serializer.is_valid():
                 serializer.save()
                 # Create or update the ProductUpdate instance
@@ -1885,7 +1888,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         parent_page = self.get_or_create_parent_page()
         user_instance = self.get_user_instance(data.get("user_id"))
         product_instance = self.create_product_instance(
-            data, program, parent_page, user_instance
+            data, program, parent_page, user_instance, request
         )
         if not product_instance:
             return handle_error(
@@ -1988,8 +1991,10 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
                 )
         return None
 
-    def create_product_instance(self, data, program, parent_page, user_instance):
-        serializer = ProductSerializer(data=data)
+    def create_product_instance(
+        self, data, program, parent_page, user_instance, request
+    ):
+        serializer = ProductSerializer(data=data, context={"request": request})
         if serializer.is_valid():
             try:
                 product_instance = Product(

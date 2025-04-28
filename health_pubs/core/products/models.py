@@ -224,6 +224,10 @@ class Product(Page):
         blank=True,
         related_name="product",
     )
+    suppress_event = models.BooleanField(
+        default=False,
+        help_text="When true, suppress all EventBridge events on status changes.",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

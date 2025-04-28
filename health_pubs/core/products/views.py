@@ -1325,7 +1325,9 @@ class ProductUpdateView(View):
 
             # Parse and validate the request data
             data = json.loads(request.body)
-            serializer = ProductSerializer(product, data=data, partial=True)
+            serializer = ProductSerializer(
+                product, data=data, partial=True, context={"request": request}
+            )
             if serializer.is_valid():
                 serializer.save()
                 logger.info(
@@ -1442,7 +1444,7 @@ class ProductPatchView(ErrorHandlingMixin, View):
                 self.update_foreign_keys(product_update, data)
                 response_data = serializer.data
                 response_data["update_ref"] = ProductUpdateSerializer(
-                    product_update
+                    product_update, context={"request": request}
                 ).data
 
                 logger.info(

@@ -2,7 +2,6 @@ import uuid
 import json
 import logging
 from venv import logger
-
 from core.audiences.serializers import AudienceSerializer
 from core.diseases.serializers import DiseaseSerializer
 from core.languages.models import LanguagePage
@@ -136,8 +135,9 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
     # Optional fields
     order_from_date = serializers.DateField(required=False, allow_null=True)
     order_referral_email_address = serializers.EmailField(
-        required=False, allow_null=True
+        required=True, allow_null=True
     )
+    stock_owner_email_address = serializers.EmailField(required=True, allow_null=True)
     order_exceptions = serializers.CharField(required=False, allow_null=True)
 
     # Add the new product_downloads field
@@ -278,23 +278,22 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
         return parse_downloads(obj.product_downloads)
 
     def to_representation(self, instance):
-        """
-        Return the serialized representation of the instance with sensitive fields removed for non-admin users.
+        data = super().to_representation(instance)
 
-        :param instance: The model instance being serialized.
-        :type instance: Any
-        :return: A dictionary containing the serialized data. Sensitive fields are removed if the requesting user is not an admin.
-        :rtype: dict
-        """
-        # Call the parent class's to_representation method
-        representation = super().to_representation(instance)
-        # Remove PII for non-admin users.
         request = self.context.get("request", None)
-        if not (request and hasattr(request, "user") and request.user.is_staff):
-            # Remove sensitive fields from the representation.
-            representation.pop("order_referral_email_address", None)
-            representation.pop("stock_owner_email_address", None)
-        return representation
+        if request and hasattr(request, "user"):
+            user = request.user
+            role_name = getattr(user.role_ref, "name", "No role assigned")
+            logger.info(f"User '{user.email}' with role '{role_name}' accessed fields.")
+            if not user.role_ref or user.role_ref.name.lower() != "admin":
+                data.pop("order_referral_email_address", None)
+                data.pop("stock_owner_email_address", None)
+        else:
+            logger.warning("Request or user not found in serializer context.")
+            data.pop("order_referral_email_address", None)
+            data.pop("stock_owner_email_address", None)
+
+        return data
 
 
 class ProductSerializer(serializers.ModelSerializer):

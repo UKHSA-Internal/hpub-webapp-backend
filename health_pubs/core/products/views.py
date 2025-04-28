@@ -68,7 +68,6 @@ from .serializers import (
 )
 from django.core.serializers.json import DjangoJSONEncoder
 
-
 logger = logging.getLogger(__name__)
 
 PRODUCT_CODE_PATTERN = r"^[A-Za-z0-9_-]+$"
@@ -93,64 +92,72 @@ VALID_SORT_FIELDS = [
 ]
 
 
-def generate_product_key(last_key=None):
+_DIGITS = list("123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_BASE = len(_DIGITS)
+
+
+def generate_product_key(last_key: str | None) -> str:
     """
-    Generates the next product_key in sequence from 1-9, then A-Z.
-
-    Args:
-        last_key (str): The last used product_key. If None, starts with '1'.
-
-    Returns:
-        str: The next product_key.
+    Increments a 'base-35' number whose digits run 1–9, A–Z.
+    If last_key is None, returns '1'. Otherwise rolls over
+    so that '9'→'A', 'Z'→'11', '1Z'→'21', etc.
     """
-    if last_key is None:
-        return "1"  # Start with '1' if no last_key is provided
+    if not last_key:
+        return _DIGITS[0]
 
-    # Handle single digits 1-9
-    if last_key.isdigit() and int(last_key) < 9:
-        return str(int(last_key) + 1)
+    # turn into list of integer positions
+    try:
+        positions = [_DIGITS.index(ch) for ch in last_key]
+    except ValueError:
+        raise ValueError(f"Invalid last_key: {last_key!r}")
 
-    # Handle transition from 9 to A
-    if last_key == "9":
-        return "A"
+    # add one, carrying through
+    i = len(positions) - 1
+    carry = 1
+    while i >= 0 and carry:
+        positions[i] += carry
+        if positions[i] >= _BASE:
+            positions[i] = 0
+            carry = 1
+        else:
+            carry = 0
+        i -= 1
 
-    # Handle letters A-Z
-    if last_key.isalpha() and last_key != "Z":
-        return chr(ord(last_key) + 1)
+    # if we still have a carry, prepend a new '1' digit
+    if carry:
+        positions.insert(0, 0)
 
-    # If last_key was 'Z', raise an exception (or handle the overflow if necessary)
-    if last_key == "Z":
-        raise ValueError("No more product keys available. Maximum limit 'Z' reached.")
-
-    raise ValueError(f"Invalid last_key: {last_key}")
+    return "".join(_DIGITS[pos] for pos in positions)
 
 
-def get_next_product_key(program_name):
+def get_next_product_key(program_name: str) -> str:
     """
-    Retrieves the next available product_key for a given program_id.
-
-    Args:
-        program_id (int): The ID of the program to generate a product_key for.
-
-    Returns:
-        str: The next available product_key.
+    Looks up all existing keys for this program, finds the
+    max in our custom ordering, and returns the next one.
     """
-
-    last_product = (
-        Product.objects.filter(program_name=program_name)
-        .order_by("-product_key")
-        .first()
+    # pull all keys into Python so we can do a proper numeric max
+    keys = list(
+        Product.objects.filter(program_name=program_name).values_list(
+            "product_key", flat=True
+        )
     )
-    logging.info("last product:", last_product)
 
-    if last_product:
-        last_key = last_product.product_key
-    else:
-        last_key = None  # No products exist yet for this program
-
-    next_key = generate_product_key(last_key)
-    logging.info(f"Last Key: {last_key}, Next Key: {next_key}")  # Debug print
+    last = max(keys, key=lambda k: _key_to_int(k)) if keys else None
+    next_key = generate_product_key(last)
+    logging.info("get_next_product_key: %r → %r", last, next_key)
     return next_key
+
+
+def _key_to_int(key: str) -> int:
+    """
+    Converts a key like '1', '9', 'A', 'Z', '11', '1Z', etc.
+    into a plain integer so we can compare them properly.
+    """
+    value = 0
+    for ch in key:
+        idx = _DIGITS.index(ch)
+        value = value * _BASE + idx
+    return value
 
 
 def get_next_version_number(program_id, product_key, iso_language_code):
@@ -1053,7 +1060,7 @@ class ProductStatusUpdateView(View):
 
     ALLOWED_TRANSITIONS = {
         "draft": ["live", "withdrawn"],
-        "live": ["archived", "withdrawn"],
+        "live": ["archived", "withdrawn", "draft"],
         "archived": ["withdrawn"],
     }
 
@@ -1084,6 +1091,12 @@ class ProductStatusUpdateView(View):
                 return validation
             new_status = validation
 
+            # if we’re moving from live → draft, set suppress_event so no signals fire
+            if product.status == "live" and new_status == "draft":
+                product.suppress_event = True
+                logger.info(
+                    f"Moving product {product.product_code} live→draft; suppress_event set to True"
+                )
             product.status = new_status
 
             # If transitioning to "live" and publish_date is not already set, update it to today's date.
@@ -1319,7 +1332,9 @@ class ProductUpdateView(View):
 
             # Parse and validate the request data
             data = json.loads(request.body)
-            serializer = ProductSerializer(product, data=data, partial=True)
+            serializer = ProductSerializer(
+                product, data=data, partial=True, context={"request": request}
+            )
             if serializer.is_valid():
                 serializer.save()
                 logger.info(
@@ -1392,7 +1407,9 @@ class ProductPatchView(ErrorHandlingMixin, View):
         product_downloads = data.get("product_downloads", {})
 
         # Process file URLs based solely on the input data (not the product table)
-        file_urls = self.process_file_urls(product_type, data, product_downloads)
+        file_urls = self.process_file_urls(
+            product_type, data, product_downloads, product.tag
+        )
 
         # Validate date fields based on provided choices
         available_from_choice = data.get("available_from_choice")
@@ -1434,7 +1451,7 @@ class ProductPatchView(ErrorHandlingMixin, View):
                 self.update_foreign_keys(product_update, data)
                 response_data = serializer.data
                 response_data["update_ref"] = ProductUpdateSerializer(
-                    product_update
+                    product_update, context={"request": request}
                 ).data
 
                 logger.info(
@@ -1449,7 +1466,7 @@ class ProductPatchView(ErrorHandlingMixin, View):
                 )
 
     def process_file_urls(
-        self, product_type: str, data: dict, product_downloads: dict
+        self, product_type: str, data: dict, product_downloads: dict, product_tag: str
     ) -> dict:
         """
         Process file URLs by validating required downloads (if provided), initializing URLs,
@@ -1465,14 +1482,16 @@ class ProductPatchView(ErrorHandlingMixin, View):
                 raise ValidationError("Invalid JSON format for product_downloads")
 
         # Validate based on the input payload—not the product table.
-        self.validate_required_downloads(product_type, data, product_downloads)
+        self.validate_required_downloads(
+            product_type, data, product_downloads, product_tag
+        )
 
         file_urls = self.initialize_file_urls(product_downloads)
         file_urls = self.validate_file_extensions(file_urls)
         return self.add_file_metadata(file_urls)
 
     def validate_required_downloads(
-        self, product_type: str, data: dict, product_downloads: dict
+        self, product_type: str, data: dict, product_downloads: dict, product_tag: str
     ):
         """
         Validates that all required downloads are present.
@@ -1480,7 +1499,12 @@ class ProductPatchView(ErrorHandlingMixin, View):
         For download-only products, the 'print_download' requirement will be ignored while validating.
         For other product types, the standard required downloads are enforced.
         """
-        tag = data.get("tag", "").lower()
+        tag = product_tag.lower()
+        logger.info(
+            "Validating required downloads for product_type: %s, tag: %s",
+            product_type,
+            tag,
+        )  # for debugging
 
         # For order-only, require only the main_download.
         if tag == "order-only":
@@ -1529,12 +1553,37 @@ class ProductPatchView(ErrorHandlingMixin, View):
                 )
 
     def initialize_file_urls(self, product_downloads: dict) -> dict:
+        """
+        Pull out just the raw URL strings (so later code can safely do .split('.'))
+        whether the user passed ["https://…", …] or [{"URL": "https://…", …}, …].
+        """
+
+        def extract_str(key):
+            raw = product_downloads.get(key, "")
+            if isinstance(raw, dict):
+                return raw.get("URL", "")
+            return raw or ""
+
+        def extract_list(key):
+            raw = product_downloads.get(key, [])
+            if not isinstance(raw, list):
+                return []
+            normalized = []
+            for item in raw:
+                if isinstance(item, dict):
+                    url = item.get("URL")
+                    if url:
+                        normalized.append(url)
+                elif isinstance(item, str):
+                    normalized.append(item)
+            return normalized
+
         return {
-            "main_download_url": product_downloads.get("main_download", ""),
-            "web_download_url": product_downloads.get("web_download", []),
-            "print_download_url": product_downloads.get("print_download", []),
-            "transcript_url": product_downloads.get("transcript", []),
-            "video_url": product_downloads.get("video_url", ""),
+            "main_download_url": extract_str("main_download"),
+            "web_download_url": extract_list("web_download"),
+            "print_download_url": extract_list("print_download"),
+            "transcript_url": extract_list("transcript"),
+            "video_url": extract_str("video_url"),
         }
 
     def validate_file_extensions(self, file_urls: dict) -> dict:
@@ -1573,16 +1622,23 @@ class ProductPatchView(ErrorHandlingMixin, View):
                 "xlsx",
             ],
         }
-        if file_urls["main_download_url"]:
-            ext = file_urls["main_download_url"].split(".")[-1]
+
+        # single string
+        main = file_urls["main_download_url"]
+        if main:
+            ext = main.rsplit(".", 1)[-1].lower()
             if ext not in allowed["main_download_url"]:
                 file_urls["main_download_url"] = ""
+
+        # lists
         for key in ["web_download_url", "print_download_url", "transcript_url"]:
-            file_urls[key] = [
-                url
-                for url in file_urls[key]
-                if url.split(".")[-1] in allowed.get(key, [])
-            ]
+            filtered = []
+            for url in file_urls[key]:
+                ext = url.rsplit(".", 1)[-1].lower()
+                if ext in allowed[key]:
+                    filtered.append(url)
+            file_urls[key] = filtered
+
         return file_urls
 
     def add_file_metadata(self, file_urls: dict) -> dict:

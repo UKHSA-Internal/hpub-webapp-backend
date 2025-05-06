@@ -1730,6 +1730,9 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
             parent_page.add_child(instance=product_update)
             product_update.save_revision().publish()
             Product.objects.filter(pk=product.pk).update(update_ref=product_update)
+            # Refresh the in-memory product object
+            product.refresh_from_db()
+            product_update = product.update_ref
         else:
             logger.info("Updating existing ProductUpdate instance.")
             for key, value in update_data.items():

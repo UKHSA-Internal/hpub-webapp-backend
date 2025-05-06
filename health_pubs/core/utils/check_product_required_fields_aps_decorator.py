@@ -3,43 +3,51 @@ from functools import wraps
 
 logger = logging.getLogger(__name__)
 
+# Map your signal‐handler names to the statuses they care about:
+_STATUS_MAP = {
+    "send_product_draft_event": "draft",
+    "send_product_live_event": "live",
+    "send_product_archived_event": "archived",
+    "send_product_withdrawn_event": "withdrawn",
+}
+
 
 def check_required_event_fields(required_fields):
+    """
+    Decorator that:
+      1. Finds the expected status for this handler by name.
+      2. If instance.status != expected, returns immediately.
+      3. For each required_field, tries instance.field then instance.update_ref.field.
+      4. If any are still None → log & return False.
+      5. Else → call the wrapped function.
+    """
+
     def decorator(func):
+        expected_status = _STATUS_MAP.get(func.__name__)
+        if expected_status is None:
+            # Not one of our mapped handlers: no wrapping needed.
+            return func
+
+        def _fetch(instance, field):
+            # Try on instance first, then on update_ref
+            val = getattr(instance, field, None)
+            if val is None and getattr(instance, "update_ref", None):
+                val = getattr(instance.update_ref, field, None)
+            return val
+
         @wraps(func)
         def wrapper(sender, instance, **kwargs):
-            # Check if all required fields are strings
-            if not all(isinstance(field, str) for field in required_fields):
-                logger.error("All required fields must be strings.")
-                return False  # Or raise an exception
+            # Early exit if status doesn’t match
+            current = (getattr(instance, "status", "") or "").lower()
+            if current != expected_status:
+                return
 
-            # Initialize data dictionary
-            data = {field: getattr(instance, field, None) for field in required_fields}
+            # Collect any missing required fields
+            missing = [f for f in required_fields if _fetch(instance, f) is None]
+            if missing:
+                logger.error("Missing required fields: %s", ", ".join(missing))
+                return False
 
-            # Include fields from the update_ref if it exists
-            if instance.update_ref is not None:  # Check if update_ref is not None
-                update_ref = instance.update_ref
-                data.update(
-                    {
-                        "minimum_stock_level": update_ref.minimum_stock_level,
-                        "run_to_zero": update_ref.run_to_zero,
-                        "cost_centre": update_ref.cost_centre,
-                        "unit_of_measure": update_ref.unit_of_measure,
-                        "local_code": update_ref.local_code,
-                        "stock_owner_email_address": update_ref.stock_owner_email_address,
-                        "order_referral_email_address": update_ref.order_referral_email_address,
-                    }
-                )
-
-            # Check for missing required fields
-            missing_fields = [
-                field for field in required_fields if data.get(field) is None
-            ]
-            if missing_fields:
-                logger.error(f"Missing required fields: {', '.join(missing_fields)}")
-                return False  # Return False if fields are missing
-
-            # Proceed if all required fields are present
             return func(sender, instance, **kwargs)
 
         return wrapper

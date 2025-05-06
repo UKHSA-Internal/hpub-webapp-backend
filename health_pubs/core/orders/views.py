@@ -2,7 +2,8 @@ import logging
 import traceback
 import uuid
 from datetime import datetime
-
+from uuid import uuid4
+from django.db import transaction
 import pandas as pd
 from core.addresses.models import Address
 from core.addresses.serializers import AddressSerializer
@@ -29,10 +30,12 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from wagtail.models import Page
+from rest_framework.exceptions import NotFound
 
 from core.event_analytics.models import EventAnalytics
+from core.utils.confirmation_generator import generate_confirmation_number
 
-from .models import Address, Order, OrderItem, Page, User
+from .models import Order, OrderItem
 from .serializers import OrderItemSerializer, OrderSerializer
 
 logger = logging.getLogger(__name__)
@@ -51,6 +54,7 @@ class OrderViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"], url_path="admin")
     def create_for_admin(self, request, *args, **kwargs):
         data = request.data.copy()
+        logger.info("Received data for admin order creation:", data)
         items_data = data.pop("order_items", [])
         address_ref = data.pop("address_ref", None)
         user_data = data.pop("user_info", None)
@@ -93,6 +97,7 @@ class OrderViewSet(viewsets.ModelViewSet):
         try:
             # Create a new user for the delivery information
             delivery_user_instance = self._get_or_create_user(user_data, parent_page)
+            delivery_user_instance.refresh_from_db()
 
             # Retrieve the logged-in user
             admin_user_instance = self._get_existing_user(user_id)
@@ -137,8 +142,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                     status_code=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Update the user reference for the order to be the delivery user
-            data["user_ref"] = delivery_user_instance
+            logger.info(f"Admin User: {delivery_user_instance}")
 
         except IntegrityError:
             logger.exception("Integrity error occurred while handling user.")
@@ -464,43 +468,43 @@ class OrderViewSet(viewsets.ModelViewSet):
                 raise APIException(ErrorMessage.INTERNAL_SERVER_ERROR)
 
     def _get_or_create_user(self, user_data, parent_page):
-        """
-        Retrieves or creates a user instance based on the provided user data.
-        """
-        user_instance = User.objects.filter(email=user_data.get("email")).first()
-        role_instance = Role.objects.filter(name="User").first()
-        if not role_instance:
-            return Response(
-                {"error": "Role not found"}, status=status.HTTP_400_BAD_REQUEST
-            )
-        if not user_instance:
-            unique_slug = self.get_unique_slug(
-                slugify(
-                    f"user-{user_data.get('email', 'default')}" + str(datetime.now())
-                )
-            )
-            user_instance = User(
-                first_name=user_data.get("first_name"),
-                last_name=user_data.get("last_name"),
-                role_ref=role_instance,
-                email=user_data.get("email"),
-                mobile_number=user_data.get("mobile_number"),
-                slug=unique_slug,
-                title="user_info_title",
-            )
+        # 1) Look up any existing user by email…
+        user = User.objects.filter(email=user_data["email"]).first()
+        role = Role.objects.filter(name="User").first()
+        if not role:
+            raise NotFound(detail="Role ‘User’ not found.")
 
-            password = user_data.get("password")
+        if user:
+            # 2) If they exist but have no user_id, give them one—but first
+            #    patch any Orders that point at the old blank ID
+            if not user.user_id:
+                new_uuid = str(uuid4())
+                with transaction.atomic():
+                    # move all orders with user_ref_id='' → new_uuid
+                    Order.objects.filter(user_ref_id="").update(user_ref_id=new_uuid)
+                    # now that no child rows point at the old key, update the User
+                    User.objects.filter(pk=user.pk).update(user_id=new_uuid)
+                # refresh the Python object
+                user.user_id = new_uuid
+            return user
 
-            if password:
-                user_instance.set_password(password)
-
-            parent_page.add_child(instance=user_instance)
-            user_instance.save()
-            user_instance.refresh_from_db()
-            logger.info(
-                f"User created: ID={user_instance.user_id}, Email={user_instance.email}"
-            )
-        return user_instance
+        # 3) Otherwise create a brand‑new delivery user as before
+        unique_slug = self.get_unique_slug(
+            slugify(f"user-{user_data.get('email','default')}" + str(datetime.now()))
+        )
+        user = User(
+            user_id=str(uuid4()),
+            first_name=user_data["first_name"],
+            last_name=user_data["last_name"],
+            role_ref=role,
+            email=user_data["email"],
+            mobile_number=user_data["mobile_number"],
+            slug=unique_slug,
+            title="user_info_title",
+        )
+        parent_page.add_child(instance=user)
+        user.save()
+        return user
 
     def _get_existing_user(self, user_ref_id):
         """
@@ -557,7 +561,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             order_id=order_id,
             user_ref=user_instance,
             address_ref=address_ref,
-            order_confirmation_number=f"HPUB_Order_{str(order_id)}",
+            order_confirmation_number=generate_confirmation_number(),
             order_origin=data.get("order_origin"),
             full_external_key=data.get("full_external_key"),
             created_at=data.get("created_at"),
@@ -1046,7 +1050,7 @@ class MigrateOrdersAPIView(APIView):
                     "order_origin": row["order_origin"],
                     "address_ref": address_instance,
                     "tracking_number": row.get("tracking_number") or None,
-                    "order_confirmation_number": f"HPUB_Order_{row['order_id']}",
+                    "order_confirmation_number": generate_confirmation_number(),
                 }
                 self._create_order_instance(order_data, order_parent_page)
 
@@ -1225,7 +1229,7 @@ class MigrateOrdersAPIView(APIView):
                 tracking_number=data.get("tracking_number", None),
                 order_confirmation_number=data.get(
                     "order_confirmation_number",
-                    f'HPUB_Order_{str(data.get("order_id"))}',
+                    generate_confirmation_number(),
                 ),
             )
             order_parent_page.add_child(instance=order_instance)

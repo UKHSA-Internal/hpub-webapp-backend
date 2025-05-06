@@ -1,6 +1,7 @@
 import os
 import sys
 import uuid
+from django.utils import timezone
 
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -213,6 +214,7 @@ class Product(Page):
     language_name = models.CharField(max_length=30)
 
     file_url = models.URLField(max_length=255, null=True, blank=True)
+    suppress_event = models.BooleanField(default=False)
 
     # Reference to ProductUpdate (optional)
     update_ref = models.OneToOneField(
@@ -221,6 +223,10 @@ class Product(Page):
         null=True,
         blank=True,
         related_name="product",
+    )
+    suppress_event = models.BooleanField(
+        default=False,
+        help_text="When true, suppress all EventBridge events on status changes.",
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -244,6 +250,7 @@ class Product(Page):
         FieldPanel("file_url"),
         FieldPanel("update_ref"),
         FieldPanel("tag"),
+        FieldPanel("suppress_event"),
     ]
 
     def save(self, *args, **kwargs):
@@ -253,6 +260,13 @@ class Product(Page):
                 " ", ""
             )
         super().save(*args, **kwargs)
+
+    def is_due_to_publish(self):
+        return (
+            self.status == "draft"
+            and self.publish_date is not None
+            and self.publish_date <= timezone.now()
+        )
 
     def __str__(self):
         return self.product_title

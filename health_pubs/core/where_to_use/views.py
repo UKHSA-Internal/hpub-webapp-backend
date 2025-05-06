@@ -265,4 +265,28 @@ class WhereToUseBulkDeleteViewSet(viewsets.ViewSet):
             )
 
 
+class WhereToUseNameCheckViewSet(viewsets.ViewSet):
+    """
+    API endpoint to check the uniqueness of a given where_to_use name.
+    The client sends a GET request with a query parameter `where_to_use_name`,
+    and the endpoint returns a JSON response indicating if the name is unique.
+    """
+
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    @action(detail=False, methods=["get"], url_path="check")
+    def check_where_to_use_name(self, request):
+        where_to_use_name = request.query_params.get("where_to_use_name")
+        if not where_to_use_name:
+            return Response(
+                {"error": "The query parameter 'where_to_use_name' is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Check case-insensitively if a where_to_use with the same name already exists.
+        exists = WhereToUse.objects.filter(name__iexact=where_to_use_name).exists()
+        return Response({"unique": not exists}, status=status.HTTP_200_OK)
+
+
 #

@@ -1,20 +1,30 @@
 from datetime import datetime
-
+from .confirmation_generator import generate_confirmation_number
 from core.orders.models import OrderItem
 
 
 def generate_order_confirmation(order_instance):
-    # Generating order confirmation info
-    confirmation_number = "HPUB_Order_" + str(order_instance.order_id)
+    """
+    Generate a unique order confirmation number and format the order details.
+    Args:
+        order_instance (Order): The order instance for which to generate the confirmation.
+    Returns:
+        dict: A dictionary containing the formatted order details.
+    """
+    # Generate unique confirmation number
+    confirmation_number = generate_confirmation_number()
+
+    # Order status and confirmation timestamp setup
     order_status = "Submitted"  # Assuming the status is "Submitted" for all orders
     confirmation_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Building ordered products list in a table format
+    # Build the ordered products list in a table-like format
     items_table = "\n".join(
         f" - Item: {item.product_ref.title} - Quantity: {item.quantity}"
         for item in OrderItem.objects.filter(order_ref=order_instance)
     )
-    # Shipping address details
+
+    # Retrieve shipping address and user details
     user = order_instance.user_ref
     address = order_instance.address_ref
     shipping_address = {
@@ -30,7 +40,7 @@ def generate_order_confirmation(order_instance):
         "telephone": user.mobile_number or "-",
     }
 
-    # Construct the response object to match the email template format
+    # Construct and return the result as a dictionary matching the email template format
     result = {
         "confirmation_number": confirmation_number,
         "order_id": str(order_instance.order_id),

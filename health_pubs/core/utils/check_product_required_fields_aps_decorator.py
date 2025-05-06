@@ -3,43 +3,58 @@ from functools import wraps
 
 logger = logging.getLogger(__name__)
 
+# Map your signal‐handler names to the statuses they care about:
+_STATUS_MAP = {
+    "send_product_draft_event": "draft",
+    "send_product_live_event": "live",
+    "send_product_archived_event": "archived",
+    "send_product_withdrawn_event": "withdrawn",
+}
+
 
 def check_required_event_fields(required_fields):
+    """
+    Decorator that:
+      1. Looks up which status this handler is for (by function name).
+      2. If instance.status != that status, returns immediately.
+      3. Otherwise, for each required_field:
+         a) Try getattr(instance, field)
+         b) If None, try getattr(instance.update_ref, field)
+      4. If any are still None → log & return False.
+      5. Else → call the wrapped function.
+    """
+
     def decorator(func):
         @wraps(func)
         def wrapper(sender, instance, **kwargs):
-            # Check if all required fields are strings
-            if not all(isinstance(field, str) for field in required_fields):
-                logger.error("All required fields must be strings.")
-                return False  # Or raise an exception
+            # 1) Determine expected status
+            expected = _STATUS_MAP.get(func.__name__)
+            if expected is None:
+                # not one of our mapped handlers: bail
+                return
 
-            # Initialize data dictionary
-            data = {field: getattr(instance, field, None) for field in required_fields}
+            # 2) Quick status check
+            status = (getattr(instance, "status", "") or "").lower()
+            if status != expected:
+                return
 
-            # Include fields from the update_ref if it exists
-            if instance.update_ref is not None:  # Check if update_ref is not None
-                update_ref = instance.update_ref
-                data.update(
-                    {
-                        "minimum_stock_level": update_ref.minimum_stock_level,
-                        "run_to_zero": update_ref.run_to_zero,
-                        "cost_centre": update_ref.cost_centre,
-                        "unit_of_measure": update_ref.unit_of_measure,
-                        "local_code": update_ref.local_code,
-                        "stock_owner_email_address": update_ref.stock_owner_email_address,
-                        "order_referral_email_address": update_ref.order_referral_email_address,
-                    }
-                )
+            # 3) Gather each required field from instance or update_ref
+            data = {}
+            for field in required_fields:
+                val = getattr(instance, field, None)
+                if val is None and getattr(instance, "update_ref", None):
+                    upd = instance.update_ref
+                    if hasattr(upd, field):
+                        val = getattr(upd, field)
+                data[field] = val
 
-            # Check for missing required fields
-            missing_fields = [
-                field for field in required_fields if data.get(field) is None
-            ]
-            if missing_fields:
-                logger.error(f"Missing required fields: {', '.join(missing_fields)}")
-                return False  # Return False if fields are missing
+            # 4) Check for missing
+            missing = [f for f, v in data.items() if v is None]
+            if missing:
+                logger.error(f"Missing required fields: {', '.join(missing)}")
+                return False
 
-            # Proceed if all required fields are present
+            # 5) All good → run the handler
             return func(sender, instance, **kwargs)
 
         return wrapper

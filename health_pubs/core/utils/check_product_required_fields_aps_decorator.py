@@ -15,46 +15,39 @@ _STATUS_MAP = {
 def check_required_event_fields(required_fields):
     """
     Decorator that:
-      1. Looks up which status this handler is for (by function name).
-      2. If instance.status != that status, returns immediately.
-      3. Otherwise, for each required_field:
-         a) Try getattr(instance, field)
-         b) If None, try getattr(instance.update_ref, field)
+      1. Finds the expected status for this handler by name.
+      2. If instance.status != expected, returns immediately.
+      3. For each required_field, tries instance.field then instance.update_ref.field.
       4. If any are still None → log & return False.
       5. Else → call the wrapped function.
     """
 
     def decorator(func):
+        expected_status = _STATUS_MAP.get(func.__name__)
+        if expected_status is None:
+            # Not one of our mapped handlers: no wrapping needed.
+            return func
+
+        def _fetch(instance, field):
+            # Try on instance first, then on update_ref
+            val = getattr(instance, field, None)
+            if val is None and getattr(instance, "update_ref", None):
+                val = getattr(instance.update_ref, field, None)
+            return val
+
         @wraps(func)
         def wrapper(sender, instance, **kwargs):
-            # 1) Determine expected status
-            expected = _STATUS_MAP.get(func.__name__)
-            if expected is None:
-                # not one of our mapped handlers: bail
+            # Early exit if status doesn’t match
+            current = (getattr(instance, "status", "") or "").lower()
+            if current != expected_status:
                 return
 
-            # 2) Quick status check
-            status = (getattr(instance, "status", "") or "").lower()
-            if status != expected:
-                return
-
-            # 3) Gather each required field from instance or update_ref
-            data = {}
-            for field in required_fields:
-                val = getattr(instance, field, None)
-                if val is None and getattr(instance, "update_ref", None):
-                    upd = instance.update_ref
-                    if hasattr(upd, field):
-                        val = getattr(upd, field)
-                data[field] = val
-
-            # 4) Check for missing
-            missing = [f for f, v in data.items() if v is None]
+            # Collect any missing required fields
+            missing = [f for f in required_fields if _fetch(instance, f) is None]
             if missing:
-                logger.error(f"Missing required fields: {', '.join(missing)}")
+                logger.error("Missing required fields: %s", ", ".join(missing))
                 return False
 
-            # 5) All good → run the handler
             return func(sender, instance, **kwargs)
 
         return wrapper

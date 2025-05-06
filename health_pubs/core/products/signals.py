@@ -25,6 +25,7 @@ from functools import wraps
 config = Config()
 
 logger = logging.getLogger(__name__)
+MISSING_STATUS_WARNING = "Missing or invalid status for product %s"
 
 # Check AWS access and initialize EventBridge client
 try:
@@ -181,9 +182,7 @@ def send_product_draft_event(sender, instance, **kwargs):
     status = instance.status.lower()
     logger.info("Checking status for draft event: %s", status)
     if not isinstance(status, str) or not status.strip():
-        logger.warning(
-            "Missing or invalid status for product %s", instance.product_code
-        )
+        logger.warning(MISSING_STATUS_WARNING, instance.product_code)
         return
     if status == "draft":
         send_product_event(
@@ -204,9 +203,7 @@ def send_product_live_event(sender, instance, **kwargs):
     status = instance.status.lower()
     logger.info("Checking status for live event: %s", status)
     if not isinstance(status, str) or not status.strip():
-        logger.warning(
-            "Missing or invalid status for product %s", instance.product_code
-        )
+        logger.warning(MISSING_STATUS_WARNING, instance.product_code)
         return
     if status == "live":
         send_product_event(
@@ -227,9 +224,7 @@ def send_product_archived_event(sender, instance, **kwargs):
     status = instance.status.lower()
     logger.info("Checking status for archived event: %s", status)
     if not isinstance(status, str) or not status.strip():
-        logger.warning(
-            "Missing or invalid status for product %s", instance.product_code
-        )
+        logger.warning(MISSING_STATUS_WARNING, instance.product_code)
         return
     if status == "archived":
         send_product_event(
@@ -250,9 +245,7 @@ def send_product_withdrawn_event(sender, instance, **kwargs):
     status = instance.status.lower()
     logger.info("Checking status for withdrawn event: %s", status)
     if not isinstance(status, str) or not status.strip():
-        logger.warning(
-            "Missing or invalid status for product %s", instance.product_code
-        )
+        logger.warning(MISSING_STATUS_WARNING, instance.product_code)
         return
     if status == "withdrawn":
         send_product_event(

@@ -125,6 +125,9 @@ def prepare_product_data(product_instance, required_fields_enum, status):
         for field in required_fields_enum
         if field.value in field_mapping and field_mapping[field.value] in product_data
     }
+    filtered_product_data["client"] = client.client_name.value
+    filtered_product_data["invoicingClient"] = invoicing_client.invoice_client.value
+    filtered_product_data["productGroup"] = product_group.product_group_name.value
 
     return filtered_product_data
 

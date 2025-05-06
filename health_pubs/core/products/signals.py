@@ -177,7 +177,14 @@ def send_product_draft_event(sender, instance, **kwargs):
     """
     Signal to send a draft product event if the status is 'draft'.
     """
-    if instance.status == "draft":
+    status = instance.status.lower()
+    logger.info("Checking status for draft event: %s", status)
+    if not isinstance(status, str) or not status.strip():
+        logger.warning(
+            "Missing or invalid status for product %s", instance.product_code
+        )
+        return
+    if status == "draft":
         send_product_event(
             instance,
             "draft",
@@ -193,7 +200,14 @@ def send_product_live_event(sender, instance, **kwargs):
     """
     Signal to send a live product event if the status is 'live'.
     """
-    if instance.status == "live":
+    status = instance.status.lower()
+    logger.info("Checking status for live event: %s", status)
+    if not isinstance(status, str) or not status.strip():
+        logger.warning(
+            "Missing or invalid status for product %s", instance.product_code
+        )
+        return
+    if status == "live":
         send_product_event(
             instance,
             "live",
@@ -209,7 +223,14 @@ def send_product_archived_event(sender, instance, **kwargs):
     """
     Signal to send an archived product event if the status is 'archived'.
     """
-    if instance.status == "archived":
+    status = instance.status.lower()
+    logger.info("Checking status for archived event: %s", status)
+    if not isinstance(status, str) or not status.strip():
+        logger.warning(
+            "Missing or invalid status for product %s", instance.product_code
+        )
+        return
+    if status == "archived":
         send_product_event(
             instance,
             "archived",
@@ -225,7 +246,14 @@ def send_product_withdrawn_event(sender, instance, **kwargs):
     """
     Signal to send a withdrawn product event if the status is 'withdrawn'.
     """
-    if instance.status == "withdrawn":
+    status = instance.status.lower()
+    logger.info("Checking status for withdrawn event: %s", status)
+    if not isinstance(status, str) or not status.strip():
+        logger.warning(
+            "Missing or invalid status for product %s", instance.product_code
+        )
+        return
+    if status == "withdrawn":
         send_product_event(
             instance,
             "withdrawn",

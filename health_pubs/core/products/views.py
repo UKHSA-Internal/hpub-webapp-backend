@@ -1385,6 +1385,7 @@ class ProductUpdateView(View):
 class ProductPatchView(ErrorHandlingMixin, APIView):
     """
     Optimized view to handle product updates via PATCH requests.
+    Pre-creates the ProductUpdate so that post_save signals see a valid update_ref.
     """
 
     authentication_classes = [CustomTokenAuthentication]
@@ -1404,15 +1405,16 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
             )
 
         data = json.loads(request.body)
+        logger.info("Received data for update: %s", data)
         product_type = data.get("product_type")
         product_downloads = data.get("product_downloads", {})
 
-        # Process file URLs based solely on the input data (not the product table)
+        # Prepare file URLs
         file_urls = self.process_file_urls(
             product_type, data, product_downloads, product.tag
         )
 
-        # Validate date fields based on provided choices
+        # Validate date fields
         available_from_choice = data.get("available_from_choice")
         order_from_date = data.get("order_from_date")
         if available_from_choice == "specific_date" and not order_from_date:
@@ -1427,7 +1429,7 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                 status_code=400,
             )
 
-        # Prepare additional update data for the ProductUpdate instance
+        # Build the ProductUpdate payload
         product_update_data = self.prepare_product_update_data(
             data,
             available_until_choice,
@@ -1438,20 +1440,25 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         )
 
         with transaction.atomic():
+            # Update or create order limits
             if data.get("order_limits"):
                 self.update_order_limits(product, data.get("order_limits"))
 
+            # Pre-create or update ProductUpdate so signals see required fields
+            product_update = self.get_or_create_product_update(
+                product, product_update_data
+            )
+            # Apply any foreign-key guidance sets immediately on the update_ref
+            self.update_foreign_keys(product_update, data)
+
+            # Now patch the Product itself
             serializer = ProductSerializer(
                 product, data=data, partial=True, context={"request": request}
             )
             if serializer.is_valid():
                 serializer.save()
-                # Create or update the ProductUpdate instance
-                product_update = self.get_or_create_product_update(
-                    product, product_update_data, data
-                )
-                # Update guidance-related foreign keys (audience_names, vaccination_names, disease_names, where_to_use_names)
-                self.update_foreign_keys(product_update, data)
+
+                # Prepare response
                 response_data = serializer.data
                 response_data["update_ref"] = ProductUpdateSerializer(
                     product_update, context={"request": request}
@@ -1462,6 +1469,7 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                     decoded_product_code,
                 )
                 return JsonResponse(response_data, status=status.HTTP_200_OK)
+
             else:
                 logger.error("Serializer errors: %s", serializer.errors)
                 return handle_error(
@@ -1720,9 +1728,14 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         return update_data
 
     def get_or_create_product_update(
-        self, product: Product, update_data: dict, raw_data: dict
+        self, product: Product, update_data: dict
     ) -> ProductUpdate:
         product_update = product.update_ref
+        logger.info(
+            "Checking for existing ProductUpdate instance: %s",
+            product_update,
+        )
+
         if not product_update:
             logger.info("Creating new ProductUpdate instance.")
             parent_page = product.get_parent()
@@ -1730,15 +1743,15 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
             parent_page.add_child(instance=product_update)
             product_update.save_revision().publish()
             Product.objects.filter(pk=product.pk).update(update_ref=product_update)
-            # Refresh the in-memory product object
             product.refresh_from_db()
             product_update = product.update_ref
         else:
             logger.info("Updating existing ProductUpdate instance.")
             for key, value in update_data.items():
-                if key in raw_data and raw_data[key] is not None:
-                    setattr(product_update, key, value)
+                setattr(product_update, key, value)
+                logger.debug("Set %s = %s on ProductUpdate", key, value)
             product_update.save()
+
         return product_update
 
     def update_order_limits(self, product: Product, order_limits: list):

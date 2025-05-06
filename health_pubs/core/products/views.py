@@ -5,6 +5,8 @@ import re
 import uuid
 from typing import Optional, Union
 from urllib.parse import unquote
+from django.utils import timezone
+from datetime import timedelta
 
 import pandas as pd
 from core.audiences.models import Audience
@@ -27,6 +29,7 @@ from core.utils.generate_s3_presigned_url import (
     generate_inline_presigned_urls,
     generate_presigned_urls,
 )
+from rest_framework.views import APIView
 
 from core.utils.product_recommendation_system import get_recommended_products
 from core.vaccinations.models import Vaccination
@@ -39,7 +42,6 @@ from django.db import DatabaseError, transaction
 from django.db.models import Q
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404
-from django.utils import timezone
 from django.utils.text import slugify
 from django.views import View
 from django.core.exceptions import ImproperlyConfigured
@@ -60,9 +62,12 @@ from rest_framework.views import APIView
 from wagtail.models import Page
 
 from .models import Product, ProductUpdate
-from .serializers import ProductSerializer, ProductUpdateSerializer
+from .serializers import (
+    ProductSearchSerializer,
+    ProductSerializer,
+    ProductUpdateSerializer,
+)
 from django.core.serializers.json import DjangoJSONEncoder
-
 
 logger = logging.getLogger(__name__)
 
@@ -88,64 +93,72 @@ VALID_SORT_FIELDS = [
 ]
 
 
-def generate_product_key(last_key=None):
+_DIGITS = list("123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_BASE = len(_DIGITS)
+
+
+def generate_product_key(last_key: str | None) -> str:
     """
-    Generates the next product_key in sequence from 1-9, then A-Z.
-
-    Args:
-        last_key (str): The last used product_key. If None, starts with '1'.
-
-    Returns:
-        str: The next product_key.
+    Increments a 'base-35' number whose digits run 1–9, A–Z.
+    If last_key is None, returns '1'. Otherwise rolls over
+    so that '9'→'A', 'Z'→'11', '1Z'→'21', etc.
     """
-    if last_key is None:
-        return "1"  # Start with '1' if no last_key is provided
+    if not last_key:
+        return _DIGITS[0]
 
-    # Handle single digits 1-9
-    if last_key.isdigit() and int(last_key) < 9:
-        return str(int(last_key) + 1)
+    # turn into list of integer positions
+    try:
+        positions = [_DIGITS.index(ch) for ch in last_key]
+    except ValueError:
+        raise ValueError(f"Invalid last_key: {last_key!r}")
 
-    # Handle transition from 9 to A
-    if last_key == "9":
-        return "A"
+    # add one, carrying through
+    i = len(positions) - 1
+    carry = 1
+    while i >= 0 and carry:
+        positions[i] += carry
+        if positions[i] >= _BASE:
+            positions[i] = 0
+            carry = 1
+        else:
+            carry = 0
+        i -= 1
 
-    # Handle letters A-Z
-    if last_key.isalpha() and last_key != "Z":
-        return chr(ord(last_key) + 1)
+    # if we still have a carry, prepend a new '1' digit
+    if carry:
+        positions.insert(0, 0)
 
-    # If last_key was 'Z', raise an exception (or handle the overflow if necessary)
-    if last_key == "Z":
-        raise ValueError("No more product keys available. Maximum limit 'Z' reached.")
-
-    raise ValueError(f"Invalid last_key: {last_key}")
+    return "".join(_DIGITS[pos] for pos in positions)
 
 
-def get_next_product_key(program_name):
+def get_next_product_key(program_name: str) -> str:
     """
-    Retrieves the next available product_key for a given program_id.
-
-    Args:
-        program_id (int): The ID of the program to generate a product_key for.
-
-    Returns:
-        str: The next available product_key.
+    Looks up all existing keys for this program, finds the
+    max in our custom ordering, and returns the next one.
     """
-
-    last_product = (
-        Product.objects.filter(program_name=program_name)
-        .order_by("-product_key")
-        .first()
+    # pull all keys into Python so we can do a proper numeric max
+    keys = list(
+        Product.objects.filter(program_name=program_name).values_list(
+            "product_key", flat=True
+        )
     )
-    logging.info("last product:", last_product)
 
-    if last_product:
-        last_key = last_product.product_key
-    else:
-        last_key = None  # No products exist yet for this program
-
-    next_key = generate_product_key(last_key)
-    logging.info(f"Last Key: {last_key}, Next Key: {next_key}")  # Debug print
+    last = max(keys, key=lambda k: _key_to_int(k)) if keys else None
+    next_key = generate_product_key(last)
+    logging.info("get_next_product_key: %r → %r", last, next_key)
     return next_key
+
+
+def _key_to_int(key: str) -> int:
+    """
+    Converts a key like '1', '9', 'A', 'Z', '11', '1Z', etc.
+    into a plain integer so we can compare them properly.
+    """
+    value = 0
+    for ch in key:
+        idx = _DIGITS.index(ch)
+        value = value * _BASE + idx
+    return value
 
 
 def get_next_version_number(program_id, product_key, iso_language_code):
@@ -387,9 +400,9 @@ def filter_live_languages(products_data):
     }
     # Bulk query: find all product codes that are live.
     live_codes = set(
-        Product.objects.filter(
-            product_code__in=product_codes, status="live"
-        ).values_list("product_code", flat=True)
+        Product.objects.filter(product_code__in=product_codes, status="live")
+        .values_list("product_code", flat=True)
+        .distinct()
     )
     # Update each product's 'existing_languages' to keep only those with live codes.
     for product in products_data:
@@ -941,7 +954,7 @@ class ProductDetailView(ErrorHandlingMixin, PresignedUrlMixin, viewsets.ViewSet)
     Note: This example uses ViewSet for consistency, but you can also use a plain View.
     """
 
-    authentication_classes = [SessionAuthentication]
+    authentication_classes = [CustomTokenAuthentication, SessionAuthentication]
     permission_classes = [AllowAny]
 
     def retrieve(self, request, product_code=None, *args, **kwargs):
@@ -957,7 +970,7 @@ class ProductDetailView(ErrorHandlingMixin, PresignedUrlMixin, viewsets.ViewSet)
                 status_code=status.HTTP_404_NOT_FOUND,
             )
 
-        serializer = ProductSerializer(product)
+        serializer = ProductSerializer(product, context={"request": request})
         response_data = serializer.data
 
         # Process presigned URLs via the mixin.
@@ -1048,7 +1061,7 @@ class ProductStatusUpdateView(View):
 
     ALLOWED_TRANSITIONS = {
         "draft": ["live", "withdrawn"],
-        "live": ["archived", "withdrawn"],
+        "live": ["archived", "withdrawn", "draft"],
         "archived": ["withdrawn"],
     }
 
@@ -1079,7 +1092,17 @@ class ProductStatusUpdateView(View):
                 return validation
             new_status = validation
 
+            # if we’re moving from live → draft, set suppress_event so no signals fire
+            if product.status == "live" and new_status == "draft":
+                product.suppress_event = True
+                logger.info(
+                    f"Moving product {product.product_code} live→draft; suppress_event set to True"
+                )
             product.status = new_status
+
+            # If transitioning to "live" and publish_date is not already set, update it to today's date.
+            if new_status == "live" and not product.publish_date:
+                product.publish_date = timezone.now().date()
             try:
                 product.save()
                 logger.info(
@@ -1197,10 +1220,11 @@ class ProductStatusUpdateView(View):
     ) -> Union[str, JsonResponse]:
         """
         Validates the status update request. It ensures that:
-          - A new status is provided in the request.
-          - The new status is one of the valid statuses.
-          - The status transition from the current product status to the new status is allowed.
-          - For a transition to "live", all required fields are present.
+        - A new status is provided in the request.
+        - The new status is one of the valid statuses.
+        - The status transition from the current product status to the new status is allowed.
+        - For a transition to "live", all required fields are present.
+        - No other product with the same product_code is already in the target status.
 
         Returns:
             new_status (str): If the update is valid.
@@ -1232,6 +1256,21 @@ class ProductStatusUpdateView(View):
                 f"Cannot transition from {product.status} to {new_status}.",
                 status_code=HTTP_400_BAD_REQUEST,
             )
+
+        # Extra Check: Ensure no duplicate product with the same product_code and new_status exists.
+        if product.status != new_status:
+            duplicate = Product.objects.filter(
+                product_code=product.product_code, status=new_status
+            ).exclude(pk=product.pk)
+            if duplicate.exists():
+                logger.warning(
+                    f"Cannot update product {product.product_code} to {new_status}: another product with the same product_code already has this status."
+                )
+                return handle_error(
+                    ErrorCode.DUPLICATE_STATUS,  # Ensure this error code is defined in your project.
+                    f"Product with product_code {product.product_code} already exists in status {new_status}.",
+                    status_code=HTTP_400_BAD_REQUEST,
+                )
 
         # Additional check: if transitioning to "live", ensure that all required fields are set.
         if new_status == "live":
@@ -1294,7 +1333,9 @@ class ProductUpdateView(View):
 
             # Parse and validate the request data
             data = json.loads(request.body)
-            serializer = ProductSerializer(product, data=data, partial=True)
+            serializer = ProductSerializer(
+                product, data=data, partial=True, context={"request": request}
+            )
             if serializer.is_valid():
                 serializer.save()
                 logger.info(
@@ -1341,7 +1382,7 @@ class ProductUpdateView(View):
             )
 
 
-class ProductPatchView(ErrorHandlingMixin, View):
+class ProductPatchView(ErrorHandlingMixin, APIView):
     """
     Optimized view to handle product updates via PATCH requests.
     """
@@ -1367,7 +1408,9 @@ class ProductPatchView(ErrorHandlingMixin, View):
         product_downloads = data.get("product_downloads", {})
 
         # Process file URLs based solely on the input data (not the product table)
-        file_urls = self.process_file_urls(product_type, data, product_downloads)
+        file_urls = self.process_file_urls(
+            product_type, data, product_downloads, product.tag
+        )
 
         # Validate date fields based on provided choices
         available_from_choice = data.get("available_from_choice")
@@ -1398,7 +1441,9 @@ class ProductPatchView(ErrorHandlingMixin, View):
             if data.get("order_limits"):
                 self.update_order_limits(product, data.get("order_limits"))
 
-            serializer = ProductSerializer(product, data=data, partial=True)
+            serializer = ProductSerializer(
+                product, data=data, partial=True, context={"request": request}
+            )
             if serializer.is_valid():
                 serializer.save()
                 # Create or update the ProductUpdate instance
@@ -1409,7 +1454,7 @@ class ProductPatchView(ErrorHandlingMixin, View):
                 self.update_foreign_keys(product_update, data)
                 response_data = serializer.data
                 response_data["update_ref"] = ProductUpdateSerializer(
-                    product_update
+                    product_update, context={"request": request}
                 ).data
 
                 logger.info(
@@ -1424,7 +1469,7 @@ class ProductPatchView(ErrorHandlingMixin, View):
                 )
 
     def process_file_urls(
-        self, product_type: str, data: dict, product_downloads: dict
+        self, product_type: str, data: dict, product_downloads: dict, product_tag: str
     ) -> dict:
         """
         Process file URLs by validating required downloads (if provided), initializing URLs,
@@ -1440,29 +1485,39 @@ class ProductPatchView(ErrorHandlingMixin, View):
                 raise ValidationError("Invalid JSON format for product_downloads")
 
         # Validate based on the input payload—not the product table.
-        self.validate_required_downloads(product_type, data, product_downloads)
+        self.validate_required_downloads(
+            product_type, data, product_downloads, product_tag
+        )
 
         file_urls = self.initialize_file_urls(product_downloads)
         file_urls = self.validate_file_extensions(file_urls)
         return self.add_file_metadata(file_urls)
 
     def validate_required_downloads(
-        self, product_type: str, data: dict, product_downloads: dict
+        self, product_type: str, data: dict, product_downloads: dict, product_tag: str
     ):
         """
         Validates that all required downloads are present.
-        For order-only products, as indicated by a tag in the request data,
-        the input product_downloads must include 'main_download'.
+        For order-only products, the input product_downloads must include only 'main_download'.
+        For download-only products, the 'print_download' requirement will be ignored while validating.
         For other product types, the standard required downloads are enforced.
         """
-        # Use the incoming request data rather than checking the product table.
-        if data.get("tag", "").lower() == "order-only":
+        tag = product_tag.lower()
+        logger.info(
+            "Validating required downloads for product_type: %s, tag: %s",
+            product_type,
+            tag,
+        )  # for debugging
+
+        # For order-only, require only the main_download.
+        if tag == "order-only":
             if not product_downloads.get("main_download"):
                 raise ValidationError(
                     "Missing required main_download for order-only product."
                 )
             return
 
+        # Define the standard required downloads for each product type.
         required = {
             "Audio": ["main_download", "web_download", "transcript"],
             "Bulletins": ["main_download", "print_download", "web_download"],
@@ -1487,20 +1542,51 @@ class ProductPatchView(ErrorHandlingMixin, View):
             "GIF": ["main_download", "web_download"],
             "Slides": ["main_download", "web_download"],
         }
+        # Check if the product type is in the required downloads.
         if product_type in required:
-            missing = [d for d in required[product_type] if d not in product_downloads]
+            # Make a copy to modify the required keys.
+            required_downloads = required[product_type].copy()
+            # For download-only products, remove 'print_download' from the required keys.
+            if tag == "download-only" and "print_download" in required_downloads:
+                required_downloads.remove("print_download")
+            missing = [d for d in required_downloads if d not in product_downloads]
             if missing:
                 raise ValidationError(
                     f"Missing required downloads for {product_type}: {', '.join(missing)}."
                 )
 
     def initialize_file_urls(self, product_downloads: dict) -> dict:
+        """
+        Pull out just the raw URL strings (so later code can safely do .split('.'))
+        whether the user passed ["https://…", …] or [{"URL": "https://…", …}, …].
+        """
+
+        def extract_str(key):
+            raw = product_downloads.get(key, "")
+            if isinstance(raw, dict):
+                return raw.get("URL", "")
+            return raw or ""
+
+        def extract_list(key):
+            raw = product_downloads.get(key, [])
+            if not isinstance(raw, list):
+                return []
+            normalized = []
+            for item in raw:
+                if isinstance(item, dict):
+                    url = item.get("URL")
+                    if url:
+                        normalized.append(url)
+                elif isinstance(item, str):
+                    normalized.append(item)
+            return normalized
+
         return {
-            "main_download_url": product_downloads.get("main_download", ""),
-            "web_download_url": product_downloads.get("web_download", []),
-            "print_download_url": product_downloads.get("print_download", []),
-            "transcript_url": product_downloads.get("transcript", []),
-            "video_url": product_downloads.get("video_url", ""),
+            "main_download_url": extract_str("main_download"),
+            "web_download_url": extract_list("web_download"),
+            "print_download_url": extract_list("print_download"),
+            "transcript_url": extract_list("transcript"),
+            "video_url": extract_str("video_url"),
         }
 
     def validate_file_extensions(self, file_urls: dict) -> dict:
@@ -1508,6 +1594,9 @@ class ProductPatchView(ErrorHandlingMixin, View):
             "main_download_url": ["jpg", "jpeg", "png", "gif"],
             "transcript_url": ["pdf", "txt", "srt"],
             "web_download_url": [
+                "jpg",
+                "jpeg",
+                "png",
                 "mp4",
                 "mov",
                 "avi",
@@ -1536,16 +1625,23 @@ class ProductPatchView(ErrorHandlingMixin, View):
                 "xlsx",
             ],
         }
-        if file_urls["main_download_url"]:
-            ext = file_urls["main_download_url"].split(".")[-1]
+
+        # single string
+        main = file_urls["main_download_url"]
+        if main:
+            ext = main.rsplit(".", 1)[-1].lower()
             if ext not in allowed["main_download_url"]:
                 file_urls["main_download_url"] = ""
+
+        # lists
         for key in ["web_download_url", "print_download_url", "transcript_url"]:
-            file_urls[key] = [
-                url
-                for url in file_urls[key]
-                if url.split(".")[-1] in allowed.get(key, [])
-            ]
+            filtered = []
+            for url in file_urls[key]:
+                ext = url.rsplit(".", 1)[-1].lower()
+                if ext in allowed[key]:
+                    filtered.append(url)
+            file_urls[key] = filtered
+
         return file_urls
 
     def add_file_metadata(self, file_urls: dict) -> dict:
@@ -1724,7 +1820,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         program_name = data["program_name"]
         product_id = data.get("product_id")
         tag = data.get("tag")
-        publish_date = data.get("publish_date") or timezone.now().date()
+        publish_date = data.get("publish_date") or None
 
         if not LanguagePage.objects.filter(language_id=language_id).exists():
             logger.warning("Language ID %s does not exist.", language_id)
@@ -1792,7 +1888,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         parent_page = self.get_or_create_parent_page()
         user_instance = self.get_user_instance(data.get("user_id"))
         product_instance = self.create_product_instance(
-            data, program, parent_page, user_instance
+            data, program, parent_page, user_instance, request
         )
         if not product_instance:
             return handle_error(
@@ -1895,8 +1991,10 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
                 )
         return None
 
-    def create_product_instance(self, data, program, parent_page, user_instance):
-        serializer = ProductSerializer(data=data)
+    def create_product_instance(
+        self, data, program, parent_page, user_instance, request
+    ):
+        serializer = ProductSerializer(data=data, context={"request": request})
         if serializer.is_valid():
             try:
                 product_instance = Product(
@@ -1917,6 +2015,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
                     program_name=data["program_name"],
                     tag=data["tag"],
                     publish_date=data.get("publish_date"),
+                    suppress_event=False,
                 )
                 parent_page.add_child(instance=product_instance)
                 logger.info("Product instance created successfully.")
@@ -1994,7 +2093,7 @@ class ProductUsersListView(APIView, ProductListMixin):
     def get(self, request, *args, **kwargs):
         logger.info("ProductUsersListView GET method called")
         try:
-            products = Product.objects.filter(status="live")
+            products = Product.objects.filter(status="live").distinct()
             if not products.exists():
                 logger.warning("No published products found.")
                 return handle_error(
@@ -2011,6 +2110,15 @@ class ProductUsersListView(APIView, ProductListMixin):
             )
         except Exception as e:
             return handle_exceptions(e)
+
+
+class ProductSearchListMixin(ProductListMixin):
+    """
+    A specialized mixin for search endpoints. Inherits the functionality of
+    ProductListMixin but overrides the serializer_class to use ProductSearchSerializer.
+    """
+
+    serializer_class = ProductSearchSerializer
 
 
 class BaseProductSearchView(APIView, ProductListMixin):
@@ -2047,7 +2155,7 @@ class BaseProductSearchView(APIView, ProductListMixin):
             if product_title:
                 query &= Q(product_title__icontains=product_title)
 
-            products = Product.objects.filter(query)
+            products = Product.objects.filter(query).distinct()
             if not products.exists():
                 return Response(
                     {"detail": ErrorMessage.PRODUCT_NOT_FOUND.value},
@@ -2055,9 +2163,7 @@ class BaseProductSearchView(APIView, ProductListMixin):
                 )
 
             sorted_qs = self.get_sorted_queryset(products, request)
-            data, paginator = self.paginate_and_serialize(
-                sorted_qs, request, use_direct_update=True
-            )
+            data, paginator = self.paginate_and_serialize(sorted_qs, request)
             response_data = _prepare_response_data(
                 products, data, product_code, product_title
             )
@@ -2111,7 +2217,9 @@ class ProductUsersFilterView(APIView, ProductListMixin):
     def get(self, request, *args, **kwargs) -> Response:
         try:
             query = self.build_query(request)
-            products = Product.objects.filter(query, is_latest=True, status="live")
+            products = Product.objects.filter(
+                query, is_latest=True, status="live"
+            ).distinct()
             sort_by = request.GET.get("sort_by", "product_title")
             if sort_by not in VALID_SORT_FIELDS:
                 sort_by = "product_title"
@@ -2194,19 +2302,27 @@ class ProductAdminFilterView(APIView, ProductListMixin):
             "status": "status__in",
         }
         query = Q()
+        # Process other filters using getlist
         for param, lookup in filter_mapping.items():
             values = request.GET.getlist(param, [])
             if values:
                 query &= Q(**{lookup: values})
-        product_code = request.GET.get("product_code", None)
-        if product_code:
-            query &= Q(product_code_no_dashes__icontains=product_code)
+
+        # Updated product_code handling for multiple values
+        product_codes = request.GET.getlist("product_code")
+        if product_codes:
+            code_query = Q()
+            for code in product_codes:
+                code_query |= Q(product_code_no_dashes__icontains=code)
+            query &= code_query
+
         return query
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
             query = self._build_filter_query(request)
-            products = Product.objects.filter(query)
+            products = Product.objects.filter(query).distinct()
+
             sorted_qs = self.get_sorted_queryset(products, request)
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
             return paginator.get_paginated_response(data)
@@ -2246,7 +2362,7 @@ class ProgramProductsView(APIView, ProductListMixin):
             )
             .distinct()
             .prefetch_related("update_ref__diseases_ref", "update_ref__vaccination_ref")
-        )
+        ).distinct()
 
     def get(self, request, program_id):
         try:
@@ -2285,6 +2401,46 @@ class ProgramProductsView(APIView, ProductListMixin):
                 {"detail": UNEXPECTED_ERROR_MSG},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+class IncompleteProductsView(View):
+    def get(self, request, *args, **kwargs):
+        # Get the current date and the target date range
+        current_date = timezone.now().date()
+        target_date = current_date + timedelta(days=7)
+
+        # Query products that are in Draft status and have a publish_date within the next 7 days
+        products = Product.objects.filter(
+            status="draft",
+            publish_date__gte=current_date,
+            publish_date__lte=target_date,
+        )
+        logger.info(
+            "Found %d products in Draft status with publish_date within the next 7 days",
+            products.count(),
+        )
+
+        # Initialize the ProductStatusUpdateView for field checking
+        status_update_view = ProductStatusUpdateView()
+
+        incomplete_products = []
+
+        # Iterate over the products and check for incomplete fields
+        for product in products:
+            missing_fields = status_update_view.check_required_fields(product)
+
+            # If there are missing fields, append the product to the list
+            if missing_fields:
+                incomplete_products.append(
+                    {
+                        "tag": product.tag,
+                        "product_title": product.product_title,
+                        "product_code": product.product_code,
+                    }
+                )
+
+        # Return the data as JSON
+        return JsonResponse(incomplete_products, safe=False)
 
 
 #

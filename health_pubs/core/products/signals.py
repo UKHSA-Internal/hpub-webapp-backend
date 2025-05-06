@@ -19,6 +19,8 @@ from .enums import (
 )
 from .models import Product
 from configs.get_secret_config import Config
+from functools import wraps
+
 
 config = Config()
 
@@ -39,6 +41,25 @@ STATUS_MAPPING = {
     "withdrawn": "Withdrawn",
     "draft": "Draft",
 }
+
+
+def skip_if_suppressed(fn):
+    """
+    Decorator to short‑circuit any Product event handler
+    when instance.suppress_event is True.
+    """
+
+    @wraps(fn)
+    def wrapper(sender, instance, **kwargs):
+        if getattr(instance, "suppress_event", False):
+            logger.info(
+                f"Event suppressed for product {instance.product_code} "
+                f"(suppress_event=True)"
+            )
+            return
+        return fn(sender, instance, **kwargs)
+
+    return wrapper
 
 
 def prepare_product_data(product_instance, required_fields_enum, status):
@@ -150,6 +171,7 @@ def send_product_event(product_instance, event_type, detail_type, required_field
 
 
 @receiver(post_save, sender=Product)
+@skip_if_suppressed
 @check_required_event_fields([field.value for field in required_event_fields_draft])
 def send_product_draft_event(sender, instance, **kwargs):
     """
@@ -165,6 +187,7 @@ def send_product_draft_event(sender, instance, **kwargs):
 
 
 @receiver(post_save, sender=Product)
+@skip_if_suppressed
 @check_required_event_fields([field.value for field in required_event_fields_live])
 def send_product_live_event(sender, instance, **kwargs):
     """
@@ -180,6 +203,7 @@ def send_product_live_event(sender, instance, **kwargs):
 
 
 @receiver(post_save, sender=Product)
+@skip_if_suppressed
 @check_required_event_fields([field.value for field in required_event_fields_archived])
 def send_product_archived_event(sender, instance, **kwargs):
     """
@@ -195,6 +219,7 @@ def send_product_archived_event(sender, instance, **kwargs):
 
 
 @receiver(post_save, sender=Product)
+@skip_if_suppressed
 @check_required_event_fields([field.value for field in required_event_fields_withdrawn])
 def send_product_withdrawn_event(sender, instance, **kwargs):
     """

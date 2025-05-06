@@ -1,12 +1,12 @@
 import uuid
 import json
-
+import logging
+from venv import logger
 from core.audiences.serializers import AudienceSerializer
 from core.diseases.serializers import DiseaseSerializer
 from core.languages.models import LanguagePage
 from core.order_limits.serializers import OrderLimitPageSerializer
 from core.programs.models import Program
-from core.users.serializers import UserSerializer
 from core.vaccinations.serializers import VaccinationSerializer
 from core.where_to_use.serializers import WhereToUseSerializer
 from rest_framework import serializers
@@ -18,6 +18,52 @@ from .choices import (
     PRODUCT_TYPE_CHOICE,
     ALTERNATIVE_TYPE_CHOICE,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def parse_downloads(download_data):
+    """
+    Helper function to parse and format the product downloads.
+    It attempts to decode the JSON data if it is a string and returns a dictionary
+    with the expected structure.
+    """
+
+    if download_data is None:
+        # Optionally log that there was no data provided.
+        logger.warning("No download_data provided; returning default values")
+        return {
+            "main_download_url": None,
+            "video_url": None,
+            "web_download_url": [],
+            "print_download_url": [],
+            "transcript_url": [],
+        }
+    try:
+        downloads = (
+            json.loads(download_data)
+            if isinstance(download_data, str)
+            else download_data
+        )
+    except json.JSONDecodeError as e:
+        logger.error("Error parsing downloads data: %s", e)
+        downloads = {}
+
+    return {
+        "main_download_url": downloads.get("main_download_url"),
+        "video_url": downloads.get("video_url"),
+        "web_download_url": [
+            FileMetadataSerializer(m).data
+            for m in downloads.get("web_download_url", [])
+        ],
+        "print_download_url": [
+            FileMetadataSerializer(m).data
+            for m in downloads.get("print_download_url", [])
+        ],
+        "transcript_url": [
+            FileMetadataSerializer(m).data for m in downloads.get("transcript_url", [])
+        ],
+    }
 
 
 class FileMetadataSerializer(serializers.Serializer):
@@ -89,8 +135,9 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
     # Optional fields
     order_from_date = serializers.DateField(required=False, allow_null=True)
     order_referral_email_address = serializers.EmailField(
-        required=False, allow_null=True
+        required=True, allow_null=True
     )
+    stock_owner_email_address = serializers.EmailField(required=True, allow_null=True)
     order_exceptions = serializers.CharField(required=False, allow_null=True)
 
     # Add the new product_downloads field
@@ -179,7 +226,7 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, data):
-        # Add any additional validation logic here
+        # Additional validation logic
         if data.get("available_from_choice") == "specific_date" and not data.get(
             "order_from_date"
         ):
@@ -218,37 +265,52 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
         return data
 
     def get_product_downloads(self, obj):
-        """Ensure product_downloads is a dictionary before accessing it."""
-        try:
-            # Deserialize only if it's a string
-            downloads = (
-                json.loads(obj.product_downloads)
-                if isinstance(obj.product_downloads, str)
-                else obj.product_downloads
-            )
-        except json.JSONDecodeError:
-            downloads = {}
+        """Return the formatted product_downloads using the shared helper."""
+        if obj.product_downloads is None:
+            # Return a default structure if product_downloads is None
+            return {
+                "main_download_url": None,
+                "video_url": None,
+                "web_download_url": [],
+                "print_download_url": [],
+                "transcript_url": [],
+            }
+        return parse_downloads(obj.product_downloads)
 
-        return {
-            "main_download_url": downloads.get("main_download_url"),
-            "video_url": downloads.get("video_url"),
-            "web_download_url": [
-                FileMetadataSerializer(m).data
-                for m in downloads.get("web_download_url", [])
-            ],
-            "print_download_url": [
-                FileMetadataSerializer(m).data
-                for m in downloads.get("print_download_url", [])
-            ],
-            "transcript_url": [
-                FileMetadataSerializer(m).data
-                for m in downloads.get("transcript_url", [])
-            ],
-        }
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+
+        request = self.context.get("request", None)
+        if request and hasattr(request, "user"):
+            user = request.user
+            logger.info(f"User: {user}")
+            logger.info(f"Request: {request}")
+            if user.is_authenticated:
+                role_name = getattr(user.role_ref, "name", "No role assigned")
+                logger.info(
+                    f"User '{user.email}' with role '{role_name}' accessed fields."
+                )
+                if not user.role_ref or user.role_ref.name.lower() not in [
+                    "admin",
+                    "user",
+                ]:
+                    data.pop("order_referral_email_address", None)
+                    data.pop("stock_owner_email_address", None)
+            else:
+                logger.warning("Anonymous user accessed fields.")
+                data.pop("order_referral_email_address", None)
+                data.pop("stock_owner_email_address", None)
+        else:
+            logger.warning("Request or user not found in serializer context.")
+            data.pop("order_referral_email_address", None)
+            data.pop("stock_owner_email_address", None)
+
+        return data
 
 
 class ProductSerializer(serializers.ModelSerializer):
     status = serializers.CharField(max_length=50, default="draft")
+    suppress_event = serializers.BooleanField(default=False, required=False)
     product_key = serializers.CharField(max_length=50)
     program_id = serializers.SlugRelatedField(
         slug_field="program_id", queryset=Program.objects.all()
@@ -270,11 +332,10 @@ class ProductSerializer(serializers.ModelSerializer):
         ],
         required=True,
     )
+    suppress_event = serializers.BooleanField(default=False, required=False)
 
     update_ref = ProductUpdateSerializer(read_only=True)
     product_code_no_dashes = serializers.CharField(read_only=True)
-
-    user_info = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -292,12 +353,12 @@ class ProductSerializer(serializers.ModelSerializer):
             "is_latest",
             "language_name",
             "user_ref",
-            "user_info",
             "program_name",
             "iso_language_code",
             "product_code",
             "product_code_no_dashes",
             "version_number",
+            "suppress_event",
             "update_ref",
             "order_limits",
             "created_at",
@@ -320,8 +381,43 @@ class ProductSerializer(serializers.ModelSerializer):
             ] = uuid.uuid4()  # Generate a UUID if no id is provided
         return super().create(validated_data)
 
-    def get_user_info(self, obj):
-        if obj.user_ref:
-            # Serialize and return user info
-            return UserSerializer(obj.user_ref).data
-        return None
+
+class ProductUpdateSearchSerializer(serializers.ModelSerializer):
+    """
+    A lightweight serializer for nested update data, which only returns
+    product_downloads and summary_of_guidance.
+    """
+
+    product_downloads = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProductUpdate
+        fields = ("product_downloads", "summary_of_guidance")
+
+    def get_product_downloads(self, obj):
+        """Return the formatted product_downloads using the shared helper."""
+        return parse_downloads(obj.product_downloads)
+
+
+class ProductSearchSerializer(serializers.ModelSerializer):
+    """
+    Serializer used only in search endpoints to return a restricted set
+    of fields.
+    """
+
+    update_ref = ProductUpdateSearchSerializer(read_only=True)
+
+    class Meta:
+        model = Product
+        fields = (
+            "product_title",
+            "product_code",
+            "update_ref",
+            "tag",
+            "status",
+            "program_id",
+            "product_key",
+            "language_id",
+            "language_name",
+            "product_code_no_dashes",
+        )

@@ -3,12 +3,11 @@
 *.pot
 *.pyc
 db.sqlite3
-0*_initial.py
+# 0*_initial.py
 .vscode/
 **/.env
 **/core/utils/files/
 **/__pycache__/
-**/migrations/
 
 
 local_secrets.json

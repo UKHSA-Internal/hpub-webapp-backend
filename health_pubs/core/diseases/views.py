@@ -1,6 +1,8 @@
 import logging
 import uuid
 
+import pandas as pd
+from django.utils import timezone
 from core.programs.models import Program
 from core.users.permissions import IsAdminUser
 from core.utils.custom_token_authentication import CustomTokenAuthentication
@@ -12,6 +14,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from wagtail.models import Page
+from django.contrib.contenttypes.models import ContentType
 
 from .models import Disease
 from .serializers import DiseaseSerializer
@@ -240,6 +243,90 @@ class DiseaseNameCheckViewSet(viewsets.ViewSet):
         # Check case-insensitively if a disease with the same name already exists.
         exists = Disease.objects.filter(name__iexact=disease_name).exists()
         return Response({"unique": not exists}, status=status.HTTP_200_OK)
+
+
+class DiseaseBulkUploadViewSet(viewsets.ViewSet):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+
+    @action(detail=False, methods=["post"], url_path="bulk-upload")
+    def bulk_upload(self, request):
+        excel_file = request.FILES.get("excel_file")
+        if not excel_file:
+            return Response({"error": "Excel file is required"}, status=400)
+
+        if not (excel_file.name.endswith(".xlsx") or excel_file.name.endswith(".xls")):
+            return Response(
+                {"error": "Upload a valid Excel file (.xlsx or .xls)"}, status=400
+            )
+
+        try:
+            df = pd.read_excel(excel_file)
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to read Excel file: {str(e)}"}, status=400
+            )
+
+        try:
+            parent_page = Page.objects.get(slug="disease-bulk")
+        except Page.DoesNotExist:
+            root_page = Page.objects.first()
+            parent_page = Page(
+                title="DiseaseBulk",
+                slug="disease-bulk",
+                content_type=ContentType.objects.get_for_model(Page),
+            )
+            root_page.add_child(instance=parent_page)
+
+        created = []
+        errors = []
+
+        for index, row in df.iterrows():
+            disease_id = row.get("id")
+            name = row.get("label")
+            key = row.get("key")
+            description = row.get("description")
+            program_names = row.get("program_names")
+
+            if pd.isna(name) or pd.isna(disease_id):
+                errors.append({"row": index + 1, "error": "Missing required fields"})
+                continue
+
+            if Disease.objects.filter(disease_id=disease_id).exists():
+                errors.append(
+                    {
+                        "row": index + 1,
+                        "error": f"Disease with ID {disease_id} already exists",
+                    }
+                )
+                continue
+
+            slug = slugify(name + str(timezone.now()) + str(uuid.uuid4()))
+            disease = Disease(
+                title=name,
+                slug=slug,
+                disease_id=disease_id,
+                name=name,
+                key=key,
+                description=description or "",
+            )
+
+            try:
+                parent_page.add_child(instance=disease)
+                disease.save()
+
+                if pd.notna(program_names):
+                    program_list = [p.strip() for p in program_names.split(",")]
+                    programs = Program.objects.filter(programme_name__in=program_list)
+                    disease.programs.set(programs)
+
+                created.append(DiseaseSerializer(disease).data)
+            except Exception as e:
+                errors.append({"row": index + 1, "error": str(e)})
+
+        return Response(
+            {"created": created, "errors": errors}, status=201 if created else 400
+        )
 
 
 #

@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 
 
 from .views import (
+    VaccinationBulkUploadViewSet,
     VaccinationCreateViewSet,
     VaccinationDeleteViewSet,
     VaccinationListViewSet,
@@ -19,6 +20,12 @@ router.register(
 )
 router.register(
     r"vaccinations/name", VaccinationNameCheckViewSet, basename="vaccination-check"
+)
+
+router.register(
+    r"vaccinations/bulk-upload",
+    VaccinationBulkUploadViewSet,
+    basename="vaccination-bulk-upload",
 )
 
 urlpatterns = [

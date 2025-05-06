@@ -21,6 +21,7 @@ from django.db.models import Q, Exists, OuterRef
 from core.products.models import Product
 from .models import Program
 from .serializers import ProgramSerializer
+from rest_framework.views import APIView
 
 logger = logging.getLogger(__name__)
 
@@ -277,11 +278,11 @@ class ProgramDestroyViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
-class BulkProgramUploadViewSet(viewsets.ViewSet):
+class BulkProgramUploadViewSet(APIView):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
-    def create(self, request, *args, **kwargs):
+    def post(self, request, *args, **kwargs):
         excel_file = request.FILES.get("excel_file")
         if not excel_file:
             return Response(

@@ -1,5 +1,5 @@
 from rest_framework.routers import DefaultRouter
-
+from django.urls import path
 from .views import (
     BulkProgramDeleteViewSet,
     BulkProgramUploadViewSet,
@@ -18,11 +18,18 @@ router.register(
 )
 router.register(r"programs/update", ProgramUpdateViewSet, basename="program-update")
 router.register(r"programs/destroy", ProgramDestroyViewSet, basename="program-destroy")
-router.register(
-    r"programs/bulk-upload", BulkProgramUploadViewSet, basename="bulk-upload"
-)
+# router.register(
+#     r"programs/bulk-upload", BulkProgramUploadViewSet, basename="bulk-upload"
+# )
 router.register(
     r"programs/bulk-delete", BulkProgramDeleteViewSet, basename="bulk-delete"
 )
 
 urlpatterns = router.urls
+urlpatterns = [
+    path(
+        "programs/bulk-upload/",
+        BulkProgramUploadViewSet.as_view(),
+        name="program-bulk-upload",
+    ),
+]

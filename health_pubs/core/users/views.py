@@ -3,6 +3,10 @@ import os
 import sys
 import uuid
 import pandas as pd
+from dateutil import parser as dateutil_parser
+
+from django.utils import timezone
+import datetime
 
 from core.organizations.models import Organization
 from core.users.permissions import IsAdminUser
@@ -830,20 +834,14 @@ class MigrateUsersAPIView(APIView):
             )
 
         users_df = self._read_excel_file(users_file)
-
-        missing_fields = self._validate_required_fields(users_df)
-        if missing_fields:
+        missing = self._validate_required_fields(users_df)
+        if missing:
             return JsonResponse(
-                {
-                    "error": f"Missing required fields in users file: {', '.join(missing_fields)}"
-                },
+                {"error": f"Missing required fields: {', '.join(missing)}"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Get or create the parent page for users
         user_parent_page = self.get_or_create_parent_page(slug="users", title="Users")
-
-        # Process and create users in batches, under the parent page
         self._process_users(users_df, user_parent_page)
 
         logger.info("User migration completed successfully.")
@@ -853,113 +851,79 @@ class MigrateUsersAPIView(APIView):
         )
 
     def get_or_create_parent_page(self, slug, title):
-        """Retrieve or create a parent page for users."""
         try:
-            parent_page = Page.objects.get(slug=slug)
+            parent = Page.objects.get(slug=slug)
             logger.info(f"Parent page '{title}' found.")
         except Page.DoesNotExist:
-            logger.warning(f"Parent page '{title}' not found, creating new one.")
-            try:
-                root_page = Page.objects.first()
-                parent_page = Page(
-                    title=title,
-                    slug=slug,
-                    content_type=ContentType.objects.get_for_model(Page),
-                )
-                root_page.add_child(instance=parent_page)
-                logger.info(f"Parent page '{title}' created.")
-            except Exception as ex:
-                logger.error(f"Failed to create parent page: {str(ex)}")
-                raise
-        return parent_page
+            logger.warning(f"Parent page '{title}' not found, creating.")
+            root = Page.objects.first()
+            parent = Page(
+                title=title,
+                slug=slug,
+                content_type=ContentType.objects.get_for_model(Page),
+            )
+            root.add_child(instance=parent)
+            logger.info(f"Parent page '{title}' created.")
+        return parent
 
     def _read_excel_file(self, users_file):
         try:
-            users_df = pd.read_excel(users_file)
-            logger.info(
-                "Excel file read successfully. Number of records: %d", len(users_df)
-            )
-            return users_df
+            df = pd.read_excel(users_file)
+            logger.info("Excel read, %d records", len(df))
+            return df
         except Exception as e:
-            logger.error("Error reading Excel file: %s", str(e))
-            raise ValueError("Failed to read the provided Excel file.")
+            logger.error("Error reading Excel: %s", e)
+            raise ValueError("Failed to read Excel file.")
 
-    def _validate_required_fields(self, users_df):
-        required_user_fields = ["user_id", "email", "first_name"]
-        return [
-            field for field in required_user_fields if field not in users_df.columns
-        ]
+    def _validate_required_fields(self, df):
+        required = ["user_id", "email", "first_name"]
+        return [f for f in required if f not in df.columns]
 
-    def _process_users(self, users_df, user_parent_page):
-        # Get all existing user emails in one query to minimize database calls
+    def _process_users(self, df, parent_page):
         existing_emails = set(
-            User.objects.filter(email__in=users_df["email"]).values_list(
-                "email", flat=True
-            )
+            User.objects.filter(email__in=df["email"]).values_list("email", flat=True)
         )
         batch_size = 25
-        users_to_create = []
+        buffer = []
 
-        for index, row in users_df.iterrows():
-            # Skip users that already exist in the database
-            if row["email"] in existing_emails:
-                logger.info(f"User with email {row['email']} already exists. Skipping.")
+        for _, row in df.iterrows():
+            email = row["email"]
+            if email in existing_emails:
+                logger.info("Skipping existing %s", email)
                 continue
 
-            user_data = self.extract_user_data(row)
-            user_instance = self._create_user_instance(user_data, user_parent_page)
+            data = self.extract_user_data(row)
+            inst = self._create_user_instance(data, parent_page)
+            if inst:
+                buffer.append(inst)
+                if len(buffer) >= batch_size:
+                    self._save_users_batch(buffer)
+                    buffer = []
 
-            if user_instance:
-                users_to_create.append(user_instance)
-                logger.debug("Processed user record %d: %s", index, user_data["email"])
-
-                # Save in batches
-                if len(users_to_create) >= batch_size:
-                    self._save_users_batch(users_to_create)
-                    users_to_create = []
-
-        # Save any remaining users in the last batch
-        if users_to_create:
-            self._save_users_batch(users_to_create)
+        if buffer:
+            self._save_users_batch(buffer)
 
     def _save_users_batch(self, users_batch):
         try:
             with transaction.atomic():
                 for user in users_batch:
                     user.save()
-            logger.info("Successfully saved a batch of %d users.", len(users_batch))
+            logger.info("Saved batch of %d users", len(users_batch))
         except Exception as e:
-            logger.error("Error creating users in the database: %s", str(e))
+            logger.error("Error saving batch: %s", e)
 
     def extract_user_data(self, row):
-        user_id = row["user_id"] if pd.notnull(row["user_id"]) else str(uuid.uuid4())
-
-        # Check if user_id already exists
-        if User.objects.filter(user_id=user_id).exists():
-            logger.warning(
-                f"user_id '{user_id}' already exists. Generating a new UUID."
-            )
+        # --- user_id with fallback to uuid4 and uniqueness check ---
+        raw_id = row.get("user_id")
+        user_id = str(raw_id) if pd.notnull(raw_id) else str(uuid.uuid4())
+        attempts = 0
+        while User.objects.filter(user_id=user_id).exists() and attempts < 5:
             user_id = str(uuid.uuid4())
+            attempts += 1
+        if User.objects.filter(user_id=user_id).exists():
+            raise ValueError("Could not generate unique user_id")
 
-            # Optionally, add a loop to ensure uniqueness (with a max number of attempts)
-            attempts = 1
-            max_attempts = 5
-            while (
-                User.objects.filter(user_id=user_id).exists()
-                and attempts <= max_attempts
-            ):
-                logger.warning(
-                    f"Attempt {attempts}: user_id '{user_id}' already exists. Generating a new UUID."
-                )
-                user_id = str(uuid.uuid4())
-                attempts += 1
-
-            if User.objects.filter(user_id=user_id).exists():
-                logger.error(
-                    f"Failed to generate a unique user_id after {max_attempts} attempts."
-                )
-                raise ValueError("Unable to generate a unique user_id for the user.")
-        user_data = {
+        return {
             "user_id": user_id,
             "email": row["email"],
             "mobile_number": row.get("mobile_number"),
@@ -967,120 +931,137 @@ class MigrateUsersAPIView(APIView):
             "last_name": row["last_name"],
             "email_verified": row.get("email_verified"),
             "is_authorized": row.get("is_authorized"),
-            "last_login": self.parse_last_login(row.get("last_login")),
+            "last_login": self.parse_datetime_field(row.get("last_login")),
+            "created_at": self.parse_datetime_field(row.get("created_at")),
             "establishment_ref": (
-                self._get_establishment_ref(int(row.get("establishment_id")))
+                self._get_establishment_ref(int(row["establishment_id"]))
                 if pd.notnull(row.get("establishment_id"))
                 else None
             ),
             "organization_ref": (
-                self._get_organization_ref(int(row.get("organization_id")))
+                self._get_organization_ref(int(row["organization_id"]))
                 if pd.notnull(row.get("organization_id"))
                 else None
             ),
             "role_ref": (
-                self._get_role_ref(int(row.get("role_id")))
+                self._get_role_ref(int(row["role_id"]))
                 if pd.notnull(row.get("role_id"))
                 else None
             ),
         }
-        logger.debug("Extracted user data: %s", user_data)
-        return user_data
 
-    def parse_last_login(self, last_login_str):
-        if last_login_str in (None, "", "-", "N/A"):
+    def parse_datetime_field(self, raw):
+        """
+        Handle:
+         - '01-Jan-0001 00:00:00'
+         - '12/4/2024  3:24:00 PM'
+         - '3/24/2025  5:43:00 PM'
+        plus pandas Timestamps and other parseable strings. Drops years <1900.
+        """
+        if raw in (None, "", "-", "N/A") or pd.isna(raw):
             return None
 
-        try:
-            last_login = pd.to_datetime(last_login_str, errors="raise")
+        # If pandas Timestamp or Python datetime:
+        if isinstance(raw, (pd.Timestamp, datetime.datetime)):
+            dt = raw.to_pydatetime() if isinstance(raw, pd.Timestamp) else raw
+            if dt.year < 1900:
+                return None
+            return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
 
-            last_login = timezone.make_aware(last_login)
-            return last_login
-        except ValueError:
-            logger.warning(
-                "Invalid date format for last_login: %s. Setting to None.",
-                last_login_str,
-            )
-            return None
-
-    def _create_user_instance(self, user_data, user_parent_page):
-        """Create and return a User instance as a child page."""
-
-        # Debugging output
-        logging.info(f"User parent page: {user_parent_page}, User data: {user_data}")
-
-        try:
-            if pd.isna(user_data.get("last_login")):
-                user_data["last_login"] = None
-            user_instance = User.objects.get(email=user_data["email"])
-            logging.info(f"USER_EXISTS_MSG: {user_instance}")
-        except User.DoesNotExist:
-            # Prepare to create a new user instance
-            slug = slugify(f"user-{user_data['email']}-{str(uuid.uuid4())}")
-            if User.objects.filter(slug=slug).exists():
-                slug = f"{slug}-{str(uuid.uuid4())}"
-
-            user_instance = User(
-                title=f"User {user_data['first_name']}",
-                slug=slug,
-                user_id=user_data["user_id"],
-                email=user_data["email"],
-                mobile_number=user_data["mobile_number"],
-                first_name=user_data["first_name"],
-                last_name=user_data["last_name"],
-                email_verified=user_data["email_verified"],
-                is_authorized=user_data["is_authorized"],
-                establishment_ref=user_data["establishment_ref"],
-                organization_ref=user_data["organization_ref"],
-                role_ref=user_data["role_ref"],
-                last_login=user_data["last_login"],
-            )
-
+        s = str(raw).strip()
+        # Try explicit strptime formats
+        for fmt in ("%d-%b-%Y %H:%M:%S", "%m/%d/%Y %I:%M:%S %p"):
             try:
-                # Set path and depth for the new user if applicable
-                if user_parent_page.get_last_child() is None:
-                    # Create the path and depth for the first child
-                    user_instance.path = f"{user_parent_page.path}0001"
-                    user_instance.depth = user_parent_page.depth + 1
-                else:
-                    # Use add_child() for subsequent users
-                    user_parent_page.add_child(instance=user_instance)
+                dt = datetime.datetime.strptime(s, fmt)
+                if dt.year < 1900:
+                    return None
+                return timezone.make_aware(dt)
+            except ValueError:
+                pass
 
-                user_instance.save()
-                logger.info(f"User '{user_data['email']}' created successfully.")
-                return user_instance
-
-            except ValidationError as e:
-                logger.error(
-                    f"Validation error for user '{user_data['email']}': {str(e)}"
-                )
-                raise
-
-            except Exception as e:
-                logger.error(f"Failed to create user '{user_data['email']}': {str(e)}")
-                raise
-
-        return user_instance
-
-    def _get_establishment_ref(self, establishment_id):
+        # Fallback to pandas
         try:
-            return Establishment.objects.get(establishment_id=establishment_id)
+            dt = pd.to_datetime(s, errors="coerce")
+            if not pd.isna(dt) and dt.year >= 1900:
+                dt = dt.to_pydatetime()
+                return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+        except Exception:
+            pass
+
+        # Final fallback to dateutil
+        try:
+            dt = dateutil_parser.parse(s)
+            if dt.year < 1900:
+                return None
+            return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+        except Exception:
+            logger.warning("Unable to parse date: '%s'", s)
+            return None
+
+    def _create_user_instance(self, data, parent):
+        try:
+            User.objects.get(email=data["email"])
+            logger.info("User exists, skipping: %s", data["email"])
+            return None
+        except User.DoesNotExist:
+            slug = slugify(f"user-{data['email']}-{uuid.uuid4()}")
+            inst = User(
+                title=f"User {data['first_name']}",
+                slug=slug,
+                user_id=data["user_id"],
+                email=data["email"],
+                mobile_number=data["mobile_number"],
+                first_name=data["first_name"],
+                last_name=data["last_name"],
+                email_verified=data["email_verified"],
+                is_authorized=data["is_authorized"],
+                establishment_ref=data["establishment_ref"],
+                organization_ref=data["organization_ref"],
+                role_ref=data["role_ref"],
+                last_login=data["last_login"],
+            )
+
+            # If sheet provided created_at, override auto_now_add
+            if data.get("created_at"):
+                inst.created_at = data["created_at"]
+
+            # Attach into Wagtail tree
+            if parent.get_last_child() is None:
+                inst.path = f"{parent.path}0001"
+                inst.depth = parent.depth + 1
+                inst.save()
+            else:
+                parent.add_child(instance=inst)
+
+            logger.info("Created user: %s", data["email"])
+            return inst
+
+        except ValidationError as ve:
+            logger.error("ValidationError %s: %s", data["email"], ve)
+            raise
+        except Exception as e:
+            logger.error("Error creating %s: %s", data["email"], e)
+            raise
+
+    def _get_establishment_ref(self, eid):
+        try:
+            return Establishment.objects.get(establishment_id=eid)
         except Establishment.DoesNotExist:
-            logger.warning("Establishment not found for id: %s", establishment_id)
+            logger.warning("Establishment %s not found", eid)
             return None
 
-    def _get_organization_ref(self, organization_id):
+    def _get_organization_ref(self, oid):
         try:
-            return Organization.objects.get(organization_id=organization_id)
+            return Organization.objects.get(organization_id=oid)
         except Organization.DoesNotExist:
-            logger.warning("Organization not found for id: %s", organization_id)
+            logger.warning("Organization %s not found", oid)
             return None
 
-    def _get_role_ref(self, role_id):
+    def _get_role_ref(self, rid):
         try:
-            return Role.objects.get(role_id=role_id)
+            return Role.objects.get(role_id=rid)
         except Role.DoesNotExist:
-            logger.warning("Role not found for id: %s", role_id)
+            logger.warning("Role %s not found", rid)
             return None
 
 

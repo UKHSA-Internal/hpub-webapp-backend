@@ -68,6 +68,7 @@ def prepare_product_data(product_instance, required_fields_enum, status):
     keeping the correct keys and including the required fields.
     """
     update_instance = product_instance.update_ref
+    logger.info(f"update_instance: {update_instance}")
 
     # Map the product data to the expected keys
     product_data = {

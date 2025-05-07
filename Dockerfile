@@ -10,11 +10,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Install only what we need (cron + tzdata), in Europe/London without prompts,
 # then clean up to keep the image small.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends cron libmagic-dev libmagic1 tzdata \
+    && apt-get install -y --no-install-recommends cron libmagic1 tzdata \
     && ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime \
     && echo "$TZ" > /etc/timezone \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Remove Perl dependencies (after installation) vulnerbality fix
+RUN apt-get purge -y perl perl-base perl-modules && \
+apt-get autoremove -y && \
+apt-get clean && \
+rm -rf /var/lib/apt/lists/*
 
 # Set the working directory in the container
 WORKDIR /app

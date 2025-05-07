@@ -16,12 +16,6 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Remove Perl dependencies (after installation) vulnerbality fix
-RUN apt-get purge -y perl perl-base perl-modules && \
-apt-get autoremove -y && \
-apt-get clean && \
-rm -rf /var/lib/apt/lists/*
-
 # Set the working directory in the container
 WORKDIR /app
 

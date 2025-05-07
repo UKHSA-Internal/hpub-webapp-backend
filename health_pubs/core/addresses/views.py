@@ -144,6 +144,11 @@ class AddressViewSet(viewsets.ModelViewSet):
             normalized, title, slug, user_ref
         )
 
+        # Check if this is the user's first address
+        user_existing_addresses = Address.objects.filter(user_ref=user_ref)
+        if not user_existing_addresses.exists():
+            address_instance.is_default = True
+
         # Verify the address using the external API BEFORE saving it
         if not verify_address(address_instance):
             return Response(

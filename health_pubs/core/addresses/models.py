@@ -27,8 +27,8 @@ class Address(Page):
     user_ref = models.ForeignKey(
         User, null=True, on_delete=models.SET_NULL, related_name="addresses"
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    modified_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(default=now, null=True, blank=True)
+    modified_at = models.DateTimeField(default=now, null=True, blank=True)
 
     content_panels = Page.content_panels + [
         FieldPanel("address_line1"),
@@ -46,7 +46,7 @@ class Address(Page):
         return f"{self.address_line1}, {self.city}, {self.country}"
 
     def save(self, *args, **kwargs):
-        if not self.pk:  # if the object is new
+        if not self.created_at:
             self.created_at = now()
         self.modified_at = now()
         super().save(*args, **kwargs)

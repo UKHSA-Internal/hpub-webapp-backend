@@ -841,8 +841,8 @@ class MigrateUsersAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        user_parent_page = self.get_or_create_parent_page(slug="users", title="Users")
-        self._process_users(users_df, user_parent_page)
+        parent_page = self.get_or_create_parent_page(slug="users", title="Users")
+        self._process_users(users_df, parent_page)
 
         logger.info("User migration completed successfully.")
         return JsonResponse(
@@ -883,8 +883,6 @@ class MigrateUsersAPIView(APIView):
         existing_emails = set(
             User.objects.filter(email__in=df["email"]).values_list("email", flat=True)
         )
-        batch_size = 25
-        buffer = []
 
         for _, row in df.iterrows():
             email = row["email"]
@@ -893,27 +891,12 @@ class MigrateUsersAPIView(APIView):
                 continue
 
             data = self.extract_user_data(row)
-            inst = self._create_user_instance(data, parent_page)
-            if inst:
-                buffer.append(inst)
-                if len(buffer) >= batch_size:
-                    self._save_users_batch(buffer)
-                    buffer = []
 
-        if buffer:
-            self._save_users_batch(buffer)
-
-    def _save_users_batch(self, users_batch):
-        try:
-            with transaction.atomic():
-                for user in users_batch:
-                    user.save()
-            logger.info("Saved batch of %d users", len(users_batch))
-        except Exception as e:
-            logger.error("Error saving batch: %s", e)
+            # reload parent so tree-state is fresh
+            fresh_parent = Page.objects.get(pk=parent_page.pk)
+            self._create_and_insert_user(data, fresh_parent)
 
     def extract_user_data(self, row):
-        # --- user_id with fallback to uuid4 and uniqueness check ---
         raw_id = row.get("user_id")
         user_id = str(raw_id) if pd.notnull(raw_id) else str(uuid.uuid4())
         attempts = 0
@@ -928,7 +911,7 @@ class MigrateUsersAPIView(APIView):
             "email": row["email"],
             "mobile_number": row.get("mobile_number"),
             "first_name": row["first_name"],
-            "last_name": row["last_name"],
+            "last_name": row.get("last_name"),
             "email_verified": row.get("email_verified"),
             "is_authorized": row.get("is_authorized"),
             "last_login": self.parse_datetime_field(row.get("last_login")),
@@ -951,17 +934,9 @@ class MigrateUsersAPIView(APIView):
         }
 
     def parse_datetime_field(self, raw):
-        """
-        Handle:
-         - '01-Jan-0001 00:00:00'
-         - '12/4/2024  3:24:00 PM'
-         - '3/24/2025  5:43:00 PM'
-        plus pandas Timestamps and other parseable strings. Drops years <1900.
-        """
         if raw in (None, "", "-", "N/A") or pd.isna(raw):
             return None
 
-        # If pandas Timestamp or Python datetime:
         if isinstance(raw, (pd.Timestamp, datetime.datetime)):
             dt = raw.to_pydatetime() if isinstance(raw, pd.Timestamp) else raw
             if dt.year < 1900:
@@ -969,7 +944,6 @@ class MigrateUsersAPIView(APIView):
             return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
 
         s = str(raw).strip()
-        # Try explicit strptime formats
         for fmt in ("%d-%b-%Y %H:%M:%S", "%m/%d/%Y %I:%M:%S %p"):
             try:
                 dt = datetime.datetime.strptime(s, fmt)
@@ -977,9 +951,8 @@ class MigrateUsersAPIView(APIView):
                     return None
                 return timezone.make_aware(dt)
             except ValueError:
-                pass
+                continue
 
-        # Fallback to pandas
         try:
             dt = pd.to_datetime(s, errors="coerce")
             if not pd.isna(dt) and dt.year >= 1900:
@@ -988,7 +961,6 @@ class MigrateUsersAPIView(APIView):
         except Exception:
             pass
 
-        # Final fallback to dateutil
         try:
             dt = dateutil_parser.parse(s)
             if dt.year < 1900:
@@ -998,12 +970,12 @@ class MigrateUsersAPIView(APIView):
             logger.warning("Unable to parse date: '%s'", s)
             return None
 
-    def _create_user_instance(self, data, parent):
+    def _create_and_insert_user(self, data, parent):
         try:
-            User.objects.get(email=data["email"])
-            logger.info("User exists, skipping: %s", data["email"])
-            return None
-        except User.DoesNotExist:
+            if User.objects.filter(email=data["email"]).exists():
+                logger.info("User exists, skipping: %s", data["email"])
+                return
+
             slug = slugify(f"user-{data['email']}-{uuid.uuid4()}")
             inst = User(
                 title=f"User {data['first_name']}",
@@ -1021,20 +993,12 @@ class MigrateUsersAPIView(APIView):
                 last_login=data["last_login"],
             )
 
-            # If sheet provided created_at, override auto_now_add
             if data.get("created_at"):
                 inst.created_at = data["created_at"]
 
-            # Attach into Wagtail tree
-            if parent.get_last_child() is None:
-                inst.path = f"{parent.path}0001"
-                inst.depth = parent.depth + 1
-                inst.save()
-            else:
-                parent.add_child(instance=inst)
-
+            # this add_child always sees the up-to-date tree in the DB
+            parent.add_child(instance=inst)
             logger.info("Created user: %s", data["email"])
-            return inst
 
         except ValidationError as ve:
             logger.error("ValidationError %s: %s", data["email"], ve)

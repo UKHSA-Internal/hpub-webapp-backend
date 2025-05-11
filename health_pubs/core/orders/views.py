@@ -31,7 +31,9 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from wagtail.models import Page
 from rest_framework.exceptions import NotFound
-
+import time
+from psycopg2 import errors
+from django.db import transaction, IntegrityError
 from core.event_analytics.models import EventAnalytics
 from core.utils.confirmation_generator import generate_confirmation_number
 
@@ -54,117 +56,77 @@ class OrderViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"], url_path="admin")
     def create_for_admin(self, request, *args, **kwargs):
         data = request.data.copy()
-        logger.info("Received data for admin order creation:", data)
         items_data = data.pop("order_items", [])
         address_ref = data.pop("address_ref", None)
         user_data = data.pop("user_info", None)
         user_id = data.pop("user_ref", None)
 
-        # Ensure user_id and user_data are present
+        # --- pre-checks (user_ref, user_info, order limits, etc.) ---
         if not user_id:
-            logger.error("Logged-in user's user_ref is missing.")
             return handle_error(
                 ErrorCode.USER_REF_REQUIRED,
                 ErrorMessage.USER_REF_REQUIRED,
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
-
         if not user_data:
-            logger.error("User delivery information is missing.")
             return handle_error(
                 ErrorCode.USER_INFO_REQUIRED,
                 ErrorMessage.USER_INFO_REQUIRED,
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
 
-        logger.info(f"Request Data: {data}")
-        logger.info(f"Order Items Data: {items_data}")
-        logger.info(f"Address Reference: {address_ref}")
-        logger.info(f"User Data: {user_data}")
-
         # Retrieve or create the parent page
         try:
             parent_page = self._get_or_create_parent_page()
         except Exception:
-            logger.exception("Error creating or retrieving parent page for orders.")
             return handle_error(
                 ErrorCode.PAGE_CREATION_ERROR,
                 ErrorMessage.PAGE_CREATION_ERROR,
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        # Handle user reference or creation
+        # Handle or create users, validate limits, fetch full_external_key...
         try:
-            # Create a new user for the delivery information
-            delivery_user_instance = self._get_or_create_user(user_data, parent_page)
-            delivery_user_instance.refresh_from_db()
+            delivery_user = self._get_or_create_user(user_data, parent_page)
+            delivery_user.refresh_from_db()
+            admin_user = self._get_existing_user(user_id)
 
-            # Retrieve the logged-in user
-            admin_user_instance = self._get_existing_user(user_id)
-            if not admin_user_instance:
-                logger.error(f"User not found: ID {user_id}")
-                return handle_error(
-                    ErrorCode.USER_NOT_FOUND,
-                    ErrorMessage.USER_NOT_FOUND,
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                )
-
-            # Retrieve full_external_key from the related establishment
-            try:
-                establishment_ref = admin_user_instance.establishment_ref
-                if establishment_ref and establishment_ref.full_external_key:
-                    # logging.info('external key:', establishment_ref.full_external_key)
-                    data["full_external_key"] = establishment_ref.full_external_key
-                else:
-                    logger.warning(
-                        "User's establishment_ref or full_external_key is missing."
-                    )
-                    return JsonResponse(
-                        {
-                            "error": "User's establishment_ref or full_external_key is missing."
-                        },
-                        status=status.HTTP_404_NOT_FOUND,
-                    )
-            except AttributeError:
-                logger.error("Failed to access establishment_ref for the admin user.")
+            if (
+                not admin_user.establishment_ref
+                or not admin_user.establishment_ref.full_external_key
+            ):
                 return JsonResponse(
                     {
-                        "error": "Failed to retrieve establishment information for the admin user."
+                        "error": "User's establishment_ref or full_external_key is missing."
                     },
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    status=status.HTTP_404_NOT_FOUND,
                 )
+            data["full_external_key"] = admin_user.establishment_ref.full_external_key
 
-            # Validate order limits
-            if not self._validate_order_limits(items_data, admin_user_instance):
+            if not self._validate_order_limits(items_data, admin_user):
                 return handle_error(
                     ErrorCode.ORDER_LIMIT_EXCEEDED,
                     ErrorMessage.ORDER_LIMIT_EXCEEDED,
                     status_code=status.HTTP_400_BAD_REQUEST,
                 )
-
-            logger.info(f"Admin User: {delivery_user_instance}")
-
         except IntegrityError:
-            logger.exception("Integrity error occurred while handling user.")
             return handle_error(
                 ErrorCode.USER_CREATION_ERROR,
                 ErrorMessage.USER_CREATION_ERROR,
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
         except Exception:
-            logger.exception("Unexpected error occurred while handling user.")
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        # Validate address reference
+        # Resolve address_ref
         if address_ref:
             try:
                 address_instance = Address.objects.get(address_id=address_ref)
             except Address.DoesNotExist:
-                logger.error(f"Address not found: ID {address_ref}")
                 return handle_error(
                     ErrorCode.ADDRESS_NOT_FOUND,
                     ErrorMessage.ADDRESS_NOT_FOUND,
@@ -173,136 +135,118 @@ class OrderViewSet(viewsets.ModelViewSet):
         else:
             address_instance = None
 
-        # Create the Order instance with transaction
-        try:
-            with transaction.atomic():
-                order_instance = self._create_order_instance(
-                    data, delivery_user_instance, address_instance, parent_page
+        # --- creation with retry on path collision ---
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with transaction.atomic():
+                    order = self._create_order_instance(
+                        data, delivery_user, address_instance, parent_page
+                    )
+                    self._create_order_items(
+                        items_data, order, parent_page, delivery_user
+                    )
+                    self._update_product_quantities(items_data)
+                    self._send_order_confirmation(order)
+                    self.call_record_reorder_events(order, request)
+
+                    serializer = self.get_serializer(order)
+                    return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+            except IntegrityError as exc:
+                if self._is_path_collision(exc) and attempt < max_retries - 1:
+                    time.sleep(0.1 * (2**attempt))
+                    continue
+                # on other errors or out of retries, surface as generic order-creation error
+                return handle_error(
+                    ErrorCode.ORDER_CREATION_ERROR,
+                    ErrorMessage.ORDER_CREATION_ERROR,
+                    status_code=status.HTTP_400_BAD_REQUEST,
                 )
-
-                self._create_order_items(
-                    items_data, order_instance, parent_page, delivery_user_instance
-                )
-
-                # logger.info("ITEMS_Q", items_data)
-                # Update product quantities
-                self._update_product_quantities(items_data)
-
-                # Send order confirmation via GOV.UK Notify API
-                self._send_order_confirmation(order_instance)
-
-                self.call_record_reorder_events(
-                    order_instance, request
-                )  # Record reorder events
-
-                # Serialize and return response
-                serializer = OrderSerializer(order_instance)
-                return Response(serializer.data, status=status.HTTP_201_CREATED)
-
-        except IntegrityError:
-            logger.exception("Integrity error occurred while creating order.")
-            return handle_error(
-                ErrorCode.ORDER_CREATION_ERROR,
-                ErrorMessage.ORDER_CREATION_ERROR,
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
-        except Exception:
-            logger.exception("Unexpected error occurred while creating order.")
-            return handle_error(
-                ErrorCode.INTERNAL_SERVER_ERROR,
-                ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
 
     def create(self, request, *args, **kwargs):
-        data = request.data
+        data = request.data.copy()
         items_data = data.pop("order_items", [])
         address_ref = data.pop("address_ref", None)
         user_ref = data.pop("user_ref", None)
 
-        logger.info(f"Request Data: {data}")
-        print("ITEM_DATA", items_data)
-
-        # Check if all products in items_data are live
+        # --- pre-checks: product live, user, limits, full_external_key ---
         for item in items_data:
-            print("ITEM", item)
-            product_code = item.get("product_code")
-            if not self._is_product_live(product_code):
+            if not self._is_product_live(item.get("product_code")):
                 return JsonResponse(
                     {
                         "error_code": ErrorCode.PRODUCT_NOT_LIVE.value,
-                        "error_message": ErrorMessage.product_not_live(product_code),
+                        "error_message": ErrorMessage.product_not_live(
+                            item.get("product_code")
+                        ),
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        # Retrieve or create the parent page
         parent_page = self._get_or_create_parent_page_or_error()
-
-        # Handle user reference and authorization check
-        user_instance = self._get_user_or_error(user_ref)
-        data.update({"user_ref": user_instance})
-
-        # Retrieve full_external_key from the related establishment
-        establishment_ref = user_instance.establishment_ref
-        if establishment_ref:
-            data["full_external_key"] = establishment_ref.full_external_key
-        else:
-            logger.warning("User's establishment_ref is missing.")
+        user = self._get_user_or_error(user_ref)
+        data["user_ref"] = user
+        if not user.establishment_ref:
             return JsonResponse(
                 {"error": "User's establishment_ref is missing."},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        data["full_external_key"] = user.establishment_ref.full_external_key
 
-        # Validate order limits
-        if not self._validate_order_limits(items_data, user_instance):
+        if not self._validate_order_limits(items_data, user):
             return handle_error(
                 ErrorCode.ORDER_LIMIT_EXCEEDED,
                 ErrorMessage.ORDER_LIMIT_EXCEEDED,
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Validate address reference
         if address_ref:
             try:
                 address_instance = Address.objects.get(address_id=address_ref)
             except Address.DoesNotExist:
-                logger.warning(f"Address not found: ID {address_ref}")
+                from rest_framework.exceptions import ValidationError
+
                 raise ValidationError({"address_ref": ErrorMessage.ADDRESS_NOT_FOUND})
         else:
             address_instance = None
 
-        # Create the Order instance with transaction
-        try:
-            with transaction.atomic():
-                order_instance = self._create_order_instance(
-                    data, user_instance, address_instance, parent_page
-                )
+        # --- creation with retry on path collision ---
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with transaction.atomic():
+                    order = self._create_order_instance(
+                        data, user, address_instance, parent_page
+                    )
+                    self._create_order_items(items_data, order, parent_page, user)
+                    self._update_product_quantities(items_data)
+                    self._send_order_confirmation(order)
+                    self.call_record_reorder_events(order, request)
 
-                # Create OrderItems
-                self._create_order_items(
-                    items_data, order_instance, parent_page, user_instance
-                )
+                    serializer = self.get_serializer(order)
+                    return Response(serializer.data, status=status.HTTP_201_CREATED)
 
-                # Update product quantities
-                self._update_product_quantities(items_data)
+            except IntegrityError as exc:
+                if self._is_path_collision(exc) and attempt < max_retries - 1:
+                    time.sleep(0.1 * (2**attempt))
+                    continue
+                # no more retries or different IntegrityError
+                from rest_framework.exceptions import ValidationError
 
-                # Send order confirmation via GOV.UK Notify API
-                self._send_order_confirmation(order_instance)
-
-                self.call_record_reorder_events(
-                    order_instance, request
-                )  # Record reorder events
-
-                # Serialize and return response
-                serializer = OrderSerializer(order_instance)
-                return Response(serializer.data, status=status.HTTP_201_CREATED)
-
-        except IntegrityError:
-            logger.exception("Integrity error occurred while creating order.")
-            raise ValidationError({"detail": ErrorMessage.ORDER_CREATION_ERROR})
+                raise ValidationError({"detail": ErrorMessage.ORDER_CREATION_ERROR})
 
     # Helper methods
+    def _is_path_collision(self, err: IntegrityError) -> bool:
+        """
+        Returns True if the IntegrityError was caused by a UNIQUE violation
+        on the wagtailcore_page.path constraint.
+        """
+        cause = getattr(err, "__cause__", None)
+        return (
+            isinstance(cause, errors.UniqueViolation)
+            and getattr(cause.diag, "constraint_name", "")
+            == "wagtailcore_page_path_key"
+        )
 
     def call_record_reorder_events(self, order_instance, request):
         # Now, record reorder events (if any) for this order.

@@ -63,50 +63,22 @@ class OrderViewSet(viewsets.ModelViewSet):
         return self._create_order(request, admin=False)
 
     # Helper methods
-
     def _create_order(self, request, admin=False):
-        # --- parse & pop ---
-        data = request.data.copy()
-        items_data = data.pop("order_items", [])
-        address_ref = data.pop("address_ref", None)
-        user_ref = data.pop("user_ref", None)
-        user_data = data.pop("user_info", None) if admin else None
+        # 1) Extract and validate raw inputs
+        (
+            data,
+            items,
+            address_ref,
+            user_ref,
+            user_data,
+            err,
+        ) = self._extract_and_validate_request(request, admin)
+        if err:
+            return err
 
-        # --- product-live check for all requests ---
-        for item in items_data:
-            if not self._is_product_live(item.get("product_code")):
-                return JsonResponse(
-                    {
-                        "error_code": ErrorCode.PRODUCT_NOT_LIVE.value,
-                        "error_message": ErrorMessage.product_not_live(
-                            item.get("product_code")
-                        ),
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-        # --- admin-only pre-checks ---
-        if admin:
-            if not user_ref:
-                return handle_error(
-                    ErrorCode.USER_REF_REQUIRED,
-                    ErrorMessage.USER_REF_REQUIRED,
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                )
-            if not user_data:
-                return handle_error(
-                    ErrorCode.USER_INFO_REQUIRED,
-                    ErrorMessage.USER_INFO_REQUIRED,
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                )
-
-        # --- get or error on parent page ---
+        # 2) Get or create the parent page
         try:
-            parent_page = (
-                self._get_or_create_parent_page()
-                if admin
-                else self._get_or_create_parent_page_or_error()
-            )
+            parent = self._get_parent_page(admin)
         except Exception:
             return handle_error(
                 ErrorCode.PAGE_CREATION_ERROR,
@@ -114,16 +86,86 @@ class OrderViewSet(viewsets.ModelViewSet):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        # --- user creation/lookup & order-limit check ---
+        # 3) Prepare the two user roles (order_user + limit_user)
+        user_setup = self._prepare_users(admin, user_ref, user_data, data, parent)
+        if isinstance(user_setup, Response):
+            return user_setup
+        order_user, limit_user = user_setup
+
+        # 4) Resolve address if provided
+        addr_result = self._resolve_address(address_ref, admin)
+        if isinstance(addr_result, Response):
+            return addr_result
+        address = addr_result
+
+        # 5) Try the atomic create + retry loop
+        return self._attempt_create(
+            data, items, order_user, limit_user, address, parent, request, admin
+        )
+
+    def _extract_and_validate_request(self, request, admin):
+        data = request.data.copy()
+        items = data.pop("order_items", [])
+        address_ref = data.pop("address_ref", None)
+        user_ref = data.pop("user_ref", None)
+        user_data = data.pop("user_info", None) if admin else None
+
+        # product-live check
+        for it in items:
+            code = it.get("product_code")
+            if not self._is_product_live(code):
+                resp = JsonResponse(
+                    {
+                        "error_code": ErrorCode.PRODUCT_NOT_LIVE.value,
+                        "error_message": ErrorMessage.product_not_live(code),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+                return None, None, None, None, None, resp
+
+        # admin-only presence checks
+        if admin:
+            if not user_ref:
+                return (
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    handle_error(
+                        ErrorCode.USER_REF_REQUIRED,
+                        ErrorMessage.USER_REF_REQUIRED,
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                    ),
+                )
+            if not user_data:
+                return (
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    handle_error(
+                        ErrorCode.USER_INFO_REQUIRED,
+                        ErrorMessage.USER_INFO_REQUIRED,
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                    ),
+                )
+
+        return data, items, address_ref, user_ref, user_data, None
+
+    def _get_parent_page(self, admin):
+        if admin:
+            return self._get_or_create_parent_page()
+        return self._get_or_create_parent_page_or_error()
+
+    def _prepare_users(self, admin, user_ref, user_data, data, parent):
         try:
             if admin:
-                delivery_user = self._get_or_create_user(user_data, parent_page)
-                delivery_user.refresh_from_db()
+                delivery = self._get_or_create_user(user_data, parent)
+                delivery.refresh_from_db()
                 owner = self._get_existing_user(user_ref)
-                if (
-                    not owner.establishment_ref
-                    or not owner.establishment_ref.full_external_key
-                ):
+                if not getattr(owner.establishment_ref, "full_external_key", None):
                     return JsonResponse(
                         {
                             "error": "User's establishment_ref or full_external_key is missing."
@@ -131,39 +173,43 @@ class OrderViewSet(viewsets.ModelViewSet):
                         status=status.HTTP_404_NOT_FOUND,
                     )
                 data["full_external_key"] = owner.establishment_ref.full_external_key
-                order_user = delivery_user
-                limit_user = owner
+                primary, limiter = delivery, owner
             else:
-                order_user = self._get_user_or_error(user_ref)
-                if not order_user.establishment_ref:
+                primary = self._get_user_or_error(user_ref)
+                if not primary.establishment_ref:
                     return JsonResponse(
                         {"error": "User's establishment_ref is missing."},
                         status=status.HTTP_404_NOT_FOUND,
                     )
-                data[
-                    "full_external_key"
-                ] = order_user.establishment_ref.full_external_key
-                limit_user = order_user
+                data["full_external_key"] = primary.establishment_ref.full_external_key
+                limiter = primary
 
-            if not self._validate_order_limits(items_data, limit_user):
+            if not self._validate_order_limits(data.get("order_items", []), limiter):
                 return handle_error(
                     ErrorCode.ORDER_LIMIT_EXCEEDED,
                     ErrorMessage.ORDER_LIMIT_EXCEEDED,
                     status_code=status.HTTP_400_BAD_REQUEST,
                 )
 
+            return primary, limiter
+
         except IntegrityError:
-            return handle_error(
+            code = (
                 ErrorCode.USER_CREATION_ERROR
                 if admin
-                else ErrorCode.INTERNAL_SERVER_ERROR,
+                else ErrorCode.INTERNAL_SERVER_ERROR
+            )
+            msg = (
                 ErrorMessage.USER_CREATION_ERROR
                 if admin
-                else ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=status.HTTP_400_BAD_REQUEST
-                if admin
-                else status.HTTP_500_INTERNAL_SERVER_ERROR,
+                else ErrorMessage.INTERNAL_SERVER_ERROR
             )
+            status_code = (
+                status.HTTP_400_BAD_REQUEST
+                if admin
+                else status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+            return handle_error(code, msg, status_code=status_code)
         except Exception:
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
@@ -171,79 +217,70 @@ class OrderViewSet(viewsets.ModelViewSet):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        # --- address lookup (common) ---
-        address_instance = None
-        if address_ref:
-            try:
-                address_instance = Address.objects.get(address_id=address_ref)
-            except Address.DoesNotExist:
-                if admin:
-                    return handle_error(
-                        ErrorCode.ADDRESS_NOT_FOUND,
-                        ErrorMessage.ADDRESS_NOT_FOUND,
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                    )
-                else:
-                    raise DRFValidationError(
-                        {"address_ref": ErrorMessage.ADDRESS_NOT_FOUND}
-                    )
+    def _resolve_address(self, address_ref, admin):
+        if not address_ref:
+            return None
+        try:
+            return Address.objects.get(address_id=address_ref)
+        except Address.DoesNotExist:
+            if admin:
+                return handle_error(
+                    ErrorCode.ADDRESS_NOT_FOUND,
+                    ErrorMessage.ADDRESS_NOT_FOUND,
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                )
+            raise DRFValidationError({"address_ref": ErrorMessage.ADDRESS_NOT_FOUND})
 
-        # --- creation + retry loop (common) ---
-        max_retries = 3
-        for attempt in range(max_retries):
+    def _attempt_create(
+        self, data, items, order_user, limit_user, address, parent, request, admin
+    ):
+        for attempt in range(3):
             try:
                 with transaction.atomic():
-                    locked_parent = Page.objects.select_for_update().get(
-                        pk=parent_page.pk
-                    )
+                    locked = Page.objects.select_for_update().get(pk=parent.pk)
                     order = self._create_order_instance(
-                        data, order_user, address_instance, locked_parent
+                        data, order_user, address, locked
                     )
-                    self._create_order_items(
-                        items_data, order, locked_parent, order_user
+                    self._create_order_items(items, order, locked, order_user)
+                    self._update_product_quantities(items)
+                    self._notify_and_record(order, request)
+                    return Response(
+                        self.get_serializer(order).data, status=status.HTTP_201_CREATED
                     )
-                    self._update_product_quantities(items_data)
-
-                    # non-blocking notifications & analytics
-                    try:
-                        send_notification(order)
-                    except Exception as e:
-                        logger.warning(f"Email send failed for {order.order_id}: {e}")
-                    try:
-                        self.record_reorder_events(order, request)
-                    except Exception as e:
-                        logger.error(f"Analytics failed for {order.order_id}: {e}")
-
-                    serializer = self.get_serializer(order)
-                    return Response(serializer.data, status=status.HTTP_201_CREATED)
 
             except (IntegrityError, DjangoValidationError) as exc:
-                collision = (
-                    isinstance(exc, IntegrityError) and self._is_path_collision(exc)
-                ) or (
-                    isinstance(exc, DjangoValidationError)
-                    and self._is_validation_path_collision(exc)
-                )
-                if collision and attempt < max_retries - 1:
+                if self._is_collision(exc) and attempt < 2:
                     time.sleep(0.1 * (2**attempt))
                     continue
-
                 if admin:
                     return handle_error(
                         ErrorCode.ORDER_CREATION_ERROR,
                         ErrorMessage.ORDER_CREATION_ERROR,
                         status_code=status.HTTP_400_BAD_REQUEST,
                     )
-                else:
-                    raise DRFValidationError(
-                        {"detail": ErrorMessage.ORDER_CREATION_ERROR}
-                    )
+                raise DRFValidationError({"detail": ErrorMessage.ORDER_CREATION_ERROR})
 
-        # should never get here
+        # fallback (should never hit)
         return handle_error(
             ErrorCode.INTERNAL_SERVER_ERROR,
             ErrorMessage.INTERNAL_SERVER_ERROR,
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    def _notify_and_record(self, order, request):
+        try:
+            send_notification(order)
+        except Exception as e:
+            logger.warning(f"Email send failed for {order.order_id}: {e}")
+        try:
+            self.record_reorder_events(order, request)
+        except Exception as e:
+            logger.error(f"Analytics failed for {order.order_id}: {e}")
+
+    def _is_collision(self, exc):
+        return (isinstance(exc, IntegrityError) and self._is_path_collision(exc)) or (
+            isinstance(exc, DjangoValidationError)
+            and self._is_validation_path_collision(exc)
         )
 
     def _is_path_collision(self, err: IntegrityError) -> bool:

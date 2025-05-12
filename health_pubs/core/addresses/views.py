@@ -21,7 +21,6 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from wagtail.models import Page
-
 from .models import Address
 from .serializers import AddressSerializer
 
@@ -346,7 +345,7 @@ class AddressViewSet(viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         address_id = kwargs.get("pk")
         try:
-            instance = Address.objects.get(id=address_id)
+            instance = Address.objects.get(address_id=address_id)
         except Address.DoesNotExist:
             return Response(
                 {

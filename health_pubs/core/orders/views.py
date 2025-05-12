@@ -61,7 +61,7 @@ class OrderViewSet(viewsets.ModelViewSet):
         user_data = data.pop("user_info", None)
         user_id = data.pop("user_ref", None)
 
-        # --- pre-checks (user_ref, user_info, order limits, etc.) ---
+        # --- pre-checks ---
         if not user_id:
             return handle_error(
                 ErrorCode.USER_REF_REQUIRED,
@@ -75,7 +75,6 @@ class OrderViewSet(viewsets.ModelViewSet):
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Retrieve or create the parent page
         try:
             parent_page = self._get_or_create_parent_page()
         except Exception:
@@ -85,7 +84,6 @@ class OrderViewSet(viewsets.ModelViewSet):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        # Handle or create users, validate limits, fetch full_external_key...
         try:
             delivery_user = self._get_or_create_user(user_data, parent_page)
             delivery_user.refresh_from_db()
@@ -101,6 +99,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                     },
                     status=status.HTTP_404_NOT_FOUND,
                 )
+
             data["full_external_key"] = admin_user.establishment_ref.full_external_key
 
             if not self._validate_order_limits(items_data, admin_user):
@@ -109,6 +108,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                     ErrorMessage.ORDER_LIMIT_EXCEEDED,
                     status_code=status.HTTP_400_BAD_REQUEST,
                 )
+
         except IntegrityError:
             return handle_error(
                 ErrorCode.USER_CREATION_ERROR,
@@ -122,7 +122,6 @@ class OrderViewSet(viewsets.ModelViewSet):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        # Resolve address_ref
         if address_ref:
             try:
                 address_instance = Address.objects.get(address_id=address_ref)
@@ -135,7 +134,6 @@ class OrderViewSet(viewsets.ModelViewSet):
         else:
             address_instance = None
 
-        # --- creation with retry on path collision ---
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -147,8 +145,18 @@ class OrderViewSet(viewsets.ModelViewSet):
                         items_data, order, parent_page, delivery_user
                     )
                     self._update_product_quantities(items_data)
-                    self._send_order_confirmation(order)
-                    self.call_record_reorder_events(order, request)
+
+                    # send confirmation email, but don’t abort on failure
+                    try:
+                        send_notification(order)
+                    except Exception as e:
+                        logger.warning(f"Email failed for {order.order_id}: {e}")
+
+                    # record analytics under its own parent page
+                    try:
+                        self.record_reorder_events(order, request)
+                    except Exception as e:
+                        logger.error(f"Analytics failed for {order.order_id}: {e}")
 
                     serializer = self.get_serializer(order)
                     return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -157,7 +165,6 @@ class OrderViewSet(viewsets.ModelViewSet):
                 if self._is_path_collision(exc) and attempt < max_retries - 1:
                     time.sleep(0.1 * (2**attempt))
                     continue
-                # on other errors or out of retries, surface as generic order-creation error
                 return handle_error(
                     ErrorCode.ORDER_CREATION_ERROR,
                     ErrorMessage.ORDER_CREATION_ERROR,
@@ -170,7 +177,7 @@ class OrderViewSet(viewsets.ModelViewSet):
         address_ref = data.pop("address_ref", None)
         user_ref = data.pop("user_ref", None)
 
-        # --- pre-checks: product live, user, limits, full_external_key ---
+        # --- pre-checks ---
         for item in items_data:
             if not self._is_product_live(item.get("product_code")):
                 return JsonResponse(
@@ -186,6 +193,7 @@ class OrderViewSet(viewsets.ModelViewSet):
         parent_page = self._get_or_create_parent_page_or_error()
         user = self._get_user_or_error(user_ref)
         data["user_ref"] = user
+
         if not user.establishment_ref:
             return JsonResponse(
                 {"error": "User's establishment_ref is missing."},
@@ -204,13 +212,10 @@ class OrderViewSet(viewsets.ModelViewSet):
             try:
                 address_instance = Address.objects.get(address_id=address_ref)
             except Address.DoesNotExist:
-                from rest_framework.exceptions import ValidationError
-
                 raise ValidationError({"address_ref": ErrorMessage.ADDRESS_NOT_FOUND})
         else:
             address_instance = None
 
-        # --- creation with retry on path collision ---
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -220,8 +225,16 @@ class OrderViewSet(viewsets.ModelViewSet):
                     )
                     self._create_order_items(items_data, order, parent_page, user)
                     self._update_product_quantities(items_data)
-                    self._send_order_confirmation(order)
-                    self.call_record_reorder_events(order, request)
+
+                    try:
+                        send_notification(order)
+                    except Exception as e:
+                        logger.warning(f"Email failed for {order.order_id}: {e}")
+
+                    try:
+                        self.record_reorder_events(order, request)
+                    except Exception as e:
+                        logger.error(f"Analytics failed for {order.order_id}: {e}")
 
                     serializer = self.get_serializer(order)
                     return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -230,16 +243,13 @@ class OrderViewSet(viewsets.ModelViewSet):
                 if self._is_path_collision(exc) and attempt < max_retries - 1:
                     time.sleep(0.1 * (2**attempt))
                     continue
-                # no more retries or different IntegrityError
-                from rest_framework.exceptions import ValidationError
-
                 raise ValidationError({"detail": ErrorMessage.ORDER_CREATION_ERROR})
 
     # Helper methods
+
     def _is_path_collision(self, err: IntegrityError) -> bool:
         """
-        Returns True if the IntegrityError was caused by a UNIQUE violation
-        on the wagtailcore_page.path constraint.
+        True if the IntegrityError was a UNIQUE violation on wagtailcore_page.path.
         """
         cause = getattr(err, "__cause__", None)
         return (
@@ -258,36 +268,37 @@ class OrderViewSet(viewsets.ModelViewSet):
             )
 
     def record_reorder_events(self, order_instance, request):
-        """
-        For each order item in the given order, if the user has a previous order
-        for the same product, record a "reorder" event in EventAnalytics.
-        """
-        # Get the session_id from the request headers (it should be sent by the client)
+        # ensure an analytics parent exists
+        parent, _ = Page.objects.get_or_create(
+            slug="event-analytics",
+            defaults={"title": "Event analytics", "content_type": Page.content_type},
+        )
         session_id = request.headers.get("X-Session-ID", "unknown")
         user = order_instance.user_ref
-        # Loop through each order item
+
         for item in order_instance.order_items.all():
             product = item.product_ref
-            # Exclude the current order and check if there are previous orders
-            previous_orders = Order.objects.filter(
-                user_ref=user, order_items__product_ref=product
-            ).exclude(order_id=order_instance.order_id)
-            if previous_orders.exists():
-                # Record a reorder event; you can include additional metadata as needed
-                EventAnalytics.objects.create(
-                    event_type="reorder",
-                    user_ref=user,
-                    session_id=session_id,
-                    metadata={
-                        "order_id": order_instance.order_id,
-                        "product_code": product.product_code,
-                        "quantity": item.quantity,
-                        "timestamp": str(datetime.now()),
-                    },
+            if (
+                not Order.objects.filter(
+                    user_ref=user, order_items__product_ref=product
                 )
-                logger.info(
-                    f"Recorded reorder event for user {user.user_id} for product {product.product_code}"
-                )
+                .exclude(order_id=order_instance.order_id)
+                .exists()
+            ):
+                continue
+
+            event = EventAnalytics(
+                event_type="reorder",
+                user_ref=user,
+                session_id=session_id,
+                metadata={
+                    "order_id": order_instance.order_id,
+                    "product_code": product.product_code,
+                    "quantity": item.quantity,
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+            parent.add_child(instance=event)
 
     def _is_product_live(self, product_code):
         try:

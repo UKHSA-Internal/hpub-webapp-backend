@@ -326,6 +326,7 @@ class Product(Page):
                     program_id=self.program_id,
                     product_key=self.product_key,
                     is_latest=True,
+                    status="live",
                 )
                 .exclude(pk=self.pk)
                 .values("language_name", "product_title", "product_code")

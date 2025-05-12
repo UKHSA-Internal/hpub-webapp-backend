@@ -24,6 +24,7 @@ class AddressSerializer(serializers.ModelSerializer):
     user_ref = serializers.PrimaryKeyRelatedField(
         queryset=User.objects.all(), required=True, allow_null=True
     )
+    created_at = serializers.DateTimeField(read_only=True)
 
     user_info = serializers.SerializerMethodField()
 
@@ -42,6 +43,7 @@ class AddressSerializer(serializers.ModelSerializer):
             "is_default",
             "verified",
             "user_info",
+            "created_at",
         ]
 
     def create(self, validated_data):

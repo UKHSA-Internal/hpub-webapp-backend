@@ -8,9 +8,8 @@ import requests
 from configs.get_secret_config import Config
 from core.errors.enums import ErrorCode, ErrorMessage
 from core.users.models import User
-from core.users.permissions import IsAdminOrRegisteredUser
 from core.utils.address_verification import get_oauth_token, verify_address
-from core.utils.custom_token_authentication import CustomTokenAuthentication
+from rest_framework.authentication import SessionAuthentication
 from django.contrib.contenttypes.models import ContentType
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
@@ -18,7 +17,7 @@ from django.utils.text import slugify
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from wagtail.models import Page
 from .models import Address
@@ -50,8 +49,8 @@ class CustomPagination(PageNumberPagination):
 
 
 class AddressViewSet(viewsets.ModelViewSet):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminOrRegisteredUser]
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
     queryset = Address.objects.all()
     serializer_class = AddressSerializer
     config = Config()
@@ -361,7 +360,7 @@ class AddressViewSet(viewsets.ModelViewSet):
 
             # Use __iexact lookups for duplicate check during update
             existing_address = (
-                Address.objects.exclude(id=address_id)
+                Address.objects.exclude(address_id=address_id)
                 .filter(
                     address_line1__iexact=data.get(
                         "address_line1", instance.address_line1

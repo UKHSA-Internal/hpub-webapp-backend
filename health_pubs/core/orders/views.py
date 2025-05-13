@@ -25,6 +25,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Sum
 from django.http import JsonResponse
 from django.utils.text import slugify
+from django.http import HttpResponse
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import APIException, ValidationError
@@ -88,7 +89,7 @@ class OrderViewSet(viewsets.ModelViewSet):
 
         # 3) Prepare the two user roles (order_user + limit_user)
         user_setup = self._prepare_users(admin, user_ref, user_data, data, parent)
-        if isinstance(user_setup, Response):
+        if isinstance(user_setup, (Response, HttpResponse)):
             return user_setup
         order_user, limit_user = user_setup
 

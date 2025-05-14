@@ -26,7 +26,8 @@ from django.utils.text import slugify
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import APIException, ValidationError
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.authentication import SessionAuthentication
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from wagtail.models import Page
@@ -957,8 +958,8 @@ class OrderItemViewSet(viewsets.ModelViewSet):
 
 
 class MigrateOrdersAPIView(APIView):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated]
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
 
     def post(self, request, *args, **kwargs):
         logger.info("Starting the order migration process.")

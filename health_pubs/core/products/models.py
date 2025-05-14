@@ -214,7 +214,6 @@ class Product(Page):
     language_name = models.CharField(max_length=30)
 
     file_url = models.URLField(max_length=255, null=True, blank=True)
-    suppress_event = models.BooleanField(default=False)
 
     # Reference to ProductUpdate (optional)
     update_ref = models.OneToOneField(
@@ -229,8 +228,16 @@ class Product(Page):
         help_text="When true, suppress all EventBridge events on status changes.",
     )
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(
+        default=timezone.now,
+        blank=True,
+        help_text="If not provided, set to now on first save.",
+    )
+    updated_at = models.DateTimeField(
+        default=timezone.now,
+        blank=True,
+        help_text="If not provided, set to now on every save.",
+    )
 
     # Panels for Wagtail Admin
     content_panels = Page.content_panels + [
@@ -254,11 +261,25 @@ class Product(Page):
     ]
 
     def save(self, *args, **kwargs):
-        # Automatically populate `product_code_no_dashes` by removing dashes and spaces
+        now = timezone.now()
+
+        if self._state.adding:
+            # new instance…
+            if self.created_at is None:
+                self.created_at = now
+            # only set updated_at on create if nobody passed one
+            if self.updated_at is None:
+                self.updated_at = now
+        else:
+            # existing instance: always bump updated_at
+            self.updated_at = now
+
+        # keep your product_code_no_dashes logic
         if self.product_code:
             self.product_code_no_dashes = self.product_code.replace("-", "").replace(
                 " ", ""
             )
+
         super().save(*args, **kwargs)
 
     def is_due_to_publish(self):

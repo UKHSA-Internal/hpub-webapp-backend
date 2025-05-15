@@ -641,6 +641,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                 confirmation_message["order_id"],
                 confirmation_message["order_status"],
                 confirmation_message["items_table"],
+                confirmation_message["total_items"],
                 confirmation_message["shipping_address"],
             )
 

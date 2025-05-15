@@ -194,6 +194,9 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
                     self.fields[field].required = False
                     self.fields[field].allow_null = True
 
+                self.fields["run_to_zero"].required = False
+                self.fields["run_to_zero"].allow_null = True
+
     class Meta:
         model = ProductUpdate
         fields = [
@@ -226,6 +229,12 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, data):
+        tag = self.context.get("tag", None)
+
+        if tag == "download-only":
+            # Set 'run_to_zero' to False if it's None for 'download-only' tag
+            if data.get("run_to_zero") is None:
+                data["run_to_zero"] = False
         # Additional validation logic
         if data.get("available_from_choice") == "specific_date" and not data.get(
             "order_from_date"

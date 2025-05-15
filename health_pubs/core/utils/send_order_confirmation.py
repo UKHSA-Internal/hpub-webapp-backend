@@ -26,6 +26,7 @@ def send_notification(
     order_id,
     order_status,
     items_table,
+    total_items,
     shipping_address,
 ):
     try:
@@ -60,6 +61,7 @@ def send_notification(
                 "order_id": order_id,
                 "order_status": order_status,
                 "items_table": items_table,
+                "total_items": total_items,
                 "name": shipping_address["name"],
                 "department": shipping_address["department"],
                 "organisation": shipping_address["organisation"],

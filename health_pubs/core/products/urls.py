@@ -15,6 +15,7 @@ from .views import (
     ProductStatusUpdateView,
     ProductUpdateView,
     ProductUsersListView,
+    ProductUsersSearchFilterAPIView,
     ProductViewSet,
     ProgramProductsView,
     ProductUsersFilterView,
@@ -62,6 +63,11 @@ urlpatterns = [
     path("search/user", ProductSearchUserView.as_view(), name="product-search-user"),
     path("user_filter", ProductUsersFilterView.as_view(), name="user-product-filter"),
     path("admin_filter", ProductAdminFilterView.as_view(), name="admin-product-filter"),
+    path(
+        "user/search/filter/",
+        ProductUsersSearchFilterAPIView.as_view(),
+        name="product-search",
+    ),
     path(
         "<str:program_id>/products",
         ProgramProductsView.as_view(),

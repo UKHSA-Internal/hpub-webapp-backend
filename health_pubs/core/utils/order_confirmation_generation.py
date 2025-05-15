@@ -18,11 +18,17 @@ def generate_order_confirmation(order_instance):
     order_status = "Submitted"  # Assuming the status is "Submitted" for all orders
     confirmation_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Fetch order items
+    order_items = OrderItem.objects.filter(order_ref=order_instance)
+
     # Build the ordered products list in a table-like format
     items_table = "\n".join(
         f" - Item: {item.product_ref.title} - Quantity: {item.quantity}"
         for item in OrderItem.objects.filter(order_ref=order_instance)
     )
+
+    # Total items (sum of quantities)
+    total_items = sum(item.quantity for item in order_items)
 
     # Retrieve shipping address and user details
     user = order_instance.user_ref
@@ -47,6 +53,7 @@ def generate_order_confirmation(order_instance):
         "order_status": order_status,
         "confirmation_date": confirmation_date,
         "items_table": items_table,
+        "total_items": total_items,
         "shipping_address": shipping_address,
     }
 

@@ -54,11 +54,9 @@ PRODUCT_TYPE_CHOICE = [
     ("Pull-up Banners", "Pull-up Banners"),
     ("Stickers", "Stickers"),
     ("Record Cards", "Record Cards"),
-    ("Record Card", "Record Card"),  # singular version
     ("Z-Card", "Z-Card"),
     ("Fridge Magnet", "Fridge Magnet"),
     ("Flyer", "Flyer"),
-    ("Invitation Letter", "Invitation Letter"),
     ("Alternative", "Alternative"),
     ("Memoire", "Memoire"),
     ("Guidance", "Guidance"),
@@ -73,7 +71,6 @@ PRODUCT_TYPE_CHOICE = [
     ("Envelope Label", "Envelope Label"),
     ("Pack Sleeve", "Pack Sleeve"),  # Added
     ("Slide", "Slide"),  # Singular Slide explicitly added
-    ("Audio Transcript", "Audio Transcript"),  # Derived from provided context
 ]
 
 ALTERNATIVE_TYPE_CHOICE = [

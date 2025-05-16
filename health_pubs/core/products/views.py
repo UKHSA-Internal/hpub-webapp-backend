@@ -941,27 +941,27 @@ class ProductUtilsMixin:
         m2m_names = {}
         for field_key, (attr_name, model, response_key) in m2m_mapping.items():
             ids_str = row.get(field_key)
-            if ids_str:
-                # Split the string of IDs by commas, remove extra spaces, and filter out empty values
+            if ids_str is not None:
+                ids_str = str(ids_str)
                 ids = [
                     id_val.strip() for id_val in ids_str.split(",") if id_val.strip()
                 ]
-                # Retrieve existing instances based on these IDs
                 instances = model.objects.filter(id__in=ids)
-                # Update the Many-to-Many field for this instance
                 getattr(instance, attr_name).set(instances)
-                m2m_names[response_key] = [instance.name for instance in instances]
+                m2m_names[response_key] = [obj.name for obj in instances]
         return m2m_names
 
     def create_product_update(self, row):
+        # Ensure run_to_zero is boolean
+        run = row.get("run_to_zero")
+        if not isinstance(run, bool):
+            run = False
         return ProductUpdate(
-            title=row["title"],
+            title=str(row.get("title", "")),
             slug=f"bulkupload-{uuid.uuid4()}",
             minimum_stock_level=row.get("minimum_stock_level"),
             quantity_available=row.get("quantity_available", 0),
-            run_to_zero=row.get(
-                "run_to_zero", False
-            ),  # Default to False if not provided
+            run_to_zero=run,
             available_from_choice=row.get("available_from_choice"),
             available_until_choice=row.get("available_until_choice"),
             order_from_date=row.get("order_from_date"),
@@ -990,18 +990,19 @@ class ProductUtilsMixin:
         user = None
         if row.get("user_id"):
             try:
-                user = User.objects.get(user_id=row["user_id"])
+                user = User.objects.get(user_id=row.get("user_id"))
             except User.DoesNotExist:
-                logger.warning("User with id %s not found", row["user_id"])
+                logger.warning("User with id %s not found", row.get("user_id"))
 
-        slug = f"{slugify(row['title'])}-{uuid.uuid4()}"
+        slug_base = str(row.get("title", ""))
+        slug = f"{slugify(slug_base)}-{uuid.uuid4()}"
         return Product(
-            title=row["title"],
+            title=str(row.get("title", "")),
             slug=slug,
             user_ref=user,
             product_id=str(uuid.uuid4()),
             program_name=program.programme_name if program else "",
-            product_title=row["title"],
+            product_title=str(row.get("title", "")),
             status=row.get("status"),
             product_code=row.get("product_code"),
             file_url=row.get("gov_related_article"),
@@ -1052,14 +1053,14 @@ class ProductUtilsMixin:
         try:
             logger.info(f"Processing row {index+1}: {row}")
             # Required fields
-            req = [
+            required = [
                 "product_key",
                 "title",
                 "language_id",
                 "gov_related_article",
                 "product_code",
             ]
-            missing = [f for f in req if not row.get(f)]
+            missing = [f for f in required if not row.get(f)]
             if missing:
                 return self.skip_row(index, f"Missing fields: {missing}")
             if Product.objects.filter(product_code=row["product_code"]).exists():
@@ -1067,10 +1068,11 @@ class ProductUtilsMixin:
                     index,
                     f"Product with product_code {row['product_code']} already exists.",
                 )
+
             # Clean data
             row = self.clean_row_data(row)
-            row.setdefault("run_to_zero", False)
             created_date = self.convert_created_date(row.get("created"))
+
             # Program lookup
             program = None
             if row.get("programme_id"):
@@ -1080,6 +1082,7 @@ class ProductUtilsMixin:
                     return self.skip_row(
                         index, f"Program id {row['programme_id']} not exist."
                     )
+
             # Language lookup
             try:
                 language = LanguagePage.objects.get(language_id=row["language_id"])
@@ -1088,11 +1091,10 @@ class ProductUtilsMixin:
                     index, f"Language id {row['language_id']} not exist."
                 )
             iso_code = language.iso_language_code.upper()
+
             # Create update
             pu = self.create_product_update(row)
             self.safe_add_child(root_page, pu)
-
-            # Use assign_m2m_fields to handle many-to-many relationships
             self.assign_m2m_fields(
                 pu,
                 {
@@ -1118,10 +1120,12 @@ class ProductUtilsMixin:
                 row, program, language, iso_code, pu, created_date, pub_date
             )
             self.safe_add_child(root_page, prod)
+
             # Order limits
             saved = self.create_order_limits(prod, row)
             logger.info("Order limits for %s", saved)
             return {"skipped": False, "products_created": 2 + len(saved)}
+
         except Exception as e:
             logger.exception(f"Error in row {index+1}: {e}")
             return self.skip_row(index, f"Unexpected error: {e}")
@@ -1130,11 +1134,12 @@ class ProductUtilsMixin:
         if raw_version_date and raw_version_date != "-":
             if isinstance(raw_version_date, datetime.date):
                 return raw_version_date
-            for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
-                try:
-                    return datetime.datetime.strptime(raw_version_date, fmt).date()
-                except:
-                    continue
+            if isinstance(raw_version_date, str):
+                for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
+                    try:
+                        return datetime.datetime.strptime(raw_version_date, fmt).date()
+                    except ValueError:
+                        continue
         return datetime.date.today()
 
     def _clean_numeric_field(self, value):
@@ -1145,7 +1150,9 @@ class ProductUtilsMixin:
                 v = value.strip()
                 if "," in v:
                     return ",".join(
-                        str(int(float(x))) if x.replace(".", "", 1).isdigit() else x
+                        str(int(float(x)))
+                        if isinstance(x, str) and x.replace(".", "", 1).isdigit()
+                        else x
                         for x in v.split(",")
                     )
                 if v.replace(".", "", 1).isdigit():
@@ -1160,7 +1167,9 @@ class ProductUtilsMixin:
     def _clean_run_to_zero(self, val):
         if isinstance(val, str):
             return {"y": True, "n": False}.get(val.strip().lower())
-        return val
+        if isinstance(val, bool):
+            return val
+        return False
 
     def _clean_invalid_strings(self, row):
         for k, v in row.items():
@@ -1169,6 +1178,7 @@ class ProductUtilsMixin:
         return row
 
     def clean_row_data(self, row):
+        # Normalize run_to_zero, default False
         row["run_to_zero"] = self._clean_run_to_zero(row.get("run_to_zero"))
         row = self._clean_invalid_strings(row)
         # Nullify local_code & cost_centre if numeric/float-like
@@ -1194,9 +1204,9 @@ class ProductUtilsMixin:
 
     def convert_created_date(self, val):
         if isinstance(val, pd.Timestamp):
-            return val.to_pydatetime()  # This handles pandas Timestamps
+            return val.to_pydatetime()
         if isinstance(val, datetime.datetime):
-            return val  # If the value is already a datetime object, return it
+            return val
         if isinstance(val, str):
             for fmt in ("%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S"):
                 try:
@@ -1234,7 +1244,6 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
     def bulk_upload(self, request):
         """
         Bulk upload for merged product Excel files.
-        Reads each row and creates Product / ProductUpdate / OrderLimitPage records.
         """
         try:
             merged_excel_file = request.FILES.get("product_excel")

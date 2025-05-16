@@ -4,6 +4,9 @@ import uuid
 from datetime import datetime
 from uuid import uuid4
 from django.db import transaction
+from datetime import timedelta
+from django.utils.timezone import now
+from django.db.models import Sum
 import pandas as pd
 from core.addresses.models import Address
 from core.addresses.serializers import AddressSerializer
@@ -364,65 +367,61 @@ class OrderViewSet(viewsets.ModelViewSet):
             raise APIException(ErrorMessage.INTERNAL_SERVER_ERROR)
 
     def _validate_order_limits(self, items_data, user_instance):
-        # Accumulate quantities by product code
+        # Calculate the start of our 24h window
+        window_start = now() - timedelta(hours=24)
+
+        # Sum up requested quantities per product
         product_quantities = {}
         for item in items_data:
-            product_code = item["product_code"]
-            quantity = item["quantity"]
-            product_quantities[product_code] = (
-                product_quantities.get(product_code, 0) + quantity
-            )
+            code = item["product_code"]
+            qty = item["quantity"]
+            product_quantities[code] = product_quantities.get(code, 0) + qty
 
-        # Check each product's order limit
-        for product_code, total_quantity in product_quantities.items():
+        for product_code, requested_qty in product_quantities.items():
             try:
                 product = Product.objects.get(product_code=product_code)
             except Product.DoesNotExist:
-                logger.error(f"Product not found: Code {product_code}")
+                logger.error(f"Product not found: {product_code}")
                 raise ValidationError(
                     {
                         "product_code": f"Product with code {product_code} does not exist."
                     }
                 )
-            except Exception as e:
-                logger.exception(
-                    f"Unexpected error while retrieving product {product_code}: {e}",
-                    extra={
-                        "product_code": product_code,
-                        "traceback": traceback.format_exc(),
-                    },
-                )
-                raise APIException(ErrorMessage.INTERNAL_SERVER_ERROR)
 
-            order_limit_page = OrderLimitPage.objects.filter(
+            limit_page = OrderLimitPage.objects.filter(
                 organization_ref=user_instance.organization_ref.organization_id,
                 product_ref=product,
             ).first()
 
-            if order_limit_page:
-                order_limit = order_limit_page.order_limit
-                current_total_quantity = (
-                    Order.objects.filter(
-                        user_ref__organization_ref__organization_id=user_instance.organization_ref.organization_id,
-                        order_items__product_ref=product,
-                    ).aggregate(total=Sum("order_items__quantity"))["total"]
-                    or 0
-                )
+            if not limit_page:
+                continue
 
-                if current_total_quantity + total_quantity > order_limit:
-                    logger.warning(
-                        f"Order limit exceeded for product {product_code}. "
-                        f"Order limit: {order_limit}, Current total: {current_total_quantity}, Requested: {total_quantity}"
-                    )
-                    raise ValidationError(
-                        {
-                            "error_message": "Order limit exceeded for this product.",
-                            "error_code": "ORDER_LIMIT_EXCEEDED",
-                            "order_limit": order_limit,
-                            "current_total_quantity": current_total_quantity,
-                            "requested_quantity": total_quantity,
-                        }
-                    )
+            limit = limit_page.order_limit
+
+            # Sum all quantities in the last 24h
+            measured_qty = (
+                Order.objects.filter(
+                    user_ref__organization_ref__organization_id=user_instance.organization_ref.organization_id,
+                    order_items__product_ref=product,
+                    created_at__gte=window_start,
+                ).aggregate(total=Sum("order_items__quantity"))["total"]
+                or 0
+            )
+
+            if measured_qty + requested_qty > limit:
+                logger.warning(
+                    f"24h order limit exceeded for {product_code}: "
+                    f"limit={limit}, in_last_24h={measured_qty}, requesting={requested_qty}"
+                )
+                raise ValidationError(
+                    {
+                        "error_message": "24-hour order limit exceeded for this product.",
+                        "error_code": "ORDER_LIMIT_EXCEEDED",
+                        "order_limit": limit,
+                        "measured_last_24h": measured_qty,
+                        "requested_quantity": requested_qty,
+                    }
+                )
 
         return True
 

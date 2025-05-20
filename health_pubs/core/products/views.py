@@ -2048,13 +2048,25 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
 
 
 class ProductListMixin:
+    """Mixin to list / paginate / serialize Products.
+
+    By default it does _not_ include the DRF `request` in the serializer context,
+    so serializers that peek at `context['request'].user` won’t see it.
+    Child views that set `include_request_context = True`
+    will have `request` injected into the serializer context.
+    """
+
     serializer_class = ProductSerializer
+    include_request_context = False
 
     def get_sorted_queryset(self, queryset, request):
         sort_by = request.GET.get("sort_by")
         if sort_by in VALID_SORT_FIELDS:
             return queryset.order_by(sort_by)
         return queryset
+
+    def get_serializer_context(self, request):
+        return {"request": request} if self.include_request_context else {}
 
     def paginate_and_serialize(
         self, queryset, request, serializer_class=None, use_direct_update=False
@@ -2063,14 +2075,17 @@ class ProductListMixin:
         paginator = CustomPagination()
         paginated = paginator.paginate_queryset(queryset, request)
 
-        # Serialize once and batch-process S3 URLs
-        serializer = serializer_class(paginated, many=True)
+        context = self.get_serializer_context(request)
+
+        # 1) initial serialize → collect all S3 URLs
+        serializer = serializer_class(paginated, many=True, context=context)
         all_download_urls = extract_s3_urls(serializer.data)
         presigned_urls = generate_presigned_urls(all_download_urls)
 
+        # 2) apply presigned URLs, then re-serialize if needed
         if use_direct_update:
             _update_product_downloads_with_presigned_urls(paginated, presigned_urls)
-            serializer = serializer_class(paginated, many=True)
+            serializer = serializer_class(paginated, many=True, context=context)
         else:
             update_product_urls(serializer.data, presigned_urls)
 
@@ -2081,8 +2096,12 @@ class ProductAdminListView(APIView, ProductListMixin):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
 
+    # 👉 Turn on request-injection so the serializer’s to_representation()
+    # will see `request.user` and _not_ strip out your email fields.
+    include_request_context = True
+
     def get(self, request, *args, **kwargs):
-        logger.info("ProductAdminListView GET method called")
+        logger.info("ProductAdminListView GET called")
         try:
             products = Product.objects.all()
             if not products.exists():
@@ -2092,9 +2111,10 @@ class ProductAdminListView(APIView, ProductListMixin):
                     ErrorMessage.PRODUCT_NOT_FOUND,
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
+
             sorted_qs = self.get_sorted_queryset(products, request)
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
-            logger.info("Returning paginated response with %d products", len(data))
+            logger.info("Returning %d products", len(data))
             return paginator.get_paginated_response(
                 data, status_code=status.HTTP_200_OK
             )

@@ -18,15 +18,13 @@ router.register(
 )
 router.register(r"programs/update", ProgramUpdateViewSet, basename="program-update")
 router.register(r"programs/destroy", ProgramDestroyViewSet, basename="program-destroy")
-# router.register(
-#     r"programs/bulk-upload", BulkProgramUploadViewSet, basename="bulk-upload"
-# )
 router.register(
     r"programs/bulk-delete", BulkProgramDeleteViewSet, basename="bulk-delete"
 )
 
-urlpatterns = router.urls
+# Combine router-generated URLs with your extra upload endpoint
 urlpatterns = [
+    *router.urls,
     path(
         "programs/bulk-upload/",
         BulkProgramUploadViewSet.as_view(),

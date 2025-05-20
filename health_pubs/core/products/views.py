@@ -71,6 +71,7 @@ from .serializers import (
     ProductSerializer,
     ProductUpdateSerializer,
 )
+
 from django.core.serializers.json import DjangoJSONEncoder
 
 logger = logging.getLogger(__name__)
@@ -510,15 +511,75 @@ class ProductUtilsMixin_:
         logger.warning(f"Skipping row {index + 1}: {message}")
         return {"skipped": True, "error": {"row": index + 1, "error": message}}
 
-    def assign_m2m_fields(self, instance, m2m_mapping, row):
-        m2m_names = {}
-        for field_key, (attr_name, model, response_key) in m2m_mapping.items():
-            instances, names = self.fetch_instances_and_names(
-                model, field_key, row.get(field_key)
-            )
-            getattr(instance, attr_name).set(instances)
-            m2m_names[response_key] = names
-        return m2m_names
+    def assign_m2m_fields(self, instance, m2m_mapping, row, add_only=False):
+        """
+        Sets or adds M2M relations on `instance` according to m2m_mapping:
+          { column_name: (django_attr, Model, response_key) }
+
+        Excel contains plain integers (the Wagtail page IDs), but each Page
+        subclass uses a UUID PK under the hood.  So we filter on the parent
+        page_ptr_id (the integer primary key of the Page table).
+        """
+        names = {}
+
+        for col, (attr_name, model, resp_key) in m2m_mapping.items():
+            raw = row.get(col)
+            logger.debug(f"M2M mapping for {col!r}: raw value={raw!r}")
+
+            manager = getattr(instance, attr_name)
+
+            if not raw:
+                # clear all if no IDs present
+                if not add_only:
+                    manager.clear()
+                    logger.info(f"Cleared existing {attr_name} on {instance!r}")
+                continue
+
+            # parse comma-separated page IDs
+            id_strings = [s.strip() for s in str(raw).split(",") if s.strip()]
+            # keep only those that look like integers
+            page_ids = [int(x) for x in id_strings if x.isdigit()]
+
+            if not page_ids:
+                logger.warning(
+                    f"No valid integer page IDs found for {col!r}: {id_strings}"
+                )
+                # clear if not add_only
+                if not add_only:
+                    manager.clear()
+                names[resp_key] = []
+                continue
+
+            # fetch the actual Page instances via page_ptr_id
+            objs = list(model.objects.filter(page_ptr_id__in=page_ids))
+            found_ptrs = [o.page_ptr_id for o in objs]
+            missing = set(page_ids) - set(found_ptrs)
+            if missing:
+                logger.warning(
+                    f"Could not find {model.__name__} pages with IDs {missing}, "
+                    f"but proceeding with {found_ptrs}"
+                )
+
+            if add_only:
+                existing_ids = set(manager.values_list("page_ptr_id", flat=True))
+                to_add = [o for o in objs if o.page_ptr_id not in existing_ids]
+                if to_add:
+                    manager.add(*to_add)
+                    logger.info(
+                        f"Added {attr_name} on {instance!r}: {[o.page_ptr_id for o in to_add]}"
+                    )
+            else:
+                manager.set(objs)
+                logger.info(
+                    f"Set {attr_name} on {instance!r} to {[o.page_ptr_id for o in objs]}"
+                )
+
+            names[resp_key] = [
+                o.title for o in objs
+            ]  # or o.name if your models use `name`
+
+        # no need for extra instance.save(): M2M writes happen immediately
+        return names
 
     def create_product_update(self, row):
         slug_update = f"bulkupload-{uuid.uuid4()}"
@@ -914,8 +975,7 @@ class ProductViewSet_(ProductUtilsMixin_, viewsets.ViewSet):
 
 class ProductUtilsMixin:
     """
-    Contains common helper functions for product processing,
-    used in bulk uploads.
+    Common helper methods for creating/updating products in bulk.
     """
 
     def skip_row(self, index, message):
@@ -923,272 +983,18 @@ class ProductUtilsMixin:
         return {"skipped": True, "error": {"row": index + 1, "error": message}}
 
     def safe_add_child(self, parent, instance):
-        """
-        Adds a child to `parent`, handling when parent has no existing children
-        to avoid Treebeard _inc_path errors.
-        """
-        children = parent.get_children()
-        if children.exists():
-            parent.add_child(instance=instance)
-        else:
-            instance.depth = parent.depth + 1
-            instance.path = f"{parent.path}0001"
-            instance.numchild = 0
-            instance.save()
+        parent.add_child(instance=instance)
         return instance
 
-    def assign_m2m_fields(self, instance, m2m_mapping, row):
-        m2m_names = {}
-        for field_key, (attr_name, model, response_key) in m2m_mapping.items():
-            ids_str = row.get(field_key)
-            if ids_str is not None:
-                ids_str = str(ids_str)
-                ids = [
-                    id_val.strip() for id_val in ids_str.split(",") if id_val.strip()
-                ]
-                instances = model.objects.filter(id__in=ids)
-                getattr(instance, attr_name).set(instances)
-                m2m_names[response_key] = [obj.name for obj in instances]
-        return m2m_names
-
-    def create_product_update(self, row):
-        # Ensure run_to_zero is boolean
-        run = row.get("run_to_zero")
-        if not isinstance(run, bool):
-            run = False
-        return ProductUpdate(
-            title=str(row.get("title", "")),
-            slug=f"bulkupload-{uuid.uuid4()}",
-            minimum_stock_level=row.get("minimum_stock_level"),
-            quantity_available=row.get("quantity_available", 0),
-            run_to_zero=run,
-            available_from_choice=row.get("available_from_choice"),
-            available_until_choice=row.get("available_until_choice"),
-            order_from_date=row.get("order_from_date"),
-            order_end_date=row.get("order_end_date"),
-            product_type=row.get("product_type"),
-            alternative_type=row.get("alternative_type"),
-            cost_centre=row.get("cost_centre"),
-            local_code=row.get("local_code"),
-            unit_of_measure=row.get("unit_of_measure"),
-            summary_of_guidance=row.get("summary_of_guidance"),
-            stock_owner_email_address=row.get("stock_owner"),
-            order_referral_email_address=row.get("stock_referral"),
-            product_downloads=row.get("product_downloads", {}),
-        )
-
-    def create_product(
-        self,
-        row,
-        program,
-        language,
-        iso_language_code,
-        product_update,
-        created_date,
-        publish_date,
-    ):
-        user = None
-        if row.get("user_id"):
-            try:
-                user = User.objects.get(user_id=row.get("user_id"))
-            except User.DoesNotExist:
-                logger.warning("User with id %s not found", row.get("user_id"))
-
-        slug_base = str(row.get("title", ""))
-        slug = f"{slugify(slug_base)}-{uuid.uuid4()}"
-        return Product(
-            title=str(row.get("title", "")),
-            slug=slug,
-            user_ref=user,
-            product_id=str(uuid.uuid4()),
-            program_name=program.programme_name if program else "",
-            product_title=str(row.get("title", "")),
-            status=row.get("status"),
-            product_code=row.get("product_code"),
-            file_url=row.get("gov_related_article"),
-            tag=row.get("tag"),
-            product_key=row.get("product_key"),
-            program_id=program,
-            language_id=language,
-            version_number="001",
-            iso_language_code=iso_language_code,
-            language_name=row.get("language_name"),
-            update_ref=product_update,
-            created_at=created_date,
-            is_latest=True,
-            publish_date=publish_date,
-            suppress_event=False,
-        )
-
-    def create_order_limits(self, product, row):
-        saved_orgs = []
-        raw_orgs = row.get("organization_name")
-        limit = row.get("order_limit_value")
-        if not raw_orgs or pd.isna(limit):
-            return saved_orgs
-        for name in str(raw_orgs).split(","):
-            org_name = name.strip()
-            if not org_name:
-                continue
-            org = Organization.objects.filter(name=org_name).first()
-            if not org:
-                logger.warning(
-                    "Organization '%s' not found; skipping order limit", org_name
-                )
-                continue
-            ol = OrderLimitPage(
-                title=f"Order limit for {org.name}",
-                slug=f"order-limit-{org.id}-{uuid.uuid4().hex[:6]}",
-                order_limit_id=str(uuid.uuid4()),
-                order_limit=int(limit),
-                product_ref=product,
-                organization_ref=org,
-            )
-            self.safe_add_child(product, ol)
-            saved_orgs.append(org.name)
-        return saved_orgs
-
-    def process_row(self, series_row, index, root_page):
-        row = series_row.to_dict()
-        try:
-            logger.info(f"Processing row {index+1}: {row}")
-            # Required fields
-            required = [
-                "product_key",
-                "title",
-                "language_id",
-                "gov_related_article",
-                "product_code",
-            ]
-            missing = [f for f in required if not row.get(f)]
-            if missing:
-                return self.skip_row(index, f"Missing fields: {missing}")
-            if Product.objects.filter(product_code=row["product_code"]).exists():
-                return self.skip_row(
-                    index,
-                    f"Product with product_code {row['product_code']} already exists.",
-                )
-
-            # Clean data
-            row = self.clean_row_data(row)
-            created_date = self.convert_created_date(row.get("created"))
-
-            # Program lookup
-            program = None
-            if row.get("programme_id"):
-                pid = str(int(row["programme_id"]))
-                program = Program.objects.filter(program_id=pid).first()
-                if not program:
-                    return self.skip_row(
-                        index, f"Program id {row['programme_id']} not exist."
-                    )
-
-            # Language lookup
-            try:
-                language = LanguagePage.objects.get(language_id=row["language_id"])
-            except LanguagePage.DoesNotExist:
-                return self.skip_row(
-                    index, f"Language id {row['language_id']} not exist."
-                )
-            iso_code = language.iso_language_code.upper()
-
-            # Create update
-            pu = self.create_product_update(row)
-            self.safe_add_child(root_page, pu)
-            self.assign_m2m_fields(
-                pu,
-                {
-                    "audience_id": ("audience_ref", Audience, "audience_names"),
-                    "where_to_use_id": (
-                        "where_to_use_ref",
-                        WhereToUse,
-                        "where_to_use_names",
-                    ),
-                    "vaccination_id": (
-                        "vaccination_ref",
-                        Vaccination,
-                        "vaccination_names",
-                    ),
-                    "disease_id": ("diseases_ref", Disease, "disease_names"),
-                },
-                row,
-            )
-
-            # Create product
-            pub_date = self.get_publish_date(row.get("version_date"), index)
-            prod = self.create_product(
-                row, program, language, iso_code, pu, created_date, pub_date
-            )
-            self.safe_add_child(root_page, prod)
-
-            # Order limits
-            saved = self.create_order_limits(prod, row)
-            logger.info("Order limits for %s", saved)
-            return {"skipped": False, "products_created": 2 + len(saved)}
-
-        except Exception as e:
-            logger.exception(f"Error in row {index+1}: {e}")
-            return self.skip_row(index, f"Unexpected error: {e}")
-
-    def get_publish_date(self, raw_version_date, index):
-        if raw_version_date and raw_version_date != "-":
-            if isinstance(raw_version_date, datetime.date):
-                return raw_version_date
-            if isinstance(raw_version_date, str):
-                for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
-                    try:
-                        return datetime.datetime.strptime(raw_version_date, fmt).date()
-                    except ValueError:
-                        continue
-        return datetime.date.today()
-
-    def _clean_numeric_field(self, value):
-        if not pd.notna(value):
-            return None
-        try:
-            if isinstance(value, str):
-                v = value.strip()
-                if "," in v:
-                    return ",".join(
-                        str(int(float(x)))
-                        if isinstance(x, str) and x.replace(".", "", 1).isdigit()
-                        else x
-                        for x in v.split(",")
-                    )
-                if v.replace(".", "", 1).isdigit():
-                    return str(int(float(v)))
-            if isinstance(value, (int, float)):
-                return str(int(float(value)))
-        except Exception as e:
-            logger.error(f"Error cleaning numeric field: {e}")
-            return None
-        return None
-
-    def _clean_run_to_zero(self, val):
-        if isinstance(val, str):
-            return {"y": True, "n": False}.get(val.strip().lower())
-        if isinstance(val, bool):
-            return val
-        return False
-
-    def _clean_invalid_strings(self, row):
-        for k, v in row.items():
-            if isinstance(v, str) and v.strip().lower() in {"-", "nan", "n/a"}:
-                row[k] = None
-        return row
-
     def clean_row_data(self, row):
-        # Normalize run_to_zero, default False
         row["run_to_zero"] = self._clean_run_to_zero(row.get("run_to_zero"))
         row = self._clean_invalid_strings(row)
-        # Nullify local_code & cost_centre if numeric/float-like
         for key in ("local_code", "cost_centre"):
             val = row.get(key)
             if isinstance(val, (int, float)) or (
                 isinstance(val, str) and val.replace(".", "", 1).isdigit()
             ):
                 row[key] = None
-        # Clean numeric IDs
         for key in [
             "unit_of_measure",
             "programme_id",
@@ -1202,6 +1008,33 @@ class ProductUtilsMixin:
             row[key] = self._clean_numeric_field(row.get(key))
         return row
 
+    def _clean_numeric_field(self, value):
+        if not pd.notna(value):
+            return None
+        try:
+            if isinstance(value, str):
+                v = value.strip()
+                if "," in v:
+                    return ",".join(str(int(float(x))) for x in v.split(","))
+                if v.replace(".", "", 1).isdigit():
+                    return str(int(float(v)))
+            if isinstance(value, (int, float)):
+                return str(int(float(value)))
+        except Exception as e:
+            logger.error(f"Error cleaning numeric field: {e}")
+        return None
+
+    def _clean_run_to_zero(self, val):
+        if isinstance(val, str):
+            return {"y": True, "n": False}.get(val.strip().lower(), False)
+        return bool(val) if isinstance(val, bool) else False
+
+    def _clean_invalid_strings(self, row):
+        for k, v in row.items():
+            if isinstance(v, str) and v.strip().lower() in {"-", "nan", "n/a"}:
+                row[k] = None
+        return row
+
     def convert_created_date(self, val):
         if isinstance(val, pd.Timestamp):
             return val.to_pydatetime()
@@ -1212,28 +1045,237 @@ class ProductUtilsMixin:
                 try:
                     return datetime.datetime.strptime(val, fmt)
                 except ValueError:
-                    continue
-        raise ValueError(f"Unsupported 'created': {val!r}")
+                    pass
+        raise ValueError(f"Unsupported 'created' format: {val!r}")
+
+    def get_publish_date(self, raw):
+        if raw and raw != "-":
+            if isinstance(raw, datetime.date):
+                return raw
+            if isinstance(raw, str):
+                for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
+                    try:
+                        return datetime.datetime.strptime(raw, fmt).date()
+                    except ValueError:
+                        continue
+        return datetime.date.today()
 
     def get_or_create_root_page(self):
         try:
             return Page.objects.get(slug="products-root")
         except Page.DoesNotExist:
-            root = Page.get_first_root_node()
-            if not root:
-                raise ImproperlyConfigured("No root page")
-            nr = ProductUpdate(title="Products Root", slug="products-root")
-            self.safe_add_child(root, nr)
-            return nr
+            site_root = Page.get_first_root_node()
+            if not site_root:
+                raise ImproperlyConfigured("Cannot find a root page in Wagtail.")
+            root = ProductUpdate(title="Products Root", slug="products-root")
+            site_root.add_child(instance=root)
+            return root
 
-    def fetch_instances_and_names(self, model, field_name, ids_str):
-        if not ids_str:
-            return [], []
-        ids = [i.strip() for i in str(ids_str).split(",") if i.strip()]
-        if not ids:
-            return [], []
-        qs = model.objects.filter(id__in=ids)
-        return list(qs), [o.name for o in qs]
+    def assign_m2m_fields(self, instance, m2m_mapping, row, add_only=False):
+        """
+        Sets or adds M2M relations on `instance` according to m2m_mapping:
+          { sheet_column: (attr_name, Model, lookup_field, response_key) }
+        Looks up each Model by the given lookup_field (e.g. 'audience_id'),
+        so you can pass in your sheet's audience_id, where_to_use_id, etc.
+        Logs every step so you can see what's coming in.
+        """
+        names = {}
+
+        for col, (attr_name, model, lookup_field, resp_key) in m2m_mapping.items():
+            raw = row.get(col)
+            logger.debug(f"M2M: column={col!r}, raw value={raw!r}")
+
+            manager = getattr(instance, attr_name)
+
+            if not raw:
+                # empty in sheet → clear all (unless add_only)
+                if not add_only:
+                    manager.clear()
+                    logger.info(f"Cleared all existing {attr_name} on {instance}.")
+                names[resp_key] = []
+                continue
+
+            # parse comma-separated IDs from sheet
+            ids = [v.strip() for v in str(raw).split(",") if v.strip()]
+            logger.debug(f"Parsed IDs for {col}: {ids}")
+
+            # lookup by the custom field (e.g. audience_id=77)
+            filter_kwargs = {f"{lookup_field}__in": ids}
+            objs = list(model.objects.filter(**filter_kwargs))
+            found_values = {str(getattr(o, lookup_field)) for o in objs}
+            missing = set(ids) - found_values
+            if missing:
+                logger.warning(
+                    f"Could not find {model.__name__}.{lookup_field} values {missing},"
+                    f" proceeding with {sorted(found_values)}"
+                )
+
+            if add_only:
+                # only add the new ones
+                existing_ids = set(
+                    str(x) for x in manager.values_list(lookup_field, flat=True)
+                )
+                to_add = [
+                    o for o in objs if str(getattr(o, lookup_field)) not in existing_ids
+                ]
+                if to_add:
+                    manager.add(*to_add)
+                    logger.info(
+                        f"Added to {attr_name} on {instance}: {[o.id for o in to_add]}"
+                    )
+            else:
+                # replace entirely
+                manager.set(objs)
+                logger.info(f"Set {attr_name} on {instance} to {[o.id for o in objs]}")
+
+            # record names (or IDs) for the response
+            names[resp_key] = [
+                getattr(o, "name", str(getattr(o, lookup_field))) for o in objs
+            ]
+
+        # flush any changes
+        instance.save()
+        return names
+
+    def create_product_update(self, row):
+        run = bool(row.get("run_to_zero", False))
+        return ProductUpdate(
+            title=str(row.get("title", "")),
+            slug=f"update-{uuid.uuid4().hex[:8]}",
+            minimum_stock_level=row.get("minimum_stock_level"),
+            quantity_available=row.get("quantity_available", 0),
+            run_to_zero=run,
+            available_from_choice=row.get("available_from_choice"),
+            available_until_choice=row.get("available_until_choice"),
+            order_from_date=row.get("order_from_date"),
+            order_end_date=row.get("order_end_date"),
+            product_type=row.get("product_type"),
+            alternative_type=row.get("alternative_type"),
+            cost_centre=row.get("cost_centre"),
+            local_code=row.get("local_code"),
+            unit_of_measure=row.get("unit_of_measure"),
+            summary_of_guidance=row.get("guidance"),
+            stock_owner_email_address=row.get("stock_owner"),
+            order_referral_email_address=row.get("stock_referral"),
+            product_downloads=row.get("product_downloads", {}),
+        )
+
+    def update_product_update(self, pu, row):
+        """Overwrite every field on an existing ProductUpdate."""
+        pu.title = str(row.get("title", ""))
+        pu.minimum_stock_level = row.get("minimum_stock_level")
+        pu.quantity_available = row.get("quantity_available", 0)
+        pu.run_to_zero = bool(row.get("run_to_zero", False))
+        pu.available_from_choice = row.get("available_from_choice")
+        pu.available_until_choice = row.get("available_until_choice")
+        pu.order_from_date = row.get("order_from_date")
+        pu.order_end_date = row.get("order_end_date")
+        pu.product_type = row.get("product_type")
+        pu.alternative_type = row.get("alternative_type")
+        pu.cost_centre = row.get("cost_centre")
+        pu.local_code = row.get("local_code")
+        pu.unit_of_measure = row.get("unit_of_measure")
+        pu.summary_of_guidance = row.get("guidance")
+        pu.stock_owner_email_address = row.get("stock_owner")
+        pu.order_referral_email_address = row.get("stock_referral")
+        pu.product_downloads = row.get("product_downloads", {})
+        pu.save()
+        return pu
+
+    def create_product(
+        self, row, program, language, iso_code, pu, created_at, publish_date
+    ):
+        user = None
+        uid = row.get("user_id")
+        if uid:
+            try:
+                user = User.objects.get(user_id=uid)
+            except User.DoesNotExist:
+                logger.warning("User id %s not found, leaving blank", uid)
+        slug_base = str(row.get("title", ""))
+        return Product(
+            title=str(row.get("title", "")),
+            slug=f"{slugify(slug_base)}-{uuid.uuid4().hex[:6]}",
+            user_ref=user,
+            product_id=str(uuid.uuid4()),
+            program_name=program.programme_name if program else "",
+            product_title=str(row.get("title", "")),
+            status=row.get("status"),
+            product_code=row.get("product_code"),
+            file_url=row.get("gov_related_article"),
+            tag=row.get("tag"),
+            product_key=row.get("product_key"),
+            program_id=program,
+            language_id=language,
+            version_number="001",
+            iso_language_code=iso_code,
+            language_name=row.get("language_name"),
+            update_ref=pu,
+            created_at=created_at,
+            is_latest=True,
+            publish_date=publish_date,
+            suppress_event=False,
+        )
+
+    def update_product(self, prod, row, program, language, iso_code, pu, publish_date):
+        """Overwrite every field on an existing Product (except created_at)."""
+        user = None
+        uid = row.get("user_id")
+        if uid:
+            try:
+                user = User.objects.get(user_id=uid)
+            except User.DoesNotExist:
+                pass
+        prod.title = str(row.get("title", ""))
+        # keep slug stable
+        prod.user_ref = user
+        prod.program_name = program.programme_name if program else ""
+        prod.product_title = str(row.get("title", ""))
+        prod.status = row.get("status")
+        prod.file_url = row.get("gov_related_article")
+        prod.tag = row.get("tag")
+        prod.product_key = row.get("product_key")
+        prod.program_id = program
+        prod.language_id = language
+        prod.iso_language_code = iso_code
+        prod.language_name = row.get("language_name")
+        prod.update_ref = pu
+        prod.publish_date = publish_date
+        prod.suppress_event = False
+        prod.save()
+        return prod
+
+    def create_order_limits(self, product, row):
+        saved = []
+        raw = row.get("organization_names")
+        limit = row.get("order_limit_value")
+        if not raw or pd.isna(limit):
+            return saved
+        for name in str(raw).split(","):
+            nm = name.strip()
+            if not nm:
+                continue
+            org = Organization.objects.filter(name=nm).first()
+            if not org:
+                logger.warning("Org '%s' not found, skipping limit", nm)
+                continue
+            ol = OrderLimitPage(
+                title=f"Order limit for {org.name}",
+                slug=f"ol-{org.id}-{uuid.uuid4().hex[:6]}",
+                order_limit_id=str(uuid.uuid4()),
+                order_limit=int(limit),
+                product_ref=product,
+                organization_ref=org,
+            )
+            self.safe_add_child(product, ol)
+            saved.append(org.name)
+        return saved
+
+    def replace_order_limits(self, product, row):
+        # instead of product.get_children().type(...).delete()
+        for child in product.get_children().type(OrderLimitPage):
+            child.delete()
+        return self.create_order_limits(product, row)
 
 
 class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
@@ -1242,70 +1284,154 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
 
     @action(detail=False, methods=["post"], url_path="bulk-upload")
     def bulk_upload(self, request):
-        """
-        Bulk upload for merged product Excel files.
-        """
-        try:
-            merged_excel_file = request.FILES.get("product_excel")
-            if not merged_excel_file:
-                logger.error("No merged Excel file uploaded.")
-                return Response(
-                    {"error": "No merged Excel file uploaded."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            try:
-                df = pd.read_excel(merged_excel_file)
-                df = df.where(pd.notna(df), None)
-            except Exception as e:
-                logger.error(f"Error reading merged Excel file: {e}")
-                return Response(
-                    {"error": "Invalid Excel file."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            if df.empty:
-                logger.warning("Uploaded Excel has no data rows.")
-                return Response(
-                    {"message": "Uploaded Excel contains no data rows."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            try:
-                root_page = self.get_or_create_root_page()
-            except ImproperlyConfigured as e:
-                logger.error("Root page error: %s", e)
-                return Response(
-                    {"error": "Unable to determine root page."},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                )
-
-            skipped_rows = []
-            created_count = 0
-            with transaction.atomic():
-                for idx, row in df.iterrows():
-                    res = self.process_row(row, idx, root_page)
-                    if res.get("skipped"):
-                        skipped_rows.append(res["error"])
-                    else:
-                        created_count += res.get("products_created", 0)
-
-            logger.info(f"Bulk upload completed. Rows skipped: {len(skipped_rows)}")
+        # 1) File upload & parse
+        merged_excel = request.FILES.get("product_excel")
+        if not merged_excel:
             return Response(
-                {
-                    "message": "Bulk upload of merged product Excel completed.",
-                    "created_products": created_count,
-                    "skipped_rows": skipped_rows,
-                },
-                status=status.HTTP_201_CREATED,
+                {"error": "No merged Excel file uploaded."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
+        try:
+            merged_excel.seek(0)
+            df = pd.read_excel(merged_excel, engine="openpyxl")
+            df = df.where(pd.notna(df), None)
         except Exception as e:
-            logger.exception("An unexpected error occurred during bulk upload.")
+            logger.exception("Error reading uploaded file")
             return Response(
-                {"error": f"Unexpected error: {e}"},
+                {"error": "Could not parse spreadsheet", "details": str(e)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if df.empty:
+            return Response(
+                {"message": "Uploaded spreadsheet contains no data rows."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 2) Find or create root page
+        try:
+            root = self.get_or_create_root_page()
+        except ImproperlyConfigured:
+            return Response(
+                {"error": "Unable to find or create products root page."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+        # 3) Prepare counters and M2M map
+        skipped = []
+        created_count = 0
+        updated_count = 0
+        order_limits_count = 0
+
+        m2m_map = {
+            # col in sheet   → (model_attr,   Model,      lookup_field,    response_key)
+            "audience_id": ("audience_ref", Audience, "audience_id", "audience_names"),
+            "where_to_use_id": (
+                "where_to_use_ref",
+                WhereToUse,
+                "where_to_use_id",
+                "where_to_use_names",
+            ),
+            "vaccination_id": (
+                "vaccination_ref",
+                Vaccination,
+                "vaccination_id",
+                "vaccination_names",
+            ),
+            "disease_id": ("diseases_ref", Disease, "disease_id", "disease_names"),
+        }
+
+        # 4) Process each row inside a transaction
+        with transaction.atomic():
+            for idx, series_row in df.iterrows():
+                row = series_row.to_dict()
+                try:
+                    # --- Required fields check ---
+                    for field in (
+                        "product_key",
+                        "title",
+                        "language_id",
+                        "gov_related_article",
+                        "product_code",
+                    ):
+                        if not row.get(field):
+                            raise ValueError(f"Missing required {field}")
+
+                    # --- Clean & parse dates ---
+                    row = self.clean_row_data(row)
+                    created_dt = self.convert_created_date(row.get("created"))
+                    pub_date = self.get_publish_date(row.get("version_date"))
+
+                    # --- Look up program if any ---
+                    program = None
+                    if row.get("programme_id"):
+                        program = Program.objects.filter(
+                            program_id=str(int(row["programme_id"]))
+                        ).first()
+                        if not program:
+                            raise ValueError(f"Program {row['programme_id']} not found")
+
+                    # --- Look up language page ---
+                    language = LanguagePage.objects.filter(
+                        language_id=row["language_id"]
+                    ).first()
+                    if not language:
+                        raise ValueError(f"Language {row['language_id']} not found")
+                    iso_code = language.iso_language_code.upper()
+
+                    # --- Find existing product by code ---
+                    code = row["product_code"]
+                    existing = Product.objects.filter(product_code=code).first()
+
+                    if existing:
+                        # ===== UPDATE PATH =====
+                        pu = existing.update_ref
+                        # 1) Overwrite fields on the ProductUpdate
+                        pu = self.update_product_update(pu, row)
+                        # 2) Re-set ALL M2M on that ProductUpdate
+                        self.assign_m2m_fields(pu, m2m_map, row, add_only=False)
+                        # 3) Replace all order-limit children
+                        ols = self.replace_order_limits(existing, row)
+                        # 4) Overwrite fields on the Product itself
+                        existing = self.update_product(
+                            existing, row, program, language, iso_code, pu, pub_date
+                        )
+                        updated_count += 1
+                        order_limits_count += len(ols)
+
+                    else:
+                        # ===== CREATE PATH =====
+                        # 1) Create a new ProductUpdate
+                        pu = self.create_product_update(row)
+                        self.safe_add_child(root, pu)
+                        # 2) Set ALL M2M on the new ProductUpdate
+                        self.assign_m2m_fields(pu, m2m_map, row, add_only=False)
+                        # 3) Create the Product page
+                        prod = self.create_product(
+                            row, program, language, iso_code, pu, created_dt, pub_date
+                        )
+                        self.safe_add_child(root, prod)
+                        # 4) Create its order-limits
+                        ols = self.create_order_limits(prod, row)
+                        created_count += 1
+                        order_limits_count += len(ols)
+
+                except Exception as e:
+                    logger.exception(f"Row {idx+1} error: {e}")
+                    skipped.append({"row": idx + 1, "error": str(e)})
+
+        # 5) Return summary response
+        return Response(
+            {
+                "message": "Bulk upload complete.",
+                "created_products": created_count,
+                "updated_products": updated_count,
+                "order_limits_created": order_limits_count,
+                "skipped_rows": skipped,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class PresignedUrlMixin:

@@ -306,6 +306,67 @@ class OrderViewSet(viewsets.ModelViewSet):
             logger.exception("Integrity error occurred while creating order.")
             raise ValidationError({"detail": ErrorMessage.ORDER_CREATION_ERROR})
 
+    @action(detail=False, methods=["post"], url_path="check-order-limits")
+    def check_order_limits(self, request):
+        """
+        Accepts a list of product_codes and user_ref.
+        Returns how many have been ordered in the last 24 hours and what remains.
+        """
+        user_ref = request.data.get("user_ref")
+        product_codes = request.data.get("product_codes", [])
+
+        if not user_ref or not product_codes:
+            return Response(
+                {"error": "user_ref and product_codes[] are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            user_instance = self._get_user_or_error(user_ref)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        window_start = now() - timedelta(hours=24)
+        results = []
+
+        for code in product_codes:
+            try:
+                product = Product.objects.get(product_code=code)
+            except Product.DoesNotExist:
+                continue
+
+            order_limit_page = OrderLimitPage.objects.filter(
+                organization_ref=user_instance.organization_ref.organization_id,
+                product_ref=product,
+            ).first()
+
+            if not order_limit_page:
+                continue
+
+            limit = order_limit_page.order_limit
+            already_ordered = (
+                Order.objects.filter(
+                    user_ref__organization_ref__organization_id=user_instance.organization_ref.organization_id,
+                    order_items__product_ref=product,
+                    created_at__gte=window_start,
+                ).aggregate(total=Sum("order_items__quantity"))["total"]
+                or 0
+            )
+
+            remaining = max(limit - already_ordered, 0)
+
+            results.append(
+                {
+                    "product_code": code,
+                    "title": product.title,
+                    "daily_limit": limit,
+                    "already_ordered": already_ordered,
+                    "remaining": remaining,
+                }
+            )
+
+        return Response(results, status=status.HTTP_200_OK)
+
     # Helper methods
 
     def call_record_reorder_events(self, order_instance, request):
@@ -367,17 +428,19 @@ class OrderViewSet(viewsets.ModelViewSet):
             raise APIException(ErrorMessage.INTERNAL_SERVER_ERROR)
 
     def _validate_order_limits(self, items_data, user_instance):
-        # Calculate the start of our 24h window
+        # Define the 24-hour window start
         window_start = now() - timedelta(hours=24)
 
-        # Sum up requested quantities per product
+        # Accumulate requested quantities by product code
         product_quantities = {}
         for item in items_data:
-            code = item["product_code"]
-            qty = item["quantity"]
-            product_quantities[code] = product_quantities.get(code, 0) + qty
+            product_code = item["product_code"]
+            quantity = item["quantity"]
+            product_quantities[product_code] = (
+                product_quantities.get(product_code, 0) + quantity
+            )
 
-        for product_code, requested_qty in product_quantities.items():
+        for product_code, requested_quantity in product_quantities.items():
             try:
                 product = Product.objects.get(product_code=product_code)
             except Product.DoesNotExist:
@@ -388,18 +451,19 @@ class OrderViewSet(viewsets.ModelViewSet):
                     }
                 )
 
+            # Retrieve the order limit for this product
             limit_page = OrderLimitPage.objects.filter(
                 organization_ref=user_instance.organization_ref.organization_id,
                 product_ref=product,
             ).first()
 
             if not limit_page:
-                continue
+                continue  # No limit set, allow order
 
-            limit = limit_page.order_limit
+            daily_limit = limit_page.order_limit
 
-            # Sum all quantities in the last 24h
-            measured_qty = (
+            # Calculate quantity already ordered in the past 24 hours
+            quantity_ordered_recently = (
                 Order.objects.filter(
                     user_ref__organization_ref__organization_id=user_instance.organization_ref.organization_id,
                     order_items__product_ref=product,
@@ -408,18 +472,22 @@ class OrderViewSet(viewsets.ModelViewSet):
                 or 0
             )
 
-            if measured_qty + requested_qty > limit:
+            if quantity_ordered_recently + requested_quantity > daily_limit:
+                remaining = max(daily_limit - quantity_ordered_recently, 0)
                 logger.warning(
-                    f"24h order limit exceeded for {product_code}: "
-                    f"limit={limit}, in_last_24h={measured_qty}, requesting={requested_qty}"
+                    f"24h limit exceeded for {product_code}: limit={daily_limit}, "
+                    f"already_ordered={quantity_ordered_recently}, requested={requested_quantity}"
                 )
                 raise ValidationError(
                     {
-                        "error_message": "24-hour order limit exceeded for this product.",
+                        "error_message": (
+                            f"You've already ordered {quantity_ordered_recently} copies of '{product.title}' today. "
+                            f"You can only order {remaining} more in the next 24 hours."
+                        ),
                         "error_code": "ORDER_LIMIT_EXCEEDED",
-                        "order_limit": limit,
-                        "measured_last_24h": measured_qty,
-                        "requested_quantity": requested_qty,
+                        "order_limit": daily_limit,
+                        "current_total_today": quantity_ordered_recently,
+                        "requested_quantity": requested_quantity,
                     }
                 )
 

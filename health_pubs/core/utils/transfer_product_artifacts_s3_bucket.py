@@ -5,7 +5,6 @@ import boto3
 import psycopg2
 import pandas as pd
 from psycopg2 import extras
-from botocore.exceptions import ClientError
 
 # Configure logging: output to both console and a file.
 LOG_FILENAME = "transfer_product_artifacts.log"
@@ -39,7 +38,7 @@ PG_HOST = config.get_db_host()
 PG_PORT = config.get_db_port()
 PG_DATABASE = config.get_db_name()
 PG_USER = config.get_db_user()
-PG_PASSWORD = config.get_db_password()
+PG_PASSWORD = "ip.AHcR-Zy1!)2C15?E<ZFy-:a0q"
 
 try:
     conn = psycopg2.connect(
@@ -66,8 +65,11 @@ excel_path = "./files/updated_lookup_data.xlsx"
 # --------------------------
 allowed_extensions = {
     "main_download_file_name": ["jpg", "jpeg", "png", "gif"],
-    "transcript_file_name": ["pdf", "txt", "srt"],
+    "transcript_file_name": ["txt"],
     "web_download_file_name": [
+        "jpg",
+        "jpeg",
+        "png",
         "mp4",
         "mov",
         "avi",
@@ -138,11 +140,34 @@ download_columns = [
 # --------------------------
 for index, row in df.iterrows():
     product_code = str(row["product_code"]).strip()
-    logger.info("Processing row %d:", index + 1)
-    logger.info("  Product code: %s", product_code)
+    tag = str(row.get("tag", "")).strip().lower()  # e.g., 'download-only', 'order-only'
+
+    logger.info(
+        "Processing row %d: Product code=%s, Tag=%s", index + 1, product_code, tag
+    )
+
+    # If this is order-only, require main_download
+    if tag == "order-only" and not str(row.get("main_download_file_name", "")).strip():
+        logger.warning(
+            " Tag is 'order-only' but no main_download_file_name provided. Skipping row."
+        )
+        skipped_count += 1
+        continue
 
     # For each file download column in the row
     for file_key in download_columns:
+        # Skip based on tag logic
+        if tag == "download-only" and file_key == "print_download_file_name":
+            logger.info(
+                "  Tag is 'download-only'; skipping print_download requirement."
+            )
+            continue
+        if tag == "order-only" and file_key != "main_download_file_name":
+            logger.info(
+                "  Tag is 'order-only'; only processing main_download_file_name."
+            )
+            continue
+
         file_name = str(row[file_key]).strip()
         if not file_name:
             logger.info("  No file provided for '%s'. Skipping.", file_key)
@@ -152,12 +177,11 @@ for index, row in df.iterrows():
         if "." in file_name:
             extension = file_name.split(".")[-1].lower().strip()
         else:
-            # Optionally, if you have an "Extension" column fallback:
             extension = str(row.get("Extension", "")).lower().strip()
 
-        logger.info("  Processing '%s':", file_key)
-        logger.info("    File name: %s", repr(file_name))
-        logger.info("    Extension: %s", extension)
+        logger.info(
+            "  Processing '%s': file=%s, ext=%s", file_key, file_name, extension
+        )
 
         # Verify that the extension is allowed for this file type.
         allowed_exts = allowed_extensions.get(file_key, [])
@@ -172,50 +196,29 @@ for index, row in df.iterrows():
 
         # Build local file path
         file_path = os.path.join(local_directory, file_name)
-        logger.info("    Looking for file at: %s", repr(file_path))
         if not os.path.isfile(file_path):
             logger.warning("    File '%s' does not exist. Skipping.", file_path)
             skipped_count += 1
             continue
 
-        # --------------------------
-        # Build the S3 Key and Check Existence
-        # --------------------------
+        # Build the S3 key and upload
         s3_key = f"{product_code}/{file_name}"
-        file_exists = False
         try:
-            s3_client.head_object(Bucket=BUCKET_NAME, Key=s3_key)
-            file_exists = True
-            logger.info("    File '%s' already exists in S3. Skipping upload.", s3_key)
-        except ClientError as e:
-            if int(e.response["Error"]["Code"]) == 404:
-                file_exists = False
-            else:
-                logger.error("    Error checking S3 for '%s': %s", s3_key, e)
-                skipped_count += 1
-                continue
-
-        if not file_exists:
-            try:
-                s3_client.upload_file(
-                    file_path,
-                    BUCKET_NAME,
-                    s3_key,
-                    ExtraArgs={"ServerSideEncryption": "AES256"},
-                )
-                logger.info("    Uploaded file '%s' to S3 as '%s'.", file_name, s3_key)
-            except Exception as e:
-                logger.error("    Error uploading file '%s' to S3: %s", file_name, e)
-                skipped_count += 1
-                continue
-        else:
-            logger.info("    Using existing S3 object '%s'.", s3_key)
+            s3_client.upload_file(
+                file_path,
+                BUCKET_NAME,
+                s3_key,
+                ExtraArgs={"ServerSideEncryption": "AES256"},
+            )
+            logger.info("    Uploaded '%s' to S3 as '%s'.", file_name, s3_key)
+        except Exception as e:
+            logger.error("    Error uploading '%s': %s", file_name, e)
+            skipped_count += 1
+            continue
 
         s3_bucket_url = f"https://{BUCKET_NAME}.s3.amazonaws.com/{s3_key}"
 
-        # --------------------------
-        # Generate Presigned URL and Extract Metadata
-        # --------------------------
+        # Generate presigned URL
         presigned_urls_dict = generate_presigned_urls([s3_bucket_url], expiration=3600)
         presigned_url = presigned_urls_dict.get(s3_bucket_url)
         if not presigned_url:
@@ -225,132 +228,86 @@ for index, row in df.iterrows():
             skipped_count += 1
             continue
 
-        logger.info("    S3 URL: %s", s3_bucket_url)
-        logger.info("    Presigned URL: %s", presigned_url)
-
+        # Extract file metadata
         try:
             metadata_list = get_file_metadata([presigned_url])
-            if not metadata_list:
-                logger.error("    Failed to extract metadata. Skipping.")
-                skipped_count += 1
-                continue
             full_metadata = metadata_list[0]
         except Exception as e:
             logger.error("    Error extracting metadata: %s", e)
             skipped_count += 1
             continue
 
-        # Build metadata dictionary.
         metadata = {
             "URL": presigned_url,
             "s3_bucket_url": s3_bucket_url,
             "file_size": full_metadata.get("file_size"),
             "file_type": full_metadata.get("file_type"),
         }
-        logger.info("    Metadata to be stored: %s", metadata)
+        db_field = excel_to_db_field[file_key]
 
-        # For this file type, the matching key is simply the current file_key.
-        matching_keys = [file_key]
-        logger.info("    Download keys (Excel names) to update: %s", matching_keys)
-
-        # --------------------------
-        # Retrieve update_ref_id using product_code.
-        # --------------------------
-        select_query = """
-            SELECT update_ref_id
-            FROM public.products_product
-            WHERE product_code = %s;
-        """
+        # Fetch update_ref_id
         try:
-            cursor.execute(select_query, (product_code,))
+            cursor.execute(
+                "SELECT update_ref_id FROM public.products_product WHERE product_code = %s;",
+                (product_code,),
+            )
             result = cursor.fetchone()
             if not result or not result[0]:
                 logger.warning(
-                    "    No update_ref_id found for product_code '%s'. Skipping.",
+                    "    No update_ref_id for product_code '%s'. Skipping.",
                     product_code,
                 )
                 skipped_count += 1
                 continue
             update_ref_id = result[0]
         except Exception as e:
-            logger.error(
-                "    Error selecting update_ref_id for product_code '%s': %s",
-                product_code,
-                e,
-            )
+            logger.error("    Error fetching update_ref_id: %s", e)
             skipped_count += 1
             continue
 
-        # --------------------------
-        # Check if a row exists in products_productupdate for this update_ref_id.
-        # --------------------------
-        select_update_query = """
-            SELECT page_ptr_id, product_downloads
-            FROM public.products_productupdate
-            WHERE page_ptr_id = %s;
-        """
+        # Check for existing productupdate
         try:
-            cursor.execute(select_update_query, (update_ref_id,))
+            cursor.execute(
+                "SELECT page_ptr_id, product_downloads FROM public.products_productupdate WHERE page_ptr_id = %s;",
+                (update_ref_id,),
+            )
             update_row = cursor.fetchone()
         except Exception as e:
-            logger.error(
-                "    Error checking productupdate for page_ptr_id '%s': %s",
-                update_ref_id,
-                e,
-            )
+            logger.error("    Error querying productupdate: %s", e)
             skipped_count += 1
             continue
 
-        # --------------------------
-        # Update or Insert into the Database for the current file type.
-        # --------------------------
-        db_field = excel_to_db_field[file_key]
+        # Insert or update
         if update_row:
             current_downloads = update_row[1] or {}
             if db_field in OBJECT_KEYS:
-                current_val = current_downloads.get(db_field)
+                existing = current_downloads.get(db_field)
                 if (
-                    isinstance(current_val, dict)
-                    and current_val.get("s3_bucket_url") == metadata["s3_bucket_url"]
+                    isinstance(existing, dict)
+                    and existing.get("s3_bucket_url") == s3_bucket_url
                 ):
-                    logger.info(
-                        "    For DB field '%s', metadata already exists. Skipping update.",
-                        db_field,
-                    )
+                    logger.info("    '%s' already up-to-date. Skipping.", db_field)
                     continue
-
-                update_query = """
-                    UPDATE public.products_productupdate
-                    SET product_downloads = COALESCE(product_downloads, '{}'::jsonb)
-                        || jsonb_build_object(%s, %s::jsonb)
-                    WHERE page_ptr_id = %s;
-                """
+                update_query = (
+                    "UPDATE public.products_productupdate "
+                    "SET product_downloads = COALESCE(product_downloads, '{}'::jsonb) || jsonb_build_object(%s, %s::jsonb) "
+                    "WHERE page_ptr_id = %s;"
+                )
                 params = (db_field, extras.Json(metadata), update_ref_id)
             else:
-                current_array = current_downloads.get(db_field, [])
-                duplicate = any(
-                    isinstance(item, dict)
-                    and item.get("s3_bucket_url") == metadata["s3_bucket_url"]
-                    for item in current_array
-                )
-                if duplicate:
-                    logger.info(
-                        "    For DB field '%s', an entry with the same s3_bucket_url already exists. Skipping update.",
-                        db_field,
-                    )
+                arr = current_downloads.get(db_field, [])
+                if any(
+                    isinstance(i, dict) and i.get("s3_bucket_url") == s3_bucket_url
+                    for i in arr
+                ):
+                    logger.info("    Duplicate entry in '%s'. Skipping.", db_field)
                     continue
-
-                update_query = """
-                    UPDATE public.products_productupdate
-                    SET product_downloads = jsonb_set(
-                        COALESCE(product_downloads, '{}'::jsonb),
-                        %s,
-                        (COALESCE(product_downloads->%s, '[]'::jsonb)
-                        || %s::jsonb),
-                        true
-                    )
-                    WHERE page_ptr_id = %s;
-                """
+                update_query = (
+                    "UPDATE public.products_productupdate "
+                    "SET product_downloads = jsonb_set(COALESCE(product_downloads, '{}'::jsonb), %s, "
+                    "COALESCE(product_downloads->%s, '[]'::jsonb) || %s::jsonb, true) "
+                    "WHERE page_ptr_id = %s;"
+                )
                 params = (
                     f"{{{db_field}}}",
                     db_field,
@@ -360,120 +317,78 @@ for index, row in df.iterrows():
             try:
                 cursor.execute(update_query, params)
                 conn.commit()
-                logger.info(
-                    "    Updated DB for product_code '%s' (update_ref_id: %s) for field '%s'.",
-                    product_code,
-                    update_ref_id,
-                    db_field,
-                )
+                logger.info("    Updated DB for %s (%s).", product_code, db_field)
+                processed_count += 1
             except Exception as e:
-                logger.error(
-                    "    Error updating DB for product_code '%s' for field '%s': %s",
-                    product_code,
-                    db_field,
-                    e,
-                )
+                logger.error("    Error updating DB: %s", e)
                 conn.rollback()
                 skipped_count += 1
-                continue
-            processed_count += 1
         else:
-            # If no productupdate row exists, prepare default values.
-            main_download_url_value = (
+            # Build default inserts
+            new_downloads = {
+                db_field: metadata if db_field in OBJECT_KEYS else [metadata]
+            }
+            insert_query = """
+                INSERT INTO public.products_productupdate (
+                    page_ptr_id, minimum_stock_level, maximum_order_quantity,
+                    quantity_available, run_to_zero, available_from_choice,
+                    order_from_date, order_end_date, product_type,
+                    alternative_type, cost_centre, local_code,
+                    unit_of_measure, summary_of_guidance,
+                    product_downloads, main_download_url,
+                    video_url, print_download_url,
+                    web_download_url, transcript_url,
+                    order_referral_email_address, stock_owner_email_address,
+                    order_exceptions
+                ) VALUES (%s, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL,
+                          NULL, NULL, NULL, NULL, NULL, %s,
+                          %s, %s, %s, %s, %s, NULL, NULL, NULL);
+            """
+            main_val = (
                 extras.Json(metadata)
                 if file_key == "main_download_file_name"
                 else extras.Json({})
             )
-            video_url_value = (
-                extras.Json(metadata) if file_key == "video_url" else extras.Json({})
-            )
-            print_download_url_value = (
+            video_val = extras.Json({})
+            print_val = (
                 extras.Json([metadata])
                 if file_key == "print_download_file_name"
                 else extras.Json([])
             )
-            web_download_url_value = (
+            web_val = (
                 extras.Json([metadata])
                 if file_key == "web_download_file_name"
                 else extras.Json([])
             )
-            transcript_url_value = (
+            transcript_val = (
                 extras.Json([metadata])
                 if file_key == "transcript_file_name"
                 else extras.Json([])
             )
-
-            new_product_downloads = {
-                excel_to_db_field[file_key]: (
-                    metadata
-                    if excel_to_db_field[file_key] in OBJECT_KEYS
-                    else [metadata]
-                )
-            }
-
-            insert_query = """
-                INSERT INTO public.products_productupdate (
-                    page_ptr_id,
-                    minimum_stock_level,
-                    maximum_order_quantity,
-                    quantity_available,
-                    run_to_zero,
-                    available_from_choice,
-                    order_from_date,
-                    order_end_date,
-                    product_type,
-                    alternative_type,
-                    cost_centre,
-                    local_code,
-                    unit_of_measure,
-                    summary_of_guidance,
-                    product_downloads,
-                    main_download_url,
-                    video_url,
-                    print_download_url,
-                    web_download_url,
-                    transcript_url,
-                    order_referral_email_address,
-                    stock_owner_email_address,
-                    order_exceptions
-                )
-                VALUES (
-                    %s,
-                    NULL, NULL, 0, NULL, NULL, NULL, NULL,
-                    NULL, NULL, NULL, NULL, NULL, NULL,
-                    %s,
-                    %s, %s, %s, %s, %s,
-                    NULL, NULL, NULL
-                );
-            """
             try:
                 cursor.execute(
                     insert_query,
                     (
                         update_ref_id,
-                        extras.Json(new_product_downloads),
-                        main_download_url_value,
-                        video_url_value,
-                        print_download_url_value,
-                        web_download_url_value,
-                        transcript_url_value,
+                        extras.Json(new_downloads),
+                        main_val,
+                        video_val,
+                        print_val,
+                        web_val,
+                        transcript_val,
                     ),
                 )
                 conn.commit()
                 logger.info(
-                    "    Inserted new row into DB for product_code '%s' (update_ref_id: %s) for field '%s'.",
+                    "    Inserted new productupdate for %s (%s).",
                     product_code,
-                    update_ref_id,
                     db_field,
                 )
                 processed_count += 1
             except Exception as e:
-                logger.error(
-                    "    Error inserting DB for product_code '%s': %s", product_code, e
-                )
+                logger.error("    Error inserting DB: %s", e)
                 conn.rollback()
                 skipped_count += 1
-                continue
 
 # --------------------------
 # Clean Up
@@ -481,7 +396,9 @@ for index, row in df.iterrows():
 cursor.close()
 conn.close()
 
-logger.info("Done processing all files.")
-logger.info("Total rows read: %d", total_rows)
-logger.info("Total rows processed successfully: %d", processed_count)
-logger.info("Total rows skipped: %d", skipped_count)
+logger.info(
+    "Done: total=%d, processed=%d, skipped=%d",
+    total_rows,
+    processed_count,
+    skipped_count,
+)

@@ -36,7 +36,7 @@ PRIVATE_KEY = private_key
 
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = config.get_debug_mode()
+DEBUG = config.get_django_debug_value()
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "testserver", "0.0.0.0", "*"]
 
 CORS_ALLOWED_ORIGINS = [

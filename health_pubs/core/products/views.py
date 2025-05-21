@@ -44,7 +44,7 @@ from .filters import ProductFilter
 from rest_framework.exceptions import ValidationError
 from django.db import DatabaseError, transaction
 from django.db.models import Q
-from django.http import Http404, JsonResponse
+from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils.text import slugify
 from django.views import View
@@ -71,7 +71,7 @@ from .serializers import (
     ProductSerializer,
     ProductUpdateSerializer,
 )
-
+from rest_framework.generics import ListAPIView
 from django.core.serializers.json import DjangoJSONEncoder
 
 logger = logging.getLogger(__name__)
@@ -498,478 +498,6 @@ class ErrorHandlingMixin:
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,
                 status_code=500,
-            )
-
-
-class ProductUtilsMixin_:
-    """
-    Contains common helper functions for product processing,
-    used in bulk uploads.
-    """
-
-    def skip_row(self, index, message):
-        logger.warning(f"Skipping row {index + 1}: {message}")
-        return {"skipped": True, "error": {"row": index + 1, "error": message}}
-
-    def assign_m2m_fields(self, instance, m2m_mapping, row, add_only=False):
-        """
-        Sets or adds M2M relations on `instance` according to m2m_mapping:
-          { column_name: (django_attr, Model, response_key) }
-
-        Excel contains plain integers (the Wagtail page IDs), but each Page
-        subclass uses a UUID PK under the hood.  So we filter on the parent
-        page_ptr_id (the integer primary key of the Page table).
-        """
-        names = {}
-
-        for col, (attr_name, model, resp_key) in m2m_mapping.items():
-            raw = row.get(col)
-            logger.debug(f"M2M mapping for {col!r}: raw value={raw!r}")
-
-            manager = getattr(instance, attr_name)
-
-            if not raw:
-                # clear all if no IDs present
-                if not add_only:
-                    manager.clear()
-                    logger.info(f"Cleared existing {attr_name} on {instance!r}")
-                continue
-
-            # parse comma-separated page IDs
-            id_strings = [s.strip() for s in str(raw).split(",") if s.strip()]
-            # keep only those that look like integers
-            page_ids = [int(x) for x in id_strings if x.isdigit()]
-
-            if not page_ids:
-                logger.warning(
-                    f"No valid integer page IDs found for {col!r}: {id_strings}"
-                )
-                # clear if not add_only
-                if not add_only:
-                    manager.clear()
-                names[resp_key] = []
-                continue
-
-            # fetch the actual Page instances via page_ptr_id
-            objs = list(model.objects.filter(page_ptr_id__in=page_ids))
-            found_ptrs = [o.page_ptr_id for o in objs]
-            missing = set(page_ids) - set(found_ptrs)
-            if missing:
-                logger.warning(
-                    f"Could not find {model.__name__} pages with IDs {missing}, "
-                    f"but proceeding with {found_ptrs}"
-                )
-
-            if add_only:
-                existing_ids = set(manager.values_list("page_ptr_id", flat=True))
-                to_add = [o for o in objs if o.page_ptr_id not in existing_ids]
-                if to_add:
-                    manager.add(*to_add)
-                    logger.info(
-                        f"Added {attr_name} on {instance!r}: {[o.page_ptr_id for o in to_add]}"
-                    )
-            else:
-                manager.set(objs)
-                logger.info(
-                    f"Set {attr_name} on {instance!r} to {[o.page_ptr_id for o in objs]}"
-                )
-
-            names[resp_key] = [
-                o.title for o in objs
-            ]  # or o.name if your models use `name`
-
-        # no need for extra instance.save(): M2M writes happen immediately
-        return names
-
-    def create_product_update(self, row):
-        slug_update = f"bulkupload-{uuid.uuid4()}"
-        data = {
-            "title": row["title"],
-            "slug": slug_update,
-            "minimum_stock_level": row.get("minimum_stock_level"),
-            "quantity_available": row.get("quantity_available", 0),
-            "run_to_zero": row.get("run_to_zero"),
-            "available_from_choice": row.get("available_from_choice"),
-            "available_until_choice": row.get("available_until_choice"),
-            "order_from_date": row.get("order_from_date"),
-            "order_end_date": row.get("order_end_date"),
-            "product_type": row.get("product_type"),
-            "alternative_type": row.get("alternative_type"),
-            "cost_centre": row.get("cost_centre"),
-            "local_code": row.get("local_code"),
-            "unit_of_measure": row.get("unit_of_measure"),
-            "summary_of_guidance": row.get("summary_of_guidance"),
-            "stock_owner_email_address": row.get("stock_owner"),
-            "order_referral_email_address": row.get("stock_referral"),
-            "product_downloads": row.get("product_downloads", {}),
-        }
-        return ProductUpdate(**data)
-
-    def create_product(
-        self,
-        row,
-        program,
-        language,
-        iso_language_code,
-        product_update,
-        created_date,
-        publish_date,
-    ):
-        # look up the user if provided
-        user = None
-        if row.get("user_id"):
-            try:
-                user = User.objects.get(user_id=row["user_id"])
-            except User.DoesNotExist:
-                logger.warning("User with id %s not found", row["user_id"])
-
-        slug = f"{slugify(row['title'])}-{row['product_id']}-{uuid.uuid4()}"
-        data = {
-            "title": row["title"],
-            "slug": slug,
-            "user_ref": user,
-            "product_id": str(uuid.uuid4()),
-            "program_name": program.programme_name if program else "",
-            "product_title": row["title"],
-            "status": row["status"],
-            "product_code": row["product_code"],
-            "file_url": row["gov_related_article"],
-            "tag": row["tag"],
-            "product_key": row["product_key"],
-            "program_id": program,
-            "language_id": language,
-            "version_number": "001",
-            "iso_language_code": iso_language_code,
-            "language_name": row["language_name"],
-            "update_ref": product_update,
-            "created_at": created_date,
-            "is_latest": True,
-            "publish_date": publish_date,
-            "suppress_event": False,
-        }
-        return Product(**data)
-
-    def process_row(self, row, index, root_page):
-        try:
-            logger.info(f"Processing row {index + 1}: {row.to_dict()}")
-            required_fields = [
-                "product_key",
-                "title",
-                "language_id",
-                "gov_related_article",
-                "product_code",
-            ]
-            missing_fields = [f for f in required_fields if pd.isna(row.get(f))]
-            if missing_fields:
-                return self.skip_row(index, f"Missing fields: {missing_fields}")
-
-            if Product.objects.filter(product_code=row["product_code"]).exists():
-                return self.skip_row(
-                    index,
-                    f"Product with product_code {row['product_code']} already exists.",
-                )
-
-            row = self.clean_row_data(row)
-            logger.debug(f"Cleaned row {index + 1}: {row}")
-            row.setdefault("run_to_zero", False)
-            created_date = self.convert_created_date(row["created"])
-
-            program = None
-            if row.get("programme_id"):
-                program_id = (
-                    str(int(row["programme_id"]))
-                    if pd.notna(row["programme_id"])
-                    else None
-                )
-                logger.info("PROGRAM_ID %s", program_id)
-                program = Program.objects.filter(program_id=program_id).first()
-                if not program:
-                    return self.skip_row(
-                        index, f"Program with id {row['programme_id']} does not exist."
-                    )
-
-            try:
-                language = LanguagePage.objects.get(language_id=row["language_id"])
-            except LanguagePage.DoesNotExist:
-                return self.skip_row(
-                    index, f"Language with id {row['language_id']} does not exist."
-                )
-            iso_language_code = language.iso_language_code.upper()
-
-            product_update = self.create_product_update(row)
-            root_page.add_child(instance=product_update)
-
-            m2m_mapping = {
-                "audience_id": ("audience_ref", Audience, "audience_names"),
-                "where_to_use_id": (
-                    "where_to_use_ref",
-                    WhereToUse,
-                    "where_to_use_names",
-                ),
-                "vaccination_id": ("vaccination_ref", Vaccination, "vaccination_names"),
-                "disease_id": ("diseases_ref", Disease, "disease_names"),
-            }
-            m2m_names = self.assign_m2m_fields(product_update, m2m_mapping, row)
-            product_update.save()
-
-            publish_date = self.get_publish_date(row.get("version_date"), index)
-            product = self.create_product(
-                row,
-                program,
-                language,
-                iso_language_code,
-                product_update,
-                created_date,
-                publish_date,
-            )
-            root_page.add_child(instance=product)
-
-            order_limits_list = self.build_order_limits(
-                row.get("organization_name"), row.get("order_limit_value")
-            )
-            logger.info(
-                "Final response for product_id %s: %s",
-                product.product_id,
-                {
-                    "audience_names": m2m_names.get("audience_names", []),
-                    "vaccination_names": m2m_names.get("vaccination_names", []),
-                    "disease_names": m2m_names.get("disease_names", []),
-                    "where_to_use_names": m2m_names.get("where_to_use_names", []),
-                    "order_limits": order_limits_list,
-                },
-            )
-            # Two pages created: product_update and product.
-            return {"skipped": False, "products_created": 2}
-
-        except (Program.DoesNotExist, LanguagePage.DoesNotExist, ValueError) as ve:
-            logger.warning(f"Data error in row {index + 1}: {ve}")
-            return self.skip_row(index, str(ve))
-        except Exception as e:
-            logger.exception(f"Unexpected error in row {index + 1}: {e}")
-            return self.skip_row(index, f"Unexpected error: {str(e)}")
-
-    def get_publish_date(self, raw_version_date, index):
-        """
-        Accepts either "YYYY-MM-DD" or "M/D/YYYY" (e.g. "8/20/2029") or a date object.
-        Falls back to today() on parse failure or if value is "-" / falsy.
-        """
-        publish_date = None
-
-        if raw_version_date and raw_version_date != "-":
-            # If it's already a date
-            if isinstance(raw_version_date, datetime.date):
-                publish_date = raw_version_date
-            else:
-                # Try known string formats
-                for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
-                    try:
-                        publish_date = datetime.datetime.strptime(
-                            raw_version_date, fmt
-                        ).date()
-                        break
-                    except (ValueError, TypeError):
-                        continue
-                if publish_date is None:
-                    logger.warning(
-                        f"Invalid publish_date format for row {index + 1}: {raw_version_date}"
-                    )
-
-        if publish_date is None:
-            publish_date = datetime.date.today()
-
-        return publish_date
-
-    def create_order_limits(self, product, row):
-        """Create OrderLimitPage children and return organization names."""
-        names = []
-        raw_orgs = row.get("organization_name")
-        limit = row.get("order_limit_value")
-        if not raw_orgs or pd.isna(limit):
-            return names
-        for name in str(raw_orgs).split(","):
-            org_name = name.strip()
-            if not org_name:
-                continue
-            org = Organization.objects.filter(name=org_name).first()
-            if not org:
-                logger.warning(
-                    "Organization '%s' not found; skipping order limit", org_name
-                )
-                continue
-            ol = OrderLimitPage(
-                title=f"Order limit for {org.name}",
-                slug=f"order-limit-{org.id}-{uuid.uuid4().hex[:6]}",
-                order_limit_id=str(uuid.uuid4()),
-                order_limit=int(limit),
-                product_ref=product,
-                organization_ref=org,
-            )
-            product.add_child(instance=ol)
-            ol.save()
-            names.append(org.name)
-        return names
-
-    def build_order_limits(self, organization_names_str, max_val):
-        order_limits_list = []
-        if organization_names_str:
-            for org_name in (
-                org.strip() for org in organization_names_str.split(",") if org.strip()
-            ):
-                order_limits_list.append(
-                    {"organization_name": org_name, "order_limit_value": max_val}
-                )
-        return order_limits_list
-
-    def _clean_numeric_field(self, value):
-        if not pd.notna(value):
-            return None
-        try:
-            if isinstance(value, str):
-                value = value.strip()
-                if "," in value:
-                    return ",".join(
-                        str(int(float(item.strip())))
-                        if item.strip().replace(".", "", 1).isdigit()
-                        else item.strip()
-                        for item in value.split(",")
-                    )
-                if value.replace(".", "", 1).isdigit():
-                    return str(int(float(value)))
-            elif isinstance(value, (int, float)):
-                return str(int(float(value)))
-        except ValueError:
-            return None
-        return None
-
-    def _clean_run_to_zero(self, val):
-        if isinstance(val, str):
-            return {"y": True, "n": False}.get(val.strip().lower())
-        return val
-
-    def _clean_invalid_strings(self, row_dict):
-        for key, value in row_dict.items():
-            if isinstance(value, str) and value.strip().lower() in {"-", "nan"}:
-                row_dict[key] = None
-        return row_dict
-
-    def clean_row_data(self, row):
-        row["run_to_zero"] = self._clean_run_to_zero(row.get("run_to_zero"))
-        row = self._clean_invalid_strings(row)
-        numeric_fields = [
-            "unit_of_measure",
-            "programme_id",
-            "language_id",
-            "audience_id",
-            "where_to_use_id",
-            "vaccination_id",
-            "disease_id",
-            "minimum_stock_level",
-        ]
-        for key in numeric_fields:
-            row[key] = self._clean_numeric_field(row.get(key))
-        return row
-
-    def convert_created_date(self, created_date_str):
-        """
-        Accepts either "DD/MM/YYYY HH:MM:SS" or "YYYY-MM-DD HH:MM:SS" strings,
-        or a pandas Timestamp.
-        """
-        if isinstance(created_date_str, pd.Timestamp):
-            return created_date_str.to_pydatetime()
-
-        if isinstance(created_date_str, str):
-            for fmt in ("%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S"):
-                try:
-                    return datetime.datetime.strptime(created_date_str, fmt)
-                except ValueError:
-                    continue
-        raise ValueError(f"Unsupported format for 'created': {created_date_str!r}")
-
-    def get_or_create_root_page(self):
-        try:
-            root_page = Page.objects.get(slug="products-root")
-            logger.info("Root page 'products-root' found.")
-        except Page.DoesNotExist:
-            logger.warning("Root page 'products-root' not found. Creating it.")
-            wagtail_root = Page.objects.filter(depth=1).first()
-            if not wagtail_root:
-                raise ImproperlyConfigured(
-                    "Wagtail root page not found. Check Wagtail setup."
-                )
-            root_page = ProductUpdate(title="Products Root", slug="products-root")
-            wagtail_root.add_child(instance=root_page)
-            logger.info("Root page 'products-root' created successfully.")
-        return root_page
-
-    def fetch_instances_and_names(self, model, field_name, ids_str):
-        if not ids_str:
-            return [], []
-        ids = [id_val.strip() for id_val in ids_str.split(",") if id_val.strip()]
-        if not ids:
-            return [], []
-        instances = model.objects.filter(**{f"{field_name}__in": ids})
-        names = [inst.name for inst in instances]
-        return list(instances), names
-
-
-class ProductViewSet_(ProductUtilsMixin_, viewsets.ViewSet):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
-
-    @action(detail=False, methods=["post"], url_path="bulk-upload")
-    def bulk_upload(self, request):
-        """
-        Bulk upload for merged product Excel files.
-        Reads each row and creates Product / ProductUpdate records.
-        """
-        try:
-            with transaction.atomic():
-                logger.info("Starting bulk upload of merged product Excel to DB...")
-
-                merged_excel_file = request.FILES.get("product_excel")
-                if not merged_excel_file:
-                    logger.error("No merged Excel file uploaded.")
-                    return Response(
-                        {"error": "No merged Excel file uploaded."},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-
-                try:
-                    df = pd.read_excel(merged_excel_file)
-                    df = df.where(pd.notna(df), None)
-                except Exception as e:
-                    logger.error(f"Error reading merged Excel file: {str(e)}")
-                    return Response(
-                        {"error": "Invalid Excel file."},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-
-                skipped_rows = []
-                created_products = 0
-                root_page = self.get_or_create_root_page()
-
-                for index, row in df.iterrows():
-                    result = self.process_row(row, index, root_page)
-                    if result.get("skipped"):
-                        skipped_rows.append(result["error"])
-                    else:
-                        created_products += result.get("products_created", 0)
-
-                logger.info(f"Bulk upload completed. Rows skipped: {len(skipped_rows)}")
-                return Response(
-                    {
-                        "message": "Bulk upload of merged product Excel completed.",
-                        "created_products": created_products,
-                        "skipped_rows": skipped_rows,
-                    },
-                    status=status.HTTP_201_CREATED,
-                )
-
-        except Exception as e:
-            logger.exception("An unexpected error occurred during bulk upload.")
-            return Response(
-                {"error": f"Unexpected error: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
 
@@ -2944,72 +2472,80 @@ class ProductAdminFilterView(APIView, ProductListMixin):
             )
 
 
-class ProgramProductsView(APIView, ProductListMixin):
+class ProgramProductsView(ListAPIView):
+    """
+    GET /api/v1/programmes/<program_id>/products/?page=<n>&sort_by=<field>
+    returns:
+    {
+      links: { next, previous },
+      count: <total>,
+      results: [ /* products */ ],
+      diseases: [ /* disease meta */ ],
+      vaccinations: [ /* vaccination meta */ ]
+    }
+    """
+
+    serializer_class = ProductSerializer
+    pagination_class = CustomPagination
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
-    def get_program_related_data(self, program):
-        """
-        Fetches related diseases and vaccinations for a given program.
-        """
+    def get_queryset(self):
+        program = get_object_or_404(Program, pk=self.kwargs["program_id"])
+        # find all the diseases/vaccinations linked to that program
         diseases = Disease.objects.filter(programs=program)
         vaccinations = Vaccination.objects.filter(programs=program)
-        return diseases, vaccinations
 
-    def get_program_products(self, program, diseases, vaccinations):
-        """
-        Builds the products queryset for a given program using related diseases and vaccinations.
-        """
-        diseases_q = Q(update_ref__diseases_ref__in=diseases)
-        vaccinations_q = Q(update_ref__vaccination_ref__in=vaccinations)
-        return (
-            Product.objects.filter(
-                Q(program_id=program)
-                & (diseases_q | vaccinations_q)
-                & Q(status="live")
-                & Q(is_latest=True)
+        # base product QS
+        qs = Product.objects.filter(
+            Q(program_id=program.pk)
+            & (
+                Q(update_ref__diseases_ref__in=diseases)
+                | Q(update_ref__vaccination_ref__in=vaccinations)
             )
-            .distinct()
-            .prefetch_related("update_ref__diseases_ref", "update_ref__vaccination_ref")
+            & Q(is_latest=True)
+            & Q(status="live")
         ).distinct()
 
-    def get(self, request, program_id):
-        try:
-            # Get program or raise 404.
-            program = get_object_or_404(Program, pk=program_id)
-            # Fetch related data.
-            diseases, vaccinations = self.get_program_related_data(program)
-            # Build products queryset.
-            products_qs = self.get_program_products(program, diseases, vaccinations)
-            # Sort and paginate.
-            sorted_qs = self.get_sorted_queryset(products_qs, request)
-            data, paginator = self.paginate_and_serialize(sorted_qs, request)
-            # Process S3 URLs.
+        # apply ordering
+        sort_by = self.request.GET.get("sort_by", "created_at")
+        if sort_by.lstrip("-") in VALID_SORT_FIELDS:
+            qs = qs.order_by(sort_by)
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        # DRF’s ListAPIView handles pagination for us
+        page = self.paginate_queryset(self.get_queryset())
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            data = serializer.data
+
+            # batch‐generate presigned S3 URLs
             all_urls = extract_s3_urls(data)
-            presigned_urls = generate_presigned_urls(all_urls)
-            update_product_urls(data, presigned_urls)
-            # Prepare response.
-            response_data = {
-                "products": data,
-                "diseases": DiseaseSerializer(diseases, many=True).data,
-                "vaccinations": VaccinationSerializer(vaccinations, many=True).data,
-            }
-            return paginator.get_paginated_response(
-                response_data, status_code=status.HTTP_200_OK
-            )
-        except Http404:
-            return Response(
-                {"detail": "Program not found."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-        except Exception as e:
-            logger.exception(
-                "An error occurred while fetching program products: %s", str(e)
-            )
-            return Response(
-                {"detail": UNEXPECTED_ERROR_MSG},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            presigned = generate_presigned_urls(all_urls)
+            update_product_urls(data, presigned)
+
+            response = self.get_paginated_response(data)
+
+            # now tack on your programme's meta lists
+            program = get_object_or_404(Program, pk=kwargs["program_id"])
+            diseases = Disease.objects.filter(programs=program)
+            vaccinations = Vaccination.objects.filter(programs=program)
+
+            response.data["diseases"] = DiseaseSerializer(diseases, many=True).data
+            response.data["vaccinations"] = VaccinationSerializer(
+                vaccinations, many=True
+            ).data
+
+            logger.info(
+                "returning %d products for program %s", response.data
+            )  # for debugging
+
+            return response
+
+        # fallback if no pagination
+        serializer = self.get_serializer(self.get_queryset(), many=True)
+        return Response(serializer.data)
 
 
 class IncompleteProductsView(View):

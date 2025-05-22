@@ -117,7 +117,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             logger.info(f"Already ordered quantity: {already_ordered}")
 
             remaining = max(limit - already_ordered, 0)
-            logger.info("Remaining quantity:", remaining)
+            logger.info(f"Remaining quantity: {remaining}")
 
             results.append(
                 {

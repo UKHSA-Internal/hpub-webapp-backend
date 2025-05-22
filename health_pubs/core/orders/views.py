@@ -313,7 +313,7 @@ class OrderViewSet(viewsets.ModelViewSet):
         Returns how many have been ordered in the last 24 hours and what remains.
         """
         user_ref = request.data.get("user_ref")
-        product_codes = request.data.get("product_codes", [])
+        product_codes = request.data.get("product_codes")
 
         if not user_ref or not product_codes:
             return Response(
@@ -323,27 +323,32 @@ class OrderViewSet(viewsets.ModelViewSet):
 
         try:
             user_instance = self._get_user_or_error(user_ref)
+            logger.info(f"User instance: {user_instance}")
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         window_start = now() - timedelta(hours=24)
+        logger.info(f"Window start time: {window_start}")
+
         results = []
 
         for code in product_codes:
             try:
                 product = Product.objects.get(product_code=code)
+                logger.info(f"Product instance: {product}")
             except Product.DoesNotExist:
                 continue
 
             order_limit_page = OrderLimitPage.objects.filter(
-                organization_ref=user_instance.organization_ref.organization_id,
                 product_ref=product,
             ).first()
+            logger.info(f"Order limit page: {order_limit_page}")
 
             if not order_limit_page:
                 continue
 
             limit = order_limit_page.order_limit
+            logger.info(f"Order limit: {limit}")
             already_ordered = (
                 Order.objects.filter(
                     user_ref__organization_ref__organization_id=user_instance.organization_ref.organization_id,
@@ -352,8 +357,10 @@ class OrderViewSet(viewsets.ModelViewSet):
                 ).aggregate(total=Sum("order_items__quantity"))["total"]
                 or 0
             )
+            logger.info(f"Already ordered quantity: {already_ordered}")
 
             remaining = max(limit - already_ordered, 0)
+            logger.info("Remaining quantity:", remaining)
 
             results.append(
                 {
@@ -1025,7 +1032,39 @@ class OrderItemViewSet(viewsets.ModelViewSet):
         logger.info(f"Destroyed OrderItem instance: {instance}")
 
 
-class MigrateOrdersAPIView(APIView):
+class DeleteMigratedOrdersAPIView(APIView):
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminOrRegisteredUser]
+
+    def delete(self, request, *args, **kwargs):
+        try:
+            # Delete all OrderItem instances
+            order_items_deleted = OrderItem.objects.all().delete()
+
+            # Delete all Order instances
+            orders_deleted = Order.objects.all().delete()
+
+            # Logging for success
+            logger.info(
+                f"Deleted {order_items_deleted} order items and {orders_deleted} orders."
+            )
+
+            return Response(
+                {
+                    "message": f"Successfully deleted {orders_deleted} orders and {order_items_deleted} order items."
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as ex:
+            logger.error(f"Error deleting orders: {str(ex)}")
+            return Response(
+                {"error": f"Failed to delete migrated orders: {str(ex)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class MigrateOrdersAPIView_(APIView):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
@@ -1339,36 +1378,218 @@ class MigrateOrdersAPIView(APIView):
         return order_item_instance
 
 
-class DeleteMigratedOrdersAPIView(APIView):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminOrRegisteredUser]
+class MigrateOrdersAPIView(APIView):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
 
-    def delete(self, request, *args, **kwargs):
+    def post(self, request, *args, **kwargs):
+        logger.info("Starting the order migration process.")
+
+        orders_file = request.FILES.get("orders_excel")
+        order_items_file = request.FILES.get("order_items_excel")
+        if not orders_file or not order_items_file:
+            logger.error("Both orders and order items files are required.")
+            return JsonResponse(
+                {"error": "Both orders and order items files are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         try:
-            # Delete all OrderItem instances
-            order_items_deleted = OrderItem.objects.all().delete()
-
-            # Delete all Order instances
-            orders_deleted = Order.objects.all().delete()
-
-            # Logging for success
-            logger.info(
-                f"Deleted {order_items_deleted} order items and {orders_deleted} orders."
+            orders_df = pd.read_excel(orders_file)
+            order_items_df = pd.read_excel(order_items_file)
+            logger.info("Excel files successfully read.")
+        except Exception as e:
+            logger.error(f"Error reading Excel files: {e}")
+            return JsonResponse(
+                {"error": "Failed to read the provided Excel files."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-            return Response(
-                {
-                    "message": f"Successfully deleted {orders_deleted} orders and {order_items_deleted} order items."
-                },
-                status=status.HTTP_200_OK,
-            )
+        # Validate required columns
+        for col in ("order_id", "order_date", "user_id", "order_origin"):
+            if col not in orders_df.columns:
+                return JsonResponse(
+                    {"error": f"Missing required column in orders: {col}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        for col in ("order_item_id", "order_id", "ProductCode", "order_line_quantity"):
+            if col not in order_items_df.columns:
+                return JsonResponse(
+                    {"error": f"Missing required column in order items: {col}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-        except Exception as ex:
-            logger.error(f"Error deleting orders: {str(ex)}")
-            return Response(
-                {"error": f"Failed to delete migrated orders: {str(ex)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        # Ensure Wagtail parent pages exist
+        address_parent = self.get_or_create_parent_page("addresses", "Addresses")
+        order_parent = self.get_or_create_parent_page("orders", "Orders")
+
+        # Map original order_id → new UUID
+        id_map = {}
+
+        # --- Migrate Orders ---
+        for _, row in orders_df.iterrows():
+            orig_id = row["order_id"]
+            user_ref = self._get_user_ref(row["user_id"])
+            if not user_ref:
+                logger.warning(
+                    f"User {row['user_id']} not found → skipping order {orig_id}"
+                )
+                continue
+
+            addresses = self._get_or_create_addresses(row, address_parent)
+            if not addresses:
+                logger.warning(f"No address created for order {orig_id} → skipping")
+                continue
+
+            # Generate or reuse a UUID for this order
+            new_uuid = id_map.setdefault(orig_id, str(uuid.uuid4()))
+
+            # Common data to set/update
+            order_data = {
+                "order_date": pd.to_datetime(row["order_date"], dayfirst=True),
+                "user_ref": user_ref,
+                "order_origin": row["order_origin"].lower(),
+                "tracking_number": row.get("tracking_number") or None,
+                "order_confirmation_number": row.get("order_confirmation_number")
+                or generate_confirmation_number(),
+            }
+
+            # There may be multiple address variants per order; create/update one per address
+            for addr in addresses:
+                order_data["address_ref"] = addr
+                self._create_or_update_order(new_uuid, order_data, order_parent)
+
+        # --- Migrate OrderItems ---
+        for _, row in order_items_df.iterrows():
+            orig_order = row["order_id"]
+            new_order_id = id_map.get(orig_order)
+            if not new_order_id:
+                logger.warning(
+                    f"Order item {row['order_item_id']} → no matching order; skipping"
+                )
+                continue
+
+            order_ref = self._get_order_ref(new_order_id)
+            if not order_ref:
+                logger.warning(
+                    f"Order ref {new_order_id} missing → skipping item {row['order_item_id']}"
+                )
+                continue
+
+            item_uuid = row["order_item_id"]
+            item_data = {
+                "order_ref": order_ref,
+                "product_ref": self._get_product_ref(row["ProductCode"]),
+                "quantity": row["order_line_quantity"],
+                "quantity_inprogress": row.get("quantity_inprogress", 0),
+                "quantity_shipped": row.get("quantity_shipped", 0),
+                "quantity_cancelled": row.get("quantity_cancelled", 0),
+            }
+            self._create_or_update_order_item(item_uuid, item_data)
+
+        return JsonResponse(
+            {"message": "Migration completed successfully."}, status=status.HTTP_200_OK
+        )
+
+    def get_or_create_parent_page(self, slug, title):
+        try:
+            return Page.objects.get(slug=slug)
+        except Page.DoesNotExist:
+            root = Page.objects.first()
+            page = Page(
+                title=title,
+                slug=slug,
+                content_type=ContentType.objects.get_for_model(Page),
             )
+            root.add_child(instance=page)
+            page.save()
+            logger.info(f"Created parent page '{title}'")
+            return page
+
+    def _get_user_ref(self, user_id):
+        return User.objects.filter(user_id=user_id).first()
+
+    def _get_or_create_addresses(self, row, parent_page):
+        addr_attrs = dict(
+            address_line1=row["shipping_address_line_1"],
+            address_line2=row.get("shipping_address_line_2", ""),
+            address_line3=row.get("shipping_address_line_3", ""),
+            city=row["shipping_address_city"],
+            postcode=row["shipping_address_postcode"],
+            county=row.get("shipping_address_county", ""),
+            country=row["shipping_address_country"],
+        )
+        qs = Address.objects.filter(**addr_attrs)
+        if qs.exists():
+            return list(qs)
+
+        user_ref = self._get_user_ref(row["user_id"])
+        if not user_ref:
+            return []
+
+        addr = Address(
+            title=f"{addr_attrs['address_line1']}, {addr_attrs['city']}",
+            slug=slugify(
+                f"{addr_attrs['city']}-{addr_attrs['postcode']}-{uuid.uuid4()}"
+            ),
+            **addr_attrs,
+            user_ref=user_ref,
+            is_default=False,
+            verified=True,
+        )
+        parent_page.add_child(instance=addr)
+        addr.save()
+        logger.info(f"Created Address {addr.pk} for order")
+        return [addr]
+
+    def _get_order_ref(self, order_id):
+        return Order.objects.filter(order_id=order_id).first()
+
+    def _get_product_ref(self, code):
+        return Product.objects.filter(product_code=code).first()
+
+    def _create_or_update_order(self, order_id, data, parent_page):
+        # Try to load existing...
+        order = Order.objects.filter(order_id=order_id).first()
+        if order:
+            # Update fields only
+            for field, val in data.items():
+                setattr(order, field, val)
+            order.save()
+            logger.info(f"Updated Order {order_id}")
+        else:
+            # Create new Wagtail page under parent
+            order = Order(
+                title=f"Order {order_id}",
+                slug=slugify(f"order-{order_id}-{uuid.uuid4()}"),
+                order_id=order_id,
+                **data,
+            )
+            parent_page.add_child(instance=order)
+            order.save()
+            logger.info(f"Created Order {order_id}")
+
+        return order
+
+    def _create_or_update_order_item(self, item_id, data):
+        item = OrderItem.objects.filter(order_item_id=item_id).first()
+        if item:
+            for field, val in data.items():
+                setattr(item, field, val)
+            item.save()
+            logger.info(f"Updated OrderItem {item_id}")
+        else:
+            item = OrderItem(
+                title=f"Order Item {item_id}",
+                slug=slugify(f"order-item-{item_id}-{uuid.uuid4()}"),
+                order_item_id=item_id,
+                **data,
+            )
+            data["order_ref"].add_child(instance=item)
+            item.save()
+            logger.info(f"Created OrderItem {item_id}")
+
+        return item
 
 
 #

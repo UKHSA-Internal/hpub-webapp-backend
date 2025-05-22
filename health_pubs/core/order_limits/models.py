@@ -10,7 +10,7 @@ from wagtail.models import Page
 
 class OrderLimitPage(Page):
     order_limit_id = models.CharField(
-        primary_key=True,
+        # primary_key=True,
         default=uuid.uuid4,
         unique=True,
         editable=False,

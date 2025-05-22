@@ -517,12 +517,13 @@ class ProductUtilsMixin:
     def clean_row_data(self, row):
         row["run_to_zero"] = self._clean_run_to_zero(row.get("run_to_zero"))
         row = self._clean_invalid_strings(row)
-        for key in ("local_code", "cost_centre"):
+        for key in ("local_code", "cost_centre"):  # remove numeric fallback
             val = row.get(key)
             if isinstance(val, (int, float)) or (
                 isinstance(val, str) and val.replace(".", "", 1).isdigit()
             ):
                 row[key] = None
+
         for key in [
             "unit_of_measure",
             "programme_id",
@@ -564,17 +565,30 @@ class ProductUtilsMixin:
         return row
 
     def convert_created_date(self, val):
+        # Turn pandas Timestamp into datetime
         if isinstance(val, pd.Timestamp):
-            return val.to_pydatetime()
-        if isinstance(val, datetime.datetime):
-            return val
-        if isinstance(val, str):
+            dt = val.to_pydatetime()
+        # Already a datetime
+        elif isinstance(val, datetime.datetime):
+            dt = val
+        # Parse string
+        elif isinstance(val, str):
             for fmt in ("%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S"):
                 try:
-                    return datetime.datetime.strptime(val, fmt)
+                    dt = datetime.datetime.strptime(val, fmt)
+                    break
                 except ValueError:
-                    pass
-        raise ValueError(f"Unsupported 'created' format: {val!r}")
+                    continue
+            else:
+                raise ValueError(f"Unsupported 'created' format: {val!r}")
+        else:
+            raise ValueError(f"Unsupported 'created' format: {val!r}")
+
+        # If naïve, make it aware in your default timezone
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone.get_default_timezone())
+
+        return dt
 
     def get_publish_date(self, raw):
         if raw and raw != "-":
@@ -600,46 +614,18 @@ class ProductUtilsMixin:
             return root
 
     def assign_m2m_fields(self, instance, m2m_mapping, row, add_only=False):
-        """
-        Sets or adds M2M relations on `instance` according to m2m_mapping:
-          { sheet_column: (attr_name, Model, lookup_field, response_key) }
-        Looks up each Model by the given lookup_field (e.g. 'audience_id'),
-        so you can pass in your sheet's audience_id, where_to_use_id, etc.
-        Logs every step so you can see what's coming in.
-        """
         names = {}
-
         for col, (attr_name, model, lookup_field, resp_key) in m2m_mapping.items():
             raw = row.get(col)
-            logger.debug(f"M2M: column={col!r}, raw value={raw!r}")
-
             manager = getattr(instance, attr_name)
-
             if not raw:
-                # empty in sheet → clear all (unless add_only)
                 if not add_only:
                     manager.clear()
-                    logger.info(f"Cleared all existing {attr_name} on {instance}.")
                 names[resp_key] = []
                 continue
-
-            # parse comma-separated IDs from sheet
             ids = [v.strip() for v in str(raw).split(",") if v.strip()]
-            logger.debug(f"Parsed IDs for {col}: {ids}")
-
-            # lookup by the custom field (e.g. audience_id=77)
-            filter_kwargs = {f"{lookup_field}__in": ids}
-            objs = list(model.objects.filter(**filter_kwargs))
-            found_values = {str(getattr(o, lookup_field)) for o in objs}
-            missing = set(ids) - found_values
-            if missing:
-                logger.warning(
-                    f"Could not find {model.__name__}.{lookup_field} values {missing},"
-                    f" proceeding with {sorted(found_values)}"
-                )
-
+            objs = list(model.objects.filter(**{f"{lookup_field}__in": ids}))
             if add_only:
-                # only add the new ones
                 existing_ids = set(
                     str(x) for x in manager.values_list(lookup_field, flat=True)
                 )
@@ -648,20 +634,11 @@ class ProductUtilsMixin:
                 ]
                 if to_add:
                     manager.add(*to_add)
-                    logger.info(
-                        f"Added to {attr_name} on {instance}: {[o.id for o in to_add]}"
-                    )
             else:
-                # replace entirely
                 manager.set(objs)
-                logger.info(f"Set {attr_name} on {instance} to {[o.id for o in objs]}")
-
-            # record names (or IDs) for the response
             names[resp_key] = [
                 getattr(o, "name", str(getattr(o, lookup_field))) for o in objs
             ]
-
-        # flush any changes
         instance.save()
         return names
 
@@ -688,38 +665,13 @@ class ProductUtilsMixin:
             product_downloads=row.get("product_downloads", {}),
         )
 
-    def update_product_update(self, pu, row):
-        """Overwrite every field on an existing ProductUpdate."""
-        pu.title = str(row.get("title", ""))
-        pu.minimum_stock_level = row.get("minimum_stock_level")
-        pu.quantity_available = row.get("quantity_available", 0)
-        pu.run_to_zero = bool(row.get("run_to_zero", False))
-        pu.available_from_choice = row.get("available_from_choice")
-        pu.available_until_choice = row.get("available_until_choice")
-        pu.order_from_date = row.get("order_from_date")
-        pu.order_end_date = row.get("order_end_date")
-        pu.product_type = row.get("product_type")
-        pu.alternative_type = row.get("alternative_type")
-        pu.cost_centre = row.get("cost_centre")
-        pu.local_code = row.get("local_code")
-        pu.unit_of_measure = row.get("unit_of_measure")
-        pu.summary_of_guidance = row.get("guidance")
-        pu.stock_owner_email_address = row.get("stock_owner")
-        pu.order_referral_email_address = row.get("stock_referral")
-        pu.product_downloads = row.get("product_downloads", {})
-        pu.save()
-        return pu
-
     def create_product(
         self, row, program, language, iso_code, pu, created_at, publish_date
     ):
         user = None
         uid = row.get("user_id")
         if uid:
-            try:
-                user = User.objects.get(user_id=uid)
-            except User.DoesNotExist:
-                logger.warning("User id %s not found, leaving blank", uid)
+            user = User.objects.filter(user_id=uid).first()
         slug_base = str(row.get("title", ""))
         return Product(
             title=str(row.get("title", "")),
@@ -745,34 +697,6 @@ class ProductUtilsMixin:
             suppress_event=False,
         )
 
-    def update_product(self, prod, row, program, language, iso_code, pu, publish_date):
-        """Overwrite every field on an existing Product (except created_at)."""
-        user = None
-        uid = row.get("user_id")
-        if uid:
-            try:
-                user = User.objects.get(user_id=uid)
-            except User.DoesNotExist:
-                pass
-        prod.title = str(row.get("title", ""))
-        # keep slug stable
-        prod.user_ref = user
-        prod.program_name = program.programme_name if program else ""
-        prod.product_title = str(row.get("title", ""))
-        prod.status = row.get("status")
-        prod.file_url = row.get("gov_related_article")
-        prod.tag = row.get("tag")
-        prod.product_key = row.get("product_key")
-        prod.program_id = program
-        prod.language_id = language
-        prod.iso_language_code = iso_code
-        prod.language_name = row.get("language_name")
-        prod.update_ref = pu
-        prod.publish_date = publish_date
-        prod.suppress_event = False
-        prod.save()
-        return prod
-
     def create_order_limits(self, product, row):
         saved = []
         raw = row.get("organization_names")
@@ -785,10 +709,10 @@ class ProductUtilsMixin:
                 continue
             org = Organization.objects.filter(name=nm).first()
             if not org:
-                logger.warning("Org '%s' not found, skipping limit", nm)
+                logger.warning(f"Org '{nm}' not found, skipping limit")
                 continue
             ol = OrderLimitPage(
-                title=f"Order limit for {org.name}",
+                title=f"Order limit for {nm}",
                 slug=f"ol-{org.id}-{uuid.uuid4().hex[:6]}",
                 order_limit_id=str(uuid.uuid4()),
                 order_limit=int(limit),
@@ -796,14 +720,8 @@ class ProductUtilsMixin:
                 organization_ref=org,
             )
             self.safe_add_child(product, ol)
-            saved.append(org.name)
+            saved.append(nm)
         return saved
-
-    def replace_order_limits(self, product, row):
-        # instead of product.get_children().type(...).delete()
-        for child in product.get_children().type(OrderLimitPage):
-            child.delete()
-        return self.create_order_limits(product, row)
 
 
 class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
@@ -812,7 +730,6 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
 
     @action(detail=False, methods=["post"], url_path="bulk-upload")
     def bulk_upload(self, request):
-        # 1) File upload & parse
         merged_excel = request.FILES.get("product_excel")
         if not merged_excel:
             return Response(
@@ -837,7 +754,6 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 2) Find or create root page
         try:
             root = self.get_or_create_root_page()
         except ImproperlyConfigured:
@@ -846,14 +762,11 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        # 3) Prepare counters and M2M map
         skipped = []
         created_count = 0
-        updated_count = 0
         order_limits_count = 0
 
         m2m_map = {
-            # col in sheet   → (model_attr,   Model,      lookup_field,    response_key)
             "audience_id": ("audience_ref", Audience, "audience_id", "audience_names"),
             "where_to_use_id": (
                 "where_to_use_ref",
@@ -870,12 +783,10 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
             "disease_id": ("diseases_ref", Disease, "disease_id", "disease_names"),
         }
 
-        # 4) Process each row inside a transaction
         with transaction.atomic():
             for idx, series_row in df.iterrows():
                 row = series_row.to_dict()
                 try:
-                    # --- Required fields check ---
                     for field in (
                         "product_key",
                         "title",
@@ -886,12 +797,10 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
                         if not row.get(field):
                             raise ValueError(f"Missing required {field}")
 
-                    # --- Clean & parse dates ---
                     row = self.clean_row_data(row)
                     created_dt = self.convert_created_date(row.get("created"))
                     pub_date = self.get_publish_date(row.get("version_date"))
 
-                    # --- Look up program if any ---
                     program = None
                     if row.get("programme_id"):
                         program = Program.objects.filter(
@@ -900,7 +809,6 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
                         if not program:
                             raise ValueError(f"Program {row['programme_id']} not found")
 
-                    # --- Look up language page ---
                     language = LanguagePage.objects.filter(
                         language_id=row["language_id"]
                     ).first()
@@ -908,55 +816,39 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
                         raise ValueError(f"Language {row['language_id']} not found")
                     iso_code = language.iso_language_code.upper()
 
-                    # --- Find existing product by code ---
                     code = row["product_code"]
                     existing = Product.objects.filter(product_code=code).first()
 
                     if existing:
-                        # ===== UPDATE PATH =====
-                        pu = existing.update_ref
-                        # 1) Overwrite fields on the ProductUpdate
-                        pu = self.update_product_update(pu, row)
-                        # 2) Re-set ALL M2M on that ProductUpdate
-                        self.assign_m2m_fields(pu, m2m_map, row, add_only=False)
-                        # 3) Replace all order-limit children
-                        ols = self.replace_order_limits(existing, row)
-                        # 4) Overwrite fields on the Product itself
-                        existing = self.update_product(
-                            existing, row, program, language, iso_code, pu, pub_date
+                        # ===== SKIP EXISTING =====
+                        skip_info = self.skip_row(
+                            idx, f"Product with code {code} already exists."
                         )
-                        updated_count += 1
-                        order_limits_count += len(ols)
+                        skipped.append(skip_info)
+                        continue
 
-                    else:
-                        # ===== CREATE PATH =====
-                        # 1) Create a new ProductUpdate
-                        pu = self.create_product_update(row)
-                        self.safe_add_child(root, pu)
-                        # 2) Set ALL M2M on the new ProductUpdate
-                        self.assign_m2m_fields(pu, m2m_map, row, add_only=False)
-                        # 3) Create the Product page
-                        prod = self.create_product(
-                            row, program, language, iso_code, pu, created_dt, pub_date
-                        )
-                        self.safe_add_child(root, prod)
-                        # 4) Create its order-limits
-                        ols = self.create_order_limits(prod, row)
-                        created_count += 1
-                        order_limits_count += len(ols)
+                    # ===== CREATE PATH =====
+                    pu = self.create_product_update(row)
+                    self.safe_add_child(root, pu)
+                    self.assign_m2m_fields(pu, m2m_map, row, add_only=False)
+                    prod = self.create_product(
+                        row, program, language, iso_code, pu, created_dt, pub_date
+                    )
+                    self.safe_add_child(root, prod)
+                    ols = self.create_order_limits(prod, row)
+                    created_count += 1
+                    order_limits_count += len(ols)
 
                 except Exception as e:
                     logger.exception(f"Row {idx+1} error: {e}")
                     skipped.append({"row": idx + 1, "error": str(e)})
 
-        # 5) Return summary response
         return Response(
             {
                 "message": "Bulk upload complete.",
                 "created_products": created_count,
-                "updated_products": updated_count,
-                "order_limits_created": order_limits_count,
                 "skipped_rows": skipped,
+                "order_limits_created": order_limits_count,
             },
             status=status.HTTP_201_CREATED,
         )

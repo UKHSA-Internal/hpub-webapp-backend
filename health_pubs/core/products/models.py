@@ -276,8 +276,8 @@ class Product(Page):
 
         # keep your product_code_no_dashes logic
         if self.product_code:
-            self.product_code_no_dashes = self.product_code.replace("-", "").replace(
-                " ", ""
+            self.product_code_no_dashes = (
+                str(self.product_code).replace("-", "").replace(" ", "")
             )
 
         super().save(*args, **kwargs)

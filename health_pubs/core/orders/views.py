@@ -50,7 +50,6 @@ logger = logging.getLogger(__name__)
 
 
 class OrderViewSet(viewsets.ModelViewSet):
-
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminOrRegisteredUser]
     queryset = Order.objects.all()

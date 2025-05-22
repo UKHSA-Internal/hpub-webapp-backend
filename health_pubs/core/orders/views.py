@@ -200,10 +200,6 @@ class OrderViewSet(viewsets.ModelViewSet):
             # 2) Add it as a child (this sets path, depth, etc. and saves)
             analytics_index.add_child(instance=event_page)
 
-            # 3) If you have any special fields (StreamField, JSONField tweaks),
-            #    you can call save() again—but usually add_child is enough.
-            # event_page.save()
-
             logger.info(
                 f"Recorded reorder event page (id={event_page.id}) "
                 f"for user {user.user_id}, product {product.product_code}"
@@ -459,7 +455,11 @@ class OrderViewSet(viewsets.ModelViewSet):
             raise APIException(ErrorMessage.INTERNAL_SERVER_ERROR)
 
     def _validate_order_limits(self, items_data, user_instance):
-        # Accumulate quantities by product code
+        logger.info("Validating order limits...")
+        # Define the 24-hour window start
+        window_start = now() - timedelta(hours=24)
+
+        # Accumulate requested quantities by product code
         product_quantities = {}
         for item in items_data:
             product_code = item["product_code"]
@@ -468,56 +468,56 @@ class OrderViewSet(viewsets.ModelViewSet):
                 product_quantities.get(product_code, 0) + quantity
             )
 
-        # Check each product's order limit
-        for product_code, total_quantity in product_quantities.items():
+        for product_code, requested_quantity in product_quantities.items():
             try:
                 product = Product.objects.get(product_code=product_code)
             except Product.DoesNotExist:
-                logger.error(f"Product not found: Code {product_code}")
-                raise ValidationError(
+                logger.error(f"Product not found: {product_code}")
+                raise DRFValidationError(
                     {
                         "product_code": f"Product with code {product_code} does not exist."
                     }
                 )
-            except Exception as e:
-                logger.exception(
-                    f"Unexpected error while retrieving product {product_code}: {e}",
-                    extra={
-                        "product_code": product_code,
-                        "traceback": traceback.format_exc(),
-                    },
-                )
-                raise APIException(ErrorMessage.INTERNAL_SERVER_ERROR)
 
-            order_limit_page = OrderLimitPage.objects.filter(
+            # Retrieve the order limit for this product
+            limit_page = OrderLimitPage.objects.filter(
                 organization_ref=user_instance.organization_ref.organization_id,
                 product_ref=product,
             ).first()
 
-            if order_limit_page:
-                order_limit = order_limit_page.order_limit
-                current_total_quantity = (
-                    Order.objects.filter(
-                        user_ref__organization_ref__organization_id=user_instance.organization_ref.organization_id,
-                        order_items__product_ref=product,
-                    ).aggregate(total=Sum("order_items__quantity"))["total"]
-                    or 0
-                )
+            if not limit_page:
+                continue  # No limit set, allow order
 
-                if current_total_quantity + total_quantity > order_limit:
-                    logger.warning(
-                        f"Order limit exceeded for product {product_code}. "
-                        f"Order limit: {order_limit}, Current total: {current_total_quantity}, Requested: {total_quantity}"
-                    )
-                    raise ValidationError(
-                        {
-                            "error_message": "Order limit exceeded for this product.",
-                            "error_code": "ORDER_LIMIT_EXCEEDED",
-                            "order_limit": order_limit,
-                            "current_total_quantity": current_total_quantity,
-                            "requested_quantity": total_quantity,
-                        }
-                    )
+            daily_limit = limit_page.order_limit
+
+            # Calculate quantity already ordered in the past 24 hours
+            quantity_ordered_recently = (
+                Order.objects.filter(
+                    user_ref__organization_ref__organization_id=user_instance.organization_ref.organization_id,
+                    order_items__product_ref=product,
+                    created_at__gte=window_start,
+                ).aggregate(total=Sum("order_items__quantity"))["total"]
+                or 0
+            )
+
+            if quantity_ordered_recently + requested_quantity > daily_limit:
+                remaining = max(daily_limit - quantity_ordered_recently, 0)
+                logger.warning(
+                    f"24h limit exceeded for {product_code}: limit={daily_limit}, "
+                    f"already_ordered={quantity_ordered_recently}, requested={requested_quantity}"
+                )
+                raise DRFValidationError(
+                    {
+                        "error_message": (
+                            f"You've already ordered {quantity_ordered_recently} copies of '{product.title}' today. "
+                            f"You can only order {remaining} more in the next 24 hours."
+                        ),
+                        "error_code": "ORDER_LIMIT_EXCEEDED",
+                        "order_limit": daily_limit,
+                        "current_total_today": quantity_ordered_recently,
+                        "requested_quantity": requested_quantity,
+                    }
+                )
 
         return True
 
@@ -525,6 +525,7 @@ class OrderViewSet(viewsets.ModelViewSet):
         logger.info("Updating product quantities...")
         for item in items_data:
             product = item.get("product_ref")
+            logger.info(f"Product: {product}")
             if product is None:
                 logger.error("Product reference is None.")
                 continue
@@ -573,7 +574,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             # 2) If they exist but have no user_id, give them one—but first
             #    patch any Orders that point at the old blank ID
             if not user.user_id:
-                new_uuid = str(uuid4())
+                new_uuid = str(uuid.uuid4())
                 with transaction.atomic():
                     # move all orders with user_ref_id='' → new_uuid
                     Order.objects.filter(user_ref_id="").update(user_ref_id=new_uuid)
@@ -588,7 +589,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             slugify(f"user-{user_data.get('email','default')}" + str(datetime.now()))
         )
         user = User(
-            user_id=str(uuid4()),
+            user_id=str(uuid.uuid4()),
             first_name=user_data["first_name"],
             last_name=user_data["last_name"],
             role_ref=role,
@@ -753,7 +754,7 @@ class OrderViewSet(viewsets.ModelViewSet):
     def _get_user_or_error(self, user_ref):
         if not user_ref:
             logger.warning("User reference not provided.")
-            raise ValidationError({"user_ref": ErrorMessage.USER_NOT_PROVIDED})
+            raise DRFValidationError({"user_ref": ErrorMessage.USER_NOT_PROVIDED})
 
         try:
             user = User.objects.get(user_id=user_ref)
@@ -763,7 +764,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             return user
         except User.DoesNotExist:
             logger.warning(f"No user found with ID {user_ref}")
-            raise ValidationError({"user_ref": ErrorMessage.USER_NOT_FOUND})
+            raise DRFValidationError({"user_ref": ErrorMessage.USER_NOT_FOUND})
 
     def _get_establishment_ref(self, organization_ref):
         return (
@@ -779,7 +780,7 @@ class OrderViewSet(viewsets.ModelViewSet):
         address_serializer = AddressSerializer(data=address_data)
         if not address_serializer.is_valid():
             logger.warning(f"Address data is invalid: {address_serializer.errors}")
-            raise ValidationError(address_serializer.errors)
+            raise DRFValidationError(address_serializer.errors)
 
         try:
             address_instance = Address(
@@ -805,7 +806,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                     "parent_page_id": getattr(parent_page, "id", None),
                 },
             )
-            raise ValidationError(ErrorMessage.ADDRESS_CREATION_ERROR)
+            raise DRFValidationError(ErrorMessage.ADDRESS_CREATION_ERROR)
         except Exception as e:
             logger.exception(
                 f"Unexpected error occurred while creating address: {e}",
@@ -825,7 +826,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             return Product.objects.get(product_code=product_code)
         except Product.DoesNotExist:
             logger.warning(f"Product with code {product_code} does not exist.")
-            raise ValidationError({"product_code": ErrorMessage.PRODUCT_NOT_FOUND})
+            raise DRFValidationError({"product_code": ErrorMessage.PRODUCT_NOT_FOUND})
 
     def get_unique_slug(self, base_slug):
         queryset = Order.objects.filter(slug__startswith=base_slug)

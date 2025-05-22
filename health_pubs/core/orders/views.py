@@ -217,32 +217,96 @@ class OrderViewSet(viewsets.ModelViewSet):
         if err:
             return err
 
-        # 2) Get or create the parent page
-        try:
-            parent = self._get_parent_page(admin)
-        except Exception:
-            return handle_error(
-                ErrorCode.PAGE_CREATION_ERROR,
-                ErrorMessage.PAGE_CREATION_ERROR,
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+        # 2) Parent page
+        parent = self._get_parent_page(admin) if not err else None
 
-        # 3) Prepare the two user roles (order_user + limit_user)
+        # 3) Users
         user_setup = self._prepare_users(admin, user_ref, user_data, data, parent)
         if isinstance(user_setup, Response):
             return user_setup
         order_user, limit_user = user_setup
 
-        # 4) Resolve address if provided
+        # ✨ NEW: split items by which are within‐limit vs over‐limit
+        allowed_items, skipped = self._filter_items_by_limit(items, limit_user)
+
+        if not allowed_items:
+            # nothing at all is allowed → error on the first offending line
+            first = skipped[0]
+            raise DRFValidationError(
+                {
+                    "error_code": "ORDER_LIMIT_EXCEEDED",
+                    "error_message": (
+                        f"You've already ordered {first['current_total_today']} copies of "
+                        f"'{first['title']}' today. You can only order {first['remaining']} more."
+                    ),
+                    "order_limit": first["daily_limit"],
+                    "current_total_today": first["current_total_today"],
+                    "requested_quantity": first["requested_quantity"],
+                }
+            )
+
+        # 4) Address
         addr_result = self._resolve_address(address_ref, admin)
         if isinstance(addr_result, Response):
             return addr_result
         address = addr_result
 
-        # 5) Try the atomic create + retry loop
-        return self._attempt_create(
-            data, items, order_user, limit_user, address, parent, request, admin
+        # 5) Create using only the allowed items
+        resp = self._attempt_create(
+            data, allowed_items, order_user, limit_user, address, parent, request, admin
         )
+
+        # 6) If we did send something, let client know which lines were skipped
+        if isinstance(resp, Response) and resp.status_code == 201 and skipped:
+            resp.data["skipped_items"] = skipped
+
+        return resp
+
+    def _filter_items_by_limit(self, items_data, user_instance):
+        """
+        Returns two lists:
+          • allowed_items: those with qty ≤ remaining today
+          • skipped_items: those over the limit, annotated with details
+        """
+        window_start = timezone.now() - timedelta(hours=24)
+        allowed_items, skipped_items = [], []
+
+        for item in items_data:
+            code = item["product_code"]
+            qty = item["quantity"]
+            product = Product.objects.get(product_code=code)
+            limit_page = OrderLimitPage.objects.filter(product_ref=product).first()
+
+            if not limit_page:
+                allowed_items.append(item)
+                continue
+
+            daily_limit = limit_page.order_limit
+            already = (
+                Order.objects.filter(
+                    user_ref__organization_ref__organization_id=user_instance.organization_ref.organization_id,
+                    order_items__product_ref=product,
+                    created_at__gte=window_start,
+                ).aggregate(total=Sum("order_items__quantity"))["total"]
+                or 0
+            )
+            remaining = max(daily_limit - already, 0)
+
+            if qty <= remaining:
+                allowed_items.append(item)
+            else:
+                skipped_items.append(
+                    {
+                        "product_code": code,
+                        "title": product.title,
+                        "daily_limit": daily_limit,
+                        "current_total_today": already,
+                        "requested_quantity": qty,
+                        "remaining": remaining,
+                    }
+                )
+
+        return allowed_items, skipped_items
 
     def _extract_and_validate_request(self, request, admin):
         data = request.data.copy()
@@ -325,13 +389,6 @@ class OrderViewSet(viewsets.ModelViewSet):
                 data["full_external_key"] = primary.establishment_ref.full_external_key
                 limiter = primary
 
-            if not self._validate_order_limits(data.get("order_items", []), limiter):
-                return handle_error(
-                    ErrorCode.ORDER_LIMIT_EXCEEDED,
-                    ErrorMessage.ORDER_LIMIT_EXCEEDED,
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                )
-
             return primary, limiter
 
         except IntegrityError:
@@ -410,7 +467,21 @@ class OrderViewSet(viewsets.ModelViewSet):
 
     def _notify_and_record(self, order, request):
         try:
-            send_notification(order)
+            logger.info(f"Sending order confirmation for {order}...")
+
+            confirmation = generate_order_confirmation(order)
+            user = order.user_ref
+            send_notification(
+                "email",
+                user.email,
+                user.first_name,
+                confirmation["confirmation_number"],
+                confirmation["confirmation_date"],
+                confirmation["order_id"],
+                confirmation["order_status"],
+                confirmation["items_table"],
+                confirmation["shipping_address"],
+            )
         except Exception as e:
             logger.warning(f"Email send failed for {order.order_id}: {e}")
         try:
@@ -452,73 +523,6 @@ class OrderViewSet(viewsets.ModelViewSet):
                 },
             )
             raise APIException(ErrorMessage.INTERNAL_SERVER_ERROR)
-
-    def _validate_order_limits(self, items_data, user_instance):
-        logger.info("Validating order limits...")
-        # Define the 24-hour window start
-        window_start = now() - timedelta(hours=24)
-
-        # Accumulate requested quantities by product code
-        product_quantities = {}
-        for item in items_data:
-            product_code = item["product_code"]
-            quantity = item["quantity"]
-            product_quantities[product_code] = (
-                product_quantities.get(product_code, 0) + quantity
-            )
-
-        for product_code, requested_quantity in product_quantities.items():
-            try:
-                product = Product.objects.get(product_code=product_code)
-            except Product.DoesNotExist:
-                logger.error(f"Product not found: {product_code}")
-                raise DRFValidationError(
-                    {
-                        "product_code": f"Product with code {product_code} does not exist."
-                    }
-                )
-
-            # Retrieve the order limit for this product
-            limit_page = OrderLimitPage.objects.filter(
-                organization_ref=user_instance.organization_ref.organization_id,
-                product_ref=product,
-            ).first()
-
-            if not limit_page:
-                continue  # No limit set, allow order
-
-            daily_limit = limit_page.order_limit
-
-            # Calculate quantity already ordered in the past 24 hours
-            quantity_ordered_recently = (
-                Order.objects.filter(
-                    user_ref__organization_ref__organization_id=user_instance.organization_ref.organization_id,
-                    order_items__product_ref=product,
-                    created_at__gte=window_start,
-                ).aggregate(total=Sum("order_items__quantity"))["total"]
-                or 0
-            )
-
-            if quantity_ordered_recently + requested_quantity > daily_limit:
-                remaining = max(daily_limit - quantity_ordered_recently, 0)
-                logger.warning(
-                    f"24h limit exceeded for {product_code}: limit={daily_limit}, "
-                    f"already_ordered={quantity_ordered_recently}, requested={requested_quantity}"
-                )
-                raise DRFValidationError(
-                    {
-                        "error_message": (
-                            f"You've already ordered {quantity_ordered_recently} copies of '{product.title}' today. "
-                            f"You can only order {remaining} more in the next 24 hours."
-                        ),
-                        "error_code": "ORDER_LIMIT_EXCEEDED",
-                        "order_limit": daily_limit,
-                        "current_total_today": quantity_ordered_recently,
-                        "requested_quantity": requested_quantity,
-                    }
-                )
-
-        return True
 
     def _update_product_quantities(self, items_data):
         logger.info("Updating product quantities...")
@@ -721,7 +725,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             order_instance
         )  # Generate the confirmation message
 
-        # logging.info("confirmation_message", confirmation_message["items_table"])
+        logging.info("confirmation_message", confirmation_message)
 
         user_instance = order_instance.user_ref  # Get the user instance from the order
 

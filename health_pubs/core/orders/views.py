@@ -1,97 +1,56 @@
 import logging
+import time
 import traceback
 import uuid
-from datetime import datetime
-from django.utils import timezone
 from uuid import uuid4
-from django.db import transaction
-from datetime import timedelta
-from django.utils.timezone import now
-from django.db.models import Sum
+from datetime import datetime, timedelta
+
 import pandas as pd
-from core.addresses.models import Address
-from core.addresses.serializers import AddressSerializer
-from core.errors.enums import ErrorCode, ErrorMessage
-from core.errors.error_function import handle_error
-from core.establishments.models import Establishment
-from core.order_limits.models import OrderLimitPage
-from core.products.models import Product
-from core.roles.models import Role
-from core.users.models import User
-from core.users.permissions import IsAdminOrRegisteredUser
-from core.utils.custom_token_authentication import CustomTokenAuthentication
-from core.utils.order_confirmation_generation import generate_order_confirmation
-from core.utils.send_order_confirmation import send_notification
-from django.contrib.contenttypes.models import ContentType
-from django.db import IntegrityError, transaction
-from django.db.models import Sum
-from django.http import JsonResponse
+
+from django.utils import timezone
+from django.utils.timezone import now
 from django.utils.text import slugify
+from django.db import transaction, IntegrityError
+from django.db.models import Sum
+from django.contrib.contenttypes.models import ContentType
+from django.http import JsonResponse
+from django.core.exceptions import ValidationError as DjangoValidationError
+
+
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import APIException, ValidationError
+from rest_framework.exceptions import (
+    APIException,
+    ValidationError as DRFValidationError,
+    NotFound,
+)
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
 from wagtail.models import Page
-from rest_framework.exceptions import NotFound
 
-from core.event_analytics.models import EventAnalytics
-from core.utils.confirmation_generator import generate_confirmation_number
-
-from .models import Order, OrderItem
-from .serializers import OrderItemSerializer, OrderSerializer
-
-logger = logging.getLogger(__name__)
-
-
-from django.db import transaction
-
-
-import logging
-import traceback
-import uuid
-from datetime import datetime
-from uuid import uuid4
-from django.db import transaction
-import pandas as pd
 from core.addresses.models import Address
 from core.addresses.serializers import AddressSerializer
-from core.errors.enums import ErrorCode, ErrorMessage
-from core.errors.error_function import handle_error
 from core.establishments.models import Establishment
 from core.order_limits.models import OrderLimitPage
 from core.products.models import Product
 from core.roles.models import Role
 from core.users.models import User
 from core.users.permissions import IsAdminOrRegisteredUser
+from core.errors.enums import ErrorCode, ErrorMessage
+from core.errors.error_function import handle_error
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from core.utils.order_confirmation_generation import generate_order_confirmation
 from core.utils.send_order_confirmation import send_notification
-from django.contrib.contenttypes.models import ContentType
-from django.db import IntegrityError, transaction
-from rest_framework.exceptions import ValidationError as DRFValidationError
-from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db.models import Sum
-from django.http import JsonResponse
-from django.utils.text import slugify
-from rest_framework import status, viewsets
-from rest_framework.decorators import action
-from rest_framework.exceptions import APIException, ValidationError
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from rest_framework.views import APIView
-from wagtail.models import Page
-from rest_framework.exceptions import NotFound
-import time
-from psycopg2 import errors
-from django.db import transaction, IntegrityError
-from core.event_analytics.models import EventAnalytics
 from core.utils.confirmation_generator import generate_confirmation_number
+from core.event_analytics.models import EventAnalytics
 
 from .models import Order, OrderItem
-from .serializers import OrderItemSerializer, OrderSerializer
+from .serializers import OrderSerializer, OrderItemSerializer
+
+logger = logging.getLogger(__name__)
 
 
 class OrderViewSet(viewsets.ModelViewSet):

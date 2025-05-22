@@ -2,6 +2,7 @@ import logging
 import traceback
 import uuid
 from datetime import datetime
+from django.utils import timezone
 from uuid import uuid4
 from django.db import transaction
 from datetime import timedelta
@@ -385,37 +386,72 @@ class OrderViewSet(viewsets.ModelViewSet):
                 f"Failed to record reorder events for order {order_instance.order_id}: {e}"
             )
 
-    def record_reorder_events(self, order_instance, request):
+    def _get_or_create_analytics_index(self):
+        """
+        Fetch the Page with slug="event-analytics-index", or create it under
+        the root if it doesn't exist yet.
+        """
+        try:
+            return Page.objects.get(slug="event-analytics-index")
+        except Page.DoesNotExist:
+            root = Page.objects.first()
+            analytics_index = Page(
+                title="Event Analytics",
+                slug="event-analytics-index",
+                # Use the EventAnalytics content type so add_child knows what to do
+                content_type=ContentType.objects.get_for_model(EventAnalytics),
+            )
+            root.add_child(instance=analytics_index)
+            root.save()
+            logger.info("Parent page 'event-analytics-index' created.")
+            return analytics_index
+
+    def record_reorder_events(self, order_instance: Order, request):
         """
         For each order item in the given order, if the user has a previous order
-        for the same product, record a "reorder" event in EventAnalytics.
+        for the same product, record a "reorder" EventAnalytics page under the
+        analytics index, so wagtail will set depth/path correctly.
         """
-        # Get the session_id from the request headers (it should be sent by the client)
         session_id = request.headers.get("X-Session-ID", "unknown")
         user = order_instance.user_ref
-        # Loop through each order item
+
+        analytics_index = self._get_or_create_analytics_index()
+
         for item in order_instance.order_items.all():
             product = item.product_ref
-            # Exclude the current order and check if there are previous orders
+
             previous_orders = Order.objects.filter(
                 user_ref=user, order_items__product_ref=product
             ).exclude(order_id=order_instance.order_id)
-            if previous_orders.exists():
-                # Record a reorder event; you can include additional metadata as needed
-                EventAnalytics.objects.create(
-                    event_type="reorder",
-                    user_ref=user,
-                    session_id=session_id,
-                    metadata={
-                        "order_id": order_instance.order_id,
-                        "product_code": product.product_code,
-                        "quantity": item.quantity,
-                        "timestamp": str(datetime.now()),
-                    },
-                )
-                logger.info(
-                    f"Recorded reorder event for user {user.user_id} for product {product.product_code}"
-                )
+            if not previous_orders.exists():
+                continue
+
+            # 1) Instantiate (but do NOT save yet)
+            event_page = EventAnalytics(
+                title=f"Reorder of {product.title}",
+                slug=slugify(f"reorder-{product.product_code}-{uuid.uuid4()}"),
+                event_type="reorder",
+                user_ref=user,
+                session_id=session_id,
+                metadata={
+                    "order_id": order_instance.order_id,
+                    "product_code": product.product_code,
+                    "quantity": item.quantity,
+                    "timestamp": timezone.now().isoformat(),
+                },
+            )
+
+            # 2) Add it as a child (this sets path, depth, etc. and saves)
+            analytics_index.add_child(instance=event_page)
+
+            # 3) If you have any special fields (StreamField, JSONField tweaks),
+            #    you can call save() again—but usually add_child is enough.
+            # event_page.save()
+
+            logger.info(
+                f"Recorded reorder event page (id={event_page.id}) "
+                f"for user {user.user_id}, product {product.product_code}"
+            )
 
     def _is_product_live(self, product_code):
         try:

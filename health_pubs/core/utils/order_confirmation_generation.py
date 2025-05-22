@@ -3,6 +3,12 @@ from .confirmation_generator import generate_confirmation_number
 from core.orders.models import OrderItem
 
 
+def title_case(s):
+    if not s or s == "-":
+        return "-"
+    return s.title()
+
+
 def generate_order_confirmation(order_instance):
     """
     Generate a unique order confirmation number and format the order details.
@@ -23,6 +29,10 @@ def generate_order_confirmation(order_instance):
         f" - Item: {item.product_ref.title} - Quantity: {item.quantity}"
         for item in OrderItem.objects.filter(order_ref=order_instance)
     )
+    total_items = sum(
+        item.quantity for item in OrderItem.objects.filter(order_ref=order_instance)
+    )
+    items_table += f"\nTotal Items: {total_items}"
 
     # Retrieve shipping address and user details
     user = order_instance.user_ref
@@ -31,12 +41,12 @@ def generate_order_confirmation(order_instance):
         "name": f"{user.first_name} {user.last_name}",
         "department": user.establishment_ref.name if user.establishment_ref else "-",
         "organisation": user.organization_ref.name if user.organization_ref else "-",
-        "address_line_1": address.address_line1 or "-",
-        "address_line_2": address.address_line2 or "-",
-        "address_line_3": address.address_line3 or "-",
-        "city": address.city or "-",
+        "address_line_1": title_case(address.address_line1) or "-",
+        "address_line_2": title_case(address.address_line2) or "-",
+        "address_line_3": title_case(address.address_line3) or "-",
+        "city": title_case(address.city) or "-",
         "postcode": address.postcode or "-",
-        "country": address.country or "-",
+        "country": title_case(address.country) or "-",
         "telephone": user.mobile_number or "-",
     }
 

@@ -25,8 +25,8 @@ HPUB_FRONT_END_URL = config.get_hpub_base_api_url()
 AWS_REGION = "eu-west-2"
 AWS_BUCKET_NAME = config.get_hpub_s3_bucket_name()
 
-# Quick-start development settings - unsuitable for production
 
+# Quick-start development settings - unsuitable for production
 
 SECRET_KEY = DJANGO_SECRET
 

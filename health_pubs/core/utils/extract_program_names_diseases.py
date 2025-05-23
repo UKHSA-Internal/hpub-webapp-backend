@@ -41,7 +41,10 @@ def extract_program_names(
 
     # 4) Attach programme names
     links = links.merge(
-        programmes[["programme_id", "programme_name"]], on="programme_id", how="left"
+        programmes[["programme_id", "programme_name"]],
+        on="programme_id",
+        how="left",
+        validate="many_to_one",
     )
 
     # 5) Aggregate names per disease

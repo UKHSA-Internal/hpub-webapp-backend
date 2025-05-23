@@ -254,119 +254,143 @@ def insert_db(cur, update_ref_id, db_field, metadata):
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
+
+
 def main():
+    conn, cur = _connect_db()
+    df = _load_dataframe(EXCEL_PATH)
+    processed, skipped = _process_rows(df, cur, conn)
+    cur.close()
+    conn.close()
+    logger.info("Done: processed=%d, skipped=%d", processed, skipped)
+
+
+def _connect_db():
     try:
         conn = psycopg2.connect(**PG)
         cur = conn.cursor()
         logger.info("Connected to PostgreSQL.")
+        return conn, cur
     except Exception as e:
         logger.error("DB connection failed: %s", e)
         sys.exit(1)
 
+
+def _load_dataframe(path):
     try:
-        df = pd.read_excel(EXCEL_PATH, dtype=str).fillna("")
+        df = pd.read_excel(path, dtype=str).fillna("")
         logger.info("Loaded %d rows from Excel.", len(df))
+        return df
     except Exception as e:
         logger.error("Excel read failed: %s", e)
         sys.exit(1)
 
+
+def _process_rows(df, cur, conn):
     processed = skipped = 0
-
     for idx, row in df.iterrows():
-        product_code = row["product_code"].strip()
-        tag = row.get("tag", "").strip().lower()
-        logger.info("Row %d → product_code=%s, tag=%s", idx + 1, product_code, tag)
+        p, s = _process_row(idx, row, cur, conn)
+        processed += p
+        skipped += s
+    return processed, skipped
 
-        if tag == "order-only" and not row["main_download_file_name"].strip():
-            logger.warning("  order-only but no main_download; skipping")
-            skipped += 1
-            continue
 
-        update_ref_id = get_update_ref_id(cur, product_code)
-        if not update_ref_id:
-            logger.warning("  no update_ref_id for %s; skipping", product_code)
-            skipped += 1
-            continue
+def _process_row(idx, row, cur, conn):
+    processed = skipped = 0
+    product_code = row.get("product_code", "").strip()
+    tag = row.get("tag", "").strip().lower()
+    logger.info("Row %d → product_code=%s, tag=%s", idx + 1, product_code, tag)
 
-        has_row = fetch_current_downloads(cur, update_ref_id) is not None
+    if tag == "order-only" and not row.get("main_download_file_name", "").strip():
+        logger.warning("  order-only but no main_download; skipping")
+        return 0, 1
 
-        for col in DOWNLOAD_COLUMNS:
-            if tag == "download-only" and col == "print_download_file_name":
-                continue
-            if tag == "order-only" and col != "main_download_file_name":
-                continue
+    update_ref_id = get_update_ref_id(cur, product_code)
+    if not update_ref_id:
+        logger.warning("  no update_ref_id for %s; skipping", product_code)
+        return 0, 1
 
-            original_name = row[col].strip()
-            if not original_name:
-                continue
+    has_row = fetch_current_downloads(cur, update_ref_id) is not None
 
-            ext = os.path.splitext(original_name)[1].lower().lstrip(".")
-            if ext not in ALLOWED_EXTS[col]:
-                logger.warning("  %s: extension '%s' not allowed; skipping", col, ext)
-                skipped += 1
-                continue
+    for col in DOWNLOAD_COLUMNS:
+        p, s, has_row = _process_column(
+            cur, conn, update_ref_id, product_code, tag, col, row, has_row
+        )
+        processed += p
+        skipped += s
 
-            local_path = os.path.join(LOCAL_DIR, original_name)
-            if not os.path.isfile(local_path):
-                logger.warning("  missing file: %s; skipping", local_path)
-                skipped += 1
-                continue
+    return processed, skipped
 
-            # sanitize for S3 key
-            safe_name = sanitize_filename(original_name)
-            s3_key = f"{product_code}/{safe_name}"
 
-            try:
-                ensure_s3_object(local_path, s3_key)
-            except Exception as e:
-                logger.error("  S3 error for %s: %s", original_name, e)
-                skipped += 1
-                continue
+def _process_column(cur, conn, update_ref_id, product_code, tag, col, row, has_row):
+    # Skip based on tag
+    if (tag == "download-only" and col == "print_download_file_name") or (
+        tag == "order-only" and col != "main_download_file_name"
+    ):
+        return 0, 0, has_row
 
-            try:
-                presigned = generate_presigned_get(BUCKET_NAME, s3_key, safe_name)
-            except Exception as e:
-                logger.error("  presign error for %s: %s", safe_name, e)
-                skipped += 1
-                continue
+    original = row.get(col, "").strip()
+    if not original:
+        return 0, 0, has_row
 
-            try:
-                md = get_file_metadata([presigned])[0]
-            except Exception as e:
-                logger.error("  metadata error for %s: %s", safe_name, e)
-                skipped += 1
-                continue
+    ext = os.path.splitext(original)[1].lower().lstrip(".")
+    if ext not in ALLOWED_EXTS[col]:
+        logger.warning("  %s: extension '%s' not allowed; skipping", col, ext)
+        return 0, 1, has_row
 
-            metadata = {
-                "URL": presigned,
-                "s3_bucket_url": f"https://{BUCKET_NAME}.s3.amazonaws.com/{s3_key}",
-                "file_size": md.get("file_size"),
-                "file_type": md.get("file_type"),
-            }
-            db_field = EXCEL_TO_DB[col]
+    local_path = os.path.join(LOCAL_DIR, original)
+    if not os.path.isfile(local_path):
+        logger.warning("  missing file: %s; skipping", local_path)
+        return 0, 1, has_row
 
-            try:
-                if has_row:
-                    if update_db(cur, update_ref_id, db_field, metadata):
-                        conn.commit()
-                        logger.info("  updated DB for %s → %s", product_code, db_field)
-                        processed += 1
-                    else:
-                        logger.info("  already in DB %s → %s", product_code, db_field)
-                else:
-                    insert_db(cur, update_ref_id, db_field, metadata)
-                    conn.commit()
-                    has_row = True
-                    logger.info("  inserted new productupdate for %s", product_code)
-                    processed += 1
-            except Exception as e:
-                conn.rollback()
-                logger.error("  DB write failed: %s", e)
-                skipped += 1
+    safe_name = sanitize_filename(original)
+    s3_key = f"{product_code}/{safe_name}"
 
-    cur.close()
-    conn.close()
-    logger.info("Done: processed=%d, skipped=%d", processed, skipped)
+    try:
+        ensure_s3_object(local_path, s3_key)
+    except Exception as e:
+        logger.error("  S3 error for %s: %s", original, e)
+        return 0, 1, has_row
+
+    try:
+        presigned = generate_presigned_get(BUCKET_NAME, s3_key, safe_name)
+    except Exception as e:
+        logger.error("  presign error for %s: %s", safe_name, e)
+        return 0, 1, has_row
+
+    try:
+        md = get_file_metadata([presigned])[0]
+    except Exception as e:
+        logger.error("  metadata error for %s: %s", safe_name, e)
+        return 0, 1, has_row
+
+    metadata = {
+        "URL": presigned,
+        "s3_bucket_url": f"https://{BUCKET_NAME}.s3.amazonaws.com/{s3_key}",
+        "file_size": md.get("file_size"),
+        "file_type": md.get("file_type"),
+    }
+    db_field = EXCEL_TO_DB[col]
+
+    try:
+        if has_row:
+            updated = update_db(cur, update_ref_id, db_field, metadata)
+            if updated:
+                conn.commit()
+                logger.info("  updated DB for %s → %s", product_code, db_field)
+                return 1, 0, has_row
+            logger.info("  already in DB %s → %s", product_code, db_field)
+            return 0, 0, has_row
+        else:
+            insert_db(cur, update_ref_id, db_field, metadata)
+            conn.commit()
+            has_row = True
+            logger.info("  inserted new productupdate for %s", product_code)
+            return 1, 0, has_row
+    except Exception as e:
+        conn.rollback()
+        logger.error("  DB write failed: %s", e)
+        return 0, 1, has_row
 
 
 if __name__ == "__main__":

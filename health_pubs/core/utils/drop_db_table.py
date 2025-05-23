@@ -7,8 +7,10 @@ sys.path.append(
 
 import psycopg2
 from psycopg2 import sql
-
+import logging
 from configs.get_secret_config import Config
+
+logger = logging.getLogger(__name__)
 
 config = Config()
 
@@ -39,12 +41,12 @@ def execute_drop_or_truncate(table_name, connection_params, operation="drop"):
                 sql.Identifier(table_name)
             )
         else:
-            print("Invalid operation. Use 'drop' or 'truncate'.")
+            logger.info("Invalid operation. Use 'drop' or 'truncate'.")
             return
 
         # Execute the query
         cur.execute(query)
-        print(
+        logger.info(
             f"Successfully executed {operation.upper()} on table '{table_name}' with CASCADE."
         )
 
@@ -52,7 +54,7 @@ def execute_drop_or_truncate(table_name, connection_params, operation="drop"):
         cur.close()
         conn.close()
     except Exception as e:
-        print(f"Error: {e}")
+        logger.error(f"Error: {e}")
 
 
 if __name__ == "__main__":

@@ -1,10 +1,11 @@
+import os
 import openai
 
 # Azure OpenAI Configuration
-endpoint = "https://datastudioopenai.openai.azure.com/"
-deployment_name = "datamodeller"
-api_key = "97ff1dd8a91c44aa94af45a603808edd"
-api_version = "2024-08-01-preview"
+endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "https://your-endpoint.azure.com/")
+deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "your-deployment-name")
+api_key = os.getenv("AZURE_OPENAI_API_KEY", "your-api-key")
+api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2023-05-15")
 
 # Configure the openai library for Azure OpenAI
 openai.api_base = endpoint
@@ -61,5 +62,3 @@ def generate_health_content(topic, user_inquiry=None):
 topic = "Hepatitis Vaccination"
 user_inquiry = "What are the long-term effects of hepatitis vaccination?"
 draft = generate_health_content(topic, user_inquiry)
-
-print("Draft:\n", draft)

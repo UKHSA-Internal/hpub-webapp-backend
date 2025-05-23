@@ -1,5 +1,9 @@
 from functools import wraps
+from venv import logger
 from django.db import connection
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def singleton_cron(lock_id: int):
@@ -22,7 +26,9 @@ def singleton_cron(lock_id: int):
                 if acquired:
                     return func(*args, **kwargs)
                 else:
-                    print(f"Skipped {func.__name__}: lock already acquired elsewhere.")
+                    logger.info(
+                        f"Skipped {func.__name__}: lock already acquired elsewhere."
+                    )
             finally:
                 if acquired:
                     with connection.cursor() as cursor:

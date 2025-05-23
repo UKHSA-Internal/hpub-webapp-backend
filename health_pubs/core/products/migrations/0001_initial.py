@@ -7,8 +7,8 @@ from django.db import migrations, models
 from ..choices import (
     PRODUCT_TYPE_CHOICE,
     ALTERNATIVE_TYPE_CHOICE,
-    COST_CENTRE_CHOICE,
-    LOCAL_CODE_CHOICE,
+    COST_CENTRE_CHOICES,
+    LOCAL_CODES_CHOICES,
 )
 
 
@@ -94,7 +94,7 @@ class Migration(migrations.Migration):
                     "cost_centre",
                     models.CharField(
                         blank=True,
-                        choices=COST_CENTRE_CHOICE,
+                        choices=COST_CENTRE_CHOICES,
                         max_length=50,
                         null=True,
                     ),
@@ -103,7 +103,7 @@ class Migration(migrations.Migration):
                     "local_code",
                     models.CharField(
                         blank=True,
-                        choices=LOCAL_CODE_CHOICE,
+                        choices=LOCAL_CODES_CHOICES,
                         max_length=50,
                         null=True,
                     ),

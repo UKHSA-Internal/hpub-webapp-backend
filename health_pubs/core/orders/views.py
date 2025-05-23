@@ -725,7 +725,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             order_instance
         )  # Generate the confirmation message
 
-        logging.info("confirmation_message", confirmation_message)
+        logging.info(f"confirmation_message: {confirmation_message}")
 
         user_instance = order_instance.user_ref  # Get the user instance from the order
 

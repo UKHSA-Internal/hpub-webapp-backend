@@ -41,7 +41,7 @@ PG = {
     "port": config.get_db_port(),
     "dbname": config.get_db_name(),
     "user": config.get_db_user(),
-    "password": "ip.AHcR-Zy1!)2C15?E<ZFy-:a0q",
+    "password": config.get_db_password().strip(),
 }
 
 LOCAL_DIR = "./files/"

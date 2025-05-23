@@ -934,40 +934,63 @@ class MigrateUsersAPIView(APIView):
         }
 
     def parse_datetime_field(self, raw):
-        if raw in (None, "", "-", "N/A") or pd.isna(raw):
+        # 1. Blank checks
+        if self._is_blank(raw):
             return None
 
-        if isinstance(raw, (pd.Timestamp, datetime.datetime)):
-            dt = raw.to_pydatetime() if isinstance(raw, pd.Timestamp) else raw
-            if dt.year < 1900:
-                return None
-            return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+        # 2. Try each parser in turn
+        for parser in (
+            self._parse_timestamp,
+            self._parse_known_formats,
+            self._parse_pandas,
+            self._parse_dateutil,
+        ):
+            dt = parser(raw)
+            if dt is not None:
+                return dt
 
+        # 3. If all fail
+        return None
+
+    def _is_blank(self, raw):
+        return raw in (None, "", "-", "N/A") or pd.isna(raw)
+
+    def _make_aware_if_needed(self, dt):
+        if dt.year < 1900:
+            return None
+        return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+
+    def _parse_timestamp(self, raw):
+        if isinstance(raw, pd.Timestamp) or isinstance(raw, datetime.datetime):
+            dt = raw.to_pydatetime() if isinstance(raw, pd.Timestamp) else raw
+            return self._make_aware_if_needed(dt)
+        return None
+
+    def _parse_known_formats(self, raw):
         s = str(raw).strip()
         for fmt in ("%d-%b-%Y %H:%M:%S", "%m/%d/%Y %I:%M:%S %p"):
             try:
                 dt = datetime.datetime.strptime(s, fmt)
-                if dt.year < 1900:
-                    return None
-                return timezone.make_aware(dt)
+                return self._make_aware_if_needed(dt)
             except ValueError:
                 continue
+        return None
 
+    def _parse_pandas(self, raw):
         try:
-            dt = pd.to_datetime(s, errors="coerce")
-            if not pd.isna(dt) and dt.year >= 1900:
-                dt = dt.to_pydatetime()
-                return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+            dt = pd.to_datetime(str(raw), errors="coerce")
+            if not pd.isna(dt):
+                return self._make_aware_if_needed(dt.to_pydatetime())
         except Exception:
             pass
+        return None
 
+    def _parse_dateutil(self, raw):
         try:
-            dt = dateutil_parser.parse(s)
-            if dt.year < 1900:
-                return None
-            return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+            dt = dateutil_parser.parse(str(raw))
+            return self._make_aware_if_needed(dt)
         except Exception:
-            logger.warning("Unable to parse date: '%s'", s)
+            logger.warning("Unable to parse date: '%s'", raw)
             return None
 
     def _create_and_insert_user(self, data, parent):

@@ -187,82 +187,112 @@ class VaccinationBulkUploadViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=["post"], url_path="bulk-upload")
     def bulk_upload(self, request):
-        excel_file = request.FILES.get("excel_file")
-        if not excel_file:
-            return Response({"error": "Excel file is required"}, status=400)
+        # 1. Load and validate the Excel
+        df, error_resp = self._load_excel(request)
+        if error_resp:
+            return error_resp
 
-        if not (excel_file.name.endswith(".xlsx") or excel_file.name.endswith(".xls")):
-            return Response(
-                {"error": "Upload a valid Excel file (.xlsx or .xls)"}, status=400
+        # 2. Ensure parent page exists
+        parent_page = self._get_parent_page()
+
+        # 3. Iterate rows
+        created, errors = self._process_rows(df, parent_page)
+
+        # 4. Return result
+        return Response(
+            {"created": created, "errors": errors}, status=201 if created else 400
+        )
+
+    def _load_excel(self, request):
+        excel = request.FILES.get("excel_file")
+        if not excel:
+            return None, Response(
+                {"error": "Excel file is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        name = excel.name.lower()
+        if not name.endswith((".xlsx", ".xls")):
+            return None, Response(
+                {"error": "Upload a valid Excel file (.xlsx or .xls)"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         try:
-            df = pd.read_excel(excel_file)
+            df = pd.read_excel(excel)
         except Exception as e:
-            return Response(
-                {"error": f"Failed to read Excel file: {str(e)}"}, status=400
+            return None, Response(
+                {"error": f"Failed to read Excel file: {e}"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
+        return df, None
+
+    def _get_parent_page(self):
         try:
-            parent_page = Page.objects.get(slug="vaccination-bulk")
+            return Page.objects.get(slug="vaccination-bulk")
         except Page.DoesNotExist:
-            root_page = Page.objects.first()
-            parent_page = Page(
+            root = Page.objects.first()
+            parent = Page(
                 title="VaccinationBulk",
                 slug="vaccination-bulk",
                 content_type=ContentType.objects.get_for_model(Page),
             )
-            root_page.add_child(instance=parent_page)
+            root.add_child(instance=parent)
+            return parent
 
-        created = []
-        errors = []
+    def _process_rows(self, df, parent_page):
+        created, errors = [], []
+        for idx, row in df.iterrows():
+            data, err = self._process_row(idx, row, parent_page)
+            if data:
+                created.append(data)
+            else:
+                errors.append(err)
+        return created, errors
 
-        for index, row in df.iterrows():
-            vaccination_id = row.get("id")
-            name = row.get("label")
-            key = row.get("key")
-            description = row.get("description")
-            program_names = row.get("program_names")
+    def _process_row(self, index, row, parent_page):
+        vid = row.get("id")
+        name = row.get("label")
+        key = row.get("key")
+        desc = row.get("description") or ""
+        progs = row.get("program_names")
 
-            if pd.isna(name) or pd.isna(vaccination_id):
-                errors.append({"row": index + 1, "error": "Missing required fields"})
-                continue
+        # Required fields
+        if pd.isna(vid) or pd.isna(name):
+            return None, {"row": index + 1, "error": "Missing required fields"}
 
-            if Vaccination.objects.filter(vaccination_id=vaccination_id).exists():
-                errors.append(
-                    {
-                        "row": index + 1,
-                        "error": f"Vaccination with ID {vaccination_id} already exists",
-                    }
-                )
-                continue
+        # Duplicate check
+        if Vaccination.objects.filter(vaccination_id=vid).exists():
+            return None, {
+                "row": index + 1,
+                "error": f"Vaccination with ID {vid} already exists",
+            }
 
-            slug = slugify(name + str(timezone.now()))
-            vaccination = Vaccination(
-                title=name,
-                slug=slug,
-                vaccination_id=vaccination_id,
-                name=name,
-                key=key,
-                description=description or "",
-            )
-
-            try:
-                parent_page.add_child(instance=vaccination)
-                vaccination.save()
-
-                if pd.notna(program_names):
-                    program_list = [p.strip() for p in program_names.split(",")]
-                    programs = Program.objects.filter(programme_name__in=program_list)
-                    vaccination.programs.set(programs)
-
-                created.append(VaccinationSerializer(vaccination).data)
-            except Exception as e:
-                errors.append({"row": index + 1, "error": str(e)})
-
-        return Response(
-            {"created": created, "errors": errors}, status=201 if created else 400
+        # Instantiate
+        slug = slugify(f"{name}{timezone.now()}")
+        vac = Vaccination(
+            title=name,
+            slug=slug,
+            vaccination_id=vid,
+            name=name,
+            key=key,
+            description=desc,
         )
+
+        try:
+            parent_page.add_child(instance=vac)
+            vac.save()
+
+            # M2M programs
+            if pd.notna(progs):
+                names = [p.strip() for p in progs.split(",")]
+                queryset = Program.objects.filter(programme_name__in=names)
+                vac.programs.set(queryset)
+
+            return VaccinationSerializer(vac).data, None
+
+        except Exception as e:
+            return None, {"row": index + 1, "error": str(e)}
 
 
 #

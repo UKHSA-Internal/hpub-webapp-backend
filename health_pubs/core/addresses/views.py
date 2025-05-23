@@ -2,15 +2,14 @@ import logging
 import os
 import sys
 import uuid
-
+from django.utils.timezone import now
 import pandas as pd
 import requests
 from configs.get_secret_config import Config
-from core.errors.enums import ErrorCode, ErrorMessage
+from core.errors.enums import ErrorCode
 from core.users.models import User
-from core.users.permissions import IsAdminOrRegisteredUser
 from core.utils.address_verification import get_oauth_token, verify_address
-from core.utils.custom_token_authentication import CustomTokenAuthentication
+
 from django.contrib.contenttypes.models import ContentType
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
@@ -22,6 +21,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from wagtail.models import Page
 
+from core.users.permissions import IsAdminOrRegisteredUser
+from core.utils.custom_token_authentication import CustomTokenAuthentication
 from .models import Address
 from .serializers import AddressSerializer
 
@@ -51,6 +52,7 @@ class CustomPagination(PageNumberPagination):
 
 
 class AddressViewSet(viewsets.ModelViewSet):
+    lookup_field = "address_id"
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminOrRegisteredUser]
     queryset = Address.objects.all()
@@ -343,69 +345,66 @@ class AddressViewSet(viewsets.ModelViewSet):
             {"matchedAddresses": matched_addresses}, status=status.HTTP_200_OK
         )
 
-    def update(self, request, *args, **kwargs):
-        address_id = kwargs.get("pk")
-        try:
-            instance = Address.objects.get(id=address_id)
-        except Address.DoesNotExist:
+    def get_unique_slug(self, title: str, address_id: str = None) -> str:
+        base = slugify(title)
+        slug = base
+        qs = Address.objects.all()
+        if address_id:
+            qs = qs.exclude(address_id=address_id)
+        counter = 1
+        while qs.filter(slug=slug).exists():
+            slug = f"{base}-{counter}"
+            counter += 1
+        return slug
+
+    def _duplicate_exists(self, data, current_id):
+        """Return True if another Address matches the incoming (case‑insensitive) fields."""
+        return (
+            Address.objects.exclude(address_id=current_id)
+            .filter(
+                address_line1__iexact=data.get("address_line1"),
+                city__iexact=data.get("city"),
+                postcode__iexact=data.get("postcode", "").upper(),
+                country__iexact=data.get("country"),
+                user_ref=data.get("user_ref"),
+            )
+            .exists()
+        )
+
+    @action(detail=True, methods=["put"], url_path="update")
+    def update_address(self, request, address_id=None):
+        """Partial update that **does not touch slug/title**, avoiding Wagtail path recalcs."""
+        addr = get_object_or_404(Address, address_id=address_id)
+
+        serializer = AddressSerializer(addr, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        # Duplicate check using final values (incoming override or existing value)
+        dupe_payload = {
+            "address_line1": data.get("address_line1", addr.address_line1).strip(),
+            "city": data.get("city", addr.city).strip(),
+            "postcode": data.get("postcode", addr.postcode).strip(),
+            "country": data.get("country", addr.country).strip(),
+            "user_ref": data.get("user_ref", addr.user_ref),
+        }
+        if self._duplicate_exists(dupe_payload, address_id):
             return Response(
-                {
-                    "error": ErrorCode.NOT_FOUND.value,
-                    "message": ErrorMessage.NOT_FOUND.value,
-                },
-                status=status.HTTP_404_NOT_FOUND,
+                {"error": ErrorCode.ADDRESS_ALREADY_EXISTS.value},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        serializer = AddressSerializer(data=request.data, partial=True)
-        if serializer.is_valid():
-            data = serializer.validated_data
+        # Apply updates and collect changed fields for update_fields
+        changed_fields = []
+        for field, value in data.items():
+            setattr(addr, field, value)
+            changed_fields.append(field)
+        addr.modified_at = now()
+        changed_fields.append("modified_at")
 
-            # Use __iexact lookups for duplicate check during update
-            existing_address = (
-                Address.objects.exclude(id=address_id)
-                .filter(
-                    address_line1__iexact=data.get(
-                        "address_line1", instance.address_line1
-                    ).strip(),
-                    city__iexact=data.get("city", instance.city).strip(),
-                    postcode__iexact=data.get("postcode", instance.postcode)
-                    .strip()
-                    .upper(),
-                    country__iexact=data.get("country", instance.country).strip(),
-                    user_ref=data.get("user_ref", instance.user_ref),
-                )
-                .first()
-            )
-
-            if existing_address:
-                return Response(
-                    {"error": "Address already exists"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            instance.address_line1 = data.get("address_line1", instance.address_line1)
-            instance.address_line2 = data.get("address_line2", instance.address_line2)
-            instance.address_line3 = data.get("address_line3", instance.address_line3)
-            instance.city = data.get("city", instance.city)
-            instance.county = data.get("county", instance.county)
-            instance.postcode = data.get("postcode", instance.postcode)
-            instance.country = data.get("country", instance.country)
-            instance.is_default = data.get("is_default", instance.is_default)
-            instance.verified = data.get("verified", instance.verified)
-
-            instance.title = "address-title"
-            instance.slug = self.get_unique_slug(instance.title)
-
-            if not instance.pk:
-                parent_page = Page.objects.get(slug="addresses")
-                parent_page._add_child(instance=instance)
-            else:
-                instance.save()
-
-            updated_serializer = AddressSerializer(instance)
-            return Response(updated_serializer.data, status=status.HTTP_200_OK)
-
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        # Save only touched cols so Wagtail skips URL‑path update logic
+        addr.save(update_fields=changed_fields)
+        return Response(AddressSerializer(addr).data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["get"], url_path=r"user/(?P<user_id>[\w-]+)")
     def list_by_user(self, request, user_id=None):

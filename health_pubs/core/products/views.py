@@ -30,6 +30,7 @@ from core.utils.generate_s3_presigned_url import (
     generate_presigned_urls,
 )
 from rest_framework.views import APIView
+from rest_framework.generics import ListAPIView
 
 from core.utils.product_recommendation_system import get_recommended_products
 from core.vaccinations.models import Vaccination
@@ -1390,6 +1391,7 @@ class ProductUpdateView(View):
 class ProductPatchView(ErrorHandlingMixin, APIView):
     """
     Optimized view to handle product updates via PATCH requests.
+    Pre-creates the ProductUpdate so that post_save signals see a valid update_ref.
     """
 
     authentication_classes = [CustomTokenAuthentication]
@@ -1409,15 +1411,16 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
             )
 
         data = json.loads(request.body)
+        logger.info("Received data for update: %s", data)
         product_type = data.get("product_type")
         product_downloads = data.get("product_downloads", {})
 
-        # Process file URLs based solely on the input data (not the product table)
+        # Prepare file URLs
         file_urls = self.process_file_urls(
             product_type, data, product_downloads, product.tag
         )
 
-        # Validate date fields based on provided choices
+        # Validate date fields
         available_from_choice = data.get("available_from_choice")
         order_from_date = data.get("order_from_date")
         if available_from_choice == "specific_date" and not order_from_date:
@@ -1432,7 +1435,7 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                 status_code=400,
             )
 
-        # Prepare additional update data for the ProductUpdate instance
+        # Build the ProductUpdate payload
         product_update_data = self.prepare_product_update_data(
             data,
             available_until_choice,
@@ -1443,20 +1446,25 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         )
 
         with transaction.atomic():
+            # Update or create order limits
             if data.get("order_limits"):
                 self.update_order_limits(product, data.get("order_limits"))
 
+            # Pre-create or update ProductUpdate so signals see required fields
+            product_update = self.get_or_create_product_update(
+                product, product_update_data
+            )
+            # Apply any foreign-key guidance sets immediately on the update_ref
+            self.update_foreign_keys(product_update, data)
+
+            # Now patch the Product itself
             serializer = ProductSerializer(
                 product, data=data, partial=True, context={"request": request}
             )
             if serializer.is_valid():
                 serializer.save()
-                # Create or update the ProductUpdate instance
-                product_update = self.get_or_create_product_update(
-                    product, product_update_data, data
-                )
-                # Update guidance-related foreign keys (audience_names, vaccination_names, disease_names, where_to_use_names)
-                self.update_foreign_keys(product_update, data)
+
+                # Prepare response
                 response_data = serializer.data
                 response_data["update_ref"] = ProductUpdateSerializer(
                     product_update, context={"request": request}
@@ -1467,6 +1475,7 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                     decoded_product_code,
                 )
                 return JsonResponse(response_data, status=status.HTTP_200_OK)
+
             else:
                 logger.error("Serializer errors: %s", serializer.errors)
                 return handle_error(
@@ -1725,9 +1734,14 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         return update_data
 
     def get_or_create_product_update(
-        self, product: Product, update_data: dict, raw_data: dict
+        self, product: Product, update_data: dict
     ) -> ProductUpdate:
         product_update = product.update_ref
+        logger.info(
+            "Checking for existing ProductUpdate instance: %s",
+            product_update,
+        )
+
         if not product_update:
             logger.info("Creating new ProductUpdate instance.")
             parent_page = product.get_parent()
@@ -1735,12 +1749,15 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
             parent_page.add_child(instance=product_update)
             product_update.save_revision().publish()
             Product.objects.filter(pk=product.pk).update(update_ref=product_update)
+            product.refresh_from_db()
+            product_update = product.update_ref
         else:
             logger.info("Updating existing ProductUpdate instance.")
             for key, value in update_data.items():
-                if key in raw_data and raw_data[key] is not None:
-                    setattr(product_update, key, value)
+                setattr(product_update, key, value)
+                logger.debug("Set %s = %s on ProductUpdate", key, value)
             product_update.save()
+
         return product_update
 
     def update_order_limits(self, product: Product, order_limits: list):
@@ -2037,13 +2054,25 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
 
 
 class ProductListMixin:
+    """Mixin to list / paginate / serialize Products.
+
+    By default it does _not_ include the DRF `request` in the serializer context,
+    so serializers that peek at `context['request'].user` won’t see it.
+    Child views that set `include_request_context = True`
+    will have `request` injected into the serializer context.
+    """
+
     serializer_class = ProductSerializer
+    include_request_context = False
 
     def get_sorted_queryset(self, queryset, request):
         sort_by = request.GET.get("sort_by")
         if sort_by in VALID_SORT_FIELDS:
             return queryset.order_by(sort_by)
         return queryset
+
+    def get_serializer_context(self, request):
+        return {"request": request} if self.include_request_context else {}
 
     def paginate_and_serialize(
         self, queryset, request, serializer_class=None, use_direct_update=False
@@ -2052,14 +2081,17 @@ class ProductListMixin:
         paginator = CustomPagination()
         paginated = paginator.paginate_queryset(queryset, request)
 
-        # Serialize once and batch-process S3 URLs
-        serializer = serializer_class(paginated, many=True)
+        context = self.get_serializer_context(request)
+
+        # 1) initial serialize → collect all S3 URLs
+        serializer = serializer_class(paginated, many=True, context=context)
         all_download_urls = extract_s3_urls(serializer.data)
         presigned_urls = generate_presigned_urls(all_download_urls)
 
+        # 2) apply presigned URLs, then re-serialize if needed
         if use_direct_update:
             _update_product_downloads_with_presigned_urls(paginated, presigned_urls)
-            serializer = serializer_class(paginated, many=True)
+            serializer = serializer_class(paginated, many=True, context=context)
         else:
             update_product_urls(serializer.data, presigned_urls)
 
@@ -2070,8 +2102,12 @@ class ProductAdminListView(APIView, ProductListMixin):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
 
+    # 👉 Turn on request-injection so the serializer’s to_representation()
+    # will see `request.user` and _not_ strip out your email fields.
+    include_request_context = True
+
     def get(self, request, *args, **kwargs):
-        logger.info("ProductAdminListView GET method called")
+        logger.info("ProductAdminListView GET called")
         try:
             products = Product.objects.all()
             if not products.exists():
@@ -2081,9 +2117,10 @@ class ProductAdminListView(APIView, ProductListMixin):
                     ErrorMessage.PRODUCT_NOT_FOUND,
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
+
             sorted_qs = self.get_sorted_queryset(products, request)
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
-            logger.info("Returning paginated response with %d products", len(data))
+            logger.info("Returning %d products", len(data))
             return paginator.get_paginated_response(
                 data, status_code=status.HTTP_200_OK
             )
@@ -2430,7 +2467,10 @@ class ProgramProductsView(ListAPIView):
             ).data
 
             logger.info(
-                "returning %d products for program %s", response.data
+                "returning %d products for program %s",
+                response.data,
+                program.program_id,
+
             )  # for debugging
 
             return response

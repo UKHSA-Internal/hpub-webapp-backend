@@ -13,6 +13,7 @@ db.sqlite3
 local_secrets.json
 .idea
 **venv/
+**venv_/
 ZscalerRootCA.crt
 dump.rdb
 .DS_Store

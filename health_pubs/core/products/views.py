@@ -2438,7 +2438,9 @@ class ProgramProductsView(ListAPIView):
             ).data
 
             logger.info(
-                "returning %d products for program %s", response.data
+                "returning %d products for program %s",
+                response.data,
+                program.program_id,
             )  # for debugging
 
             return response

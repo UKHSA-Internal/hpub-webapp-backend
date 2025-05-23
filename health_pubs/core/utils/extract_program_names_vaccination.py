@@ -5,54 +5,64 @@ import pandas as pd
 def extract_program_names(
     prog_dis_path: str, programmes_path: str, vaccinations_path: str, output_path: str
 ):
-    # 1) Load your files
-    prog_dis = pd.read_excel(
-        prog_dis_path
-    )  # programme_id, vaccination_ids (e.g. "1,2,3" or "[1,2]")
-    programmes = pd.read_excel(programmes_path)  # programme_id, programme_name, …
-    vaccinations = pd.read_excel(vaccinations_path)  # ID, …, program_names (empty/NaN)
+    """
+    Reads programme–vaccination links, programme definitions, and vaccinations list,
+    then writes out the vaccinations sheet with a `program_names` column showing
+    comma-separated programme names per vaccination.
+    """
+    # 1) Load input files
+    prog_dis = pd.read_excel(prog_dis_path)  # columns: programme_id, vaccination_ids
+    programmes = pd.read_excel(programmes_path)  # columns: programme_id, programme_name
+    vaccinations = pd.read_excel(
+        vaccinations_path
+    )  # columns including ID, optional program_names
 
-    # 2) Split & explode the vaccination_ids into one row per programme_id–vaccination_id
-    prog_dis = prog_dis.copy()
-    prog_dis["vaccination_ids_list"] = (
-        prog_dis["vaccination_ids"]
+    # Drop any existing program_names to avoid conflicts
+    vaccinations = vaccinations.drop(columns=["program_names"], errors="ignore")
+
+    # 2) Expand vaccination_ids into one row per programme–vaccination link
+    links = prog_dis.assign(
+        vaccination_ids_list=prog_dis["vaccination_ids"]
         .astype(str)
-        .str.strip("[]")  # remove any stray brackets
-        .str.split(",")  # split into lists
-    )
-    exploded = prog_dis.explode("vaccination_ids_list")
+        .str.strip("[]")
+        .str.split(",")
+    ).explode("vaccination_ids_list")
 
-    # 3) Clean & convert to numeric, dropping anything that isn’t a valid integer
-    exploded["vaccination_id"] = pd.to_numeric(
-        exploded["vaccination_ids_list"].str.strip(),
-        errors="coerce",  # convert invalid entries to NaN
+    # 3) Clean & convert to numeric, drop invalid
+    links = (
+        links.assign(
+            vaccination_id=pd.to_numeric(
+                links["vaccination_ids_list"].str.strip(), errors="coerce"
+            )
+        )
+        .dropna(subset=["vaccination_id"])
+        .assign(vaccination_id=lambda df: df["vaccination_id"].astype(int))
     )
-    exploded = exploded.dropna(subset=["vaccination_id"])
-    exploded["vaccination_id"] = exploded["vaccination_id"].astype(int)
 
     # 4) Merge in programme_name
-    exploded = exploded.merge(
+    links = links.merge(
         programmes[["programme_id", "programme_name"]], on="programme_id", how="left"
     )
 
     # 5) Aggregate multiple programmes per vaccination
     mapping = (
-        exploded.groupby("vaccination_id")["programme_name"]
-        .agg(lambda names: ",".join(sorted(set(names.dropna()))))
+        links.groupby("vaccination_id")["programme_name"]
+        .agg(lambda names: ",".join(sorted({n for n in names if pd.notna(n)})))
         .reset_index()
         .rename(columns={"programme_name": "program_names"})
     )
 
-    # 6) Merge those names back onto your vaccinations sheet
+    # 6) Merge those names back onto your vaccinations sheet with validation
     result = vaccinations.merge(
-        mapping, left_on="ID", right_on="vaccination_id", how="left"
+        mapping,
+        left_on="ID",
+        right_on="vaccination_id",
+        how="left",
+        validate="one_to_one",
     )
-    # If your column in Vaccinations.xlsx is called something else (e.g. 'Programe_names'), adjust the next line:
-    result["program_names"] = result["program_names"]
 
-    # 7) (Optional) Drop the helper column after merge
-    if "vaccination_id" in result.columns:
-        result = result.drop(columns=["vaccination_id"])
+    # 7) Drop helper merge column
+    result = result.drop(columns=["vaccination_id"], errors="ignore")
 
     # 8) Save out
     result.to_excel(output_path, index=False)

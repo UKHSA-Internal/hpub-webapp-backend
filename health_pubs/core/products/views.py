@@ -731,42 +731,17 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
 
     @action(detail=False, methods=["post"], url_path="bulk-upload")
     def bulk_upload(self, request):
-        merged_excel = request.FILES.get("product_excel")
-        if not merged_excel:
-            return Response(
-                {"error": "No merged Excel file uploaded."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # Load and validate spreadsheet
+        df, error_resp = self._load_dataframe(request)
+        if error_resp:
+            return error_resp
 
-        try:
-            merged_excel.seek(0)
-            df = pd.read_excel(merged_excel, engine="openpyxl")
-            df = df.where(pd.notna(df), None)
-        except Exception as e:
-            logger.exception("Error reading uploaded file")
-            return Response(
-                {"error": "Could not parse spreadsheet", "details": str(e)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # Retrieve root page
+        root, error_resp = self._get_root_page()
+        if error_resp:
+            return error_resp
 
-        if df.empty:
-            return Response(
-                {"message": "Uploaded spreadsheet contains no data rows."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        try:
-            root = self.get_or_create_root_page()
-        except ImproperlyConfigured:
-            return Response(
-                {"error": "Unable to find or create products root page."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-        skipped = []
-        created_count = 0
-        order_limits_count = 0
-
+        # Mapping for m2m fields
         m2m_map = {
             "audience_id": ("audience_ref", Audience, "audience_id", "audience_names"),
             "where_to_use_id": (
@@ -784,65 +759,20 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
             "disease_id": ("diseases_ref", Disease, "disease_id", "disease_names"),
         }
 
+        skipped = []
+        created_count = 0
+        order_limits_count = 0
+
+        # Process rows atomically
         with transaction.atomic():
-            for idx, series_row in df.iterrows():
-                row = series_row.to_dict()
-                try:
-                    for field in (
-                        "product_key",
-                        "title",
-                        "language_id",
-                        "gov_related_article",
-                        "product_code",
-                    ):
-                        if not row.get(field):
-                            raise ValueError(f"Missing required {field}")
-
-                    row = self.clean_row_data(row)
-                    created_dt = self.convert_created_date(row.get("created"))
-                    pub_date = self.get_publish_date(row.get("version_date"))
-
-                    program = None
-                    if row.get("programme_id"):
-                        program = Program.objects.filter(
-                            program_id=str(int(row["programme_id"]))
-                        ).first()
-                        if not program:
-                            raise ValueError(f"Program {row['programme_id']} not found")
-
-                    language = LanguagePage.objects.filter(
-                        language_id=row["language_id"]
-                    ).first()
-                    if not language:
-                        raise ValueError(f"Language {row['language_id']} not found")
-                    iso_code = language.iso_language_code.upper()
-
-                    code = row["product_code"]
-                    existing = Product.objects.filter(product_code=code).first()
-
-                    if existing:
-                        # ===== SKIP EXISTING =====
-                        skip_info = self.skip_row(
-                            idx, f"Product with code {code} already exists."
-                        )
-                        skipped.append(skip_info)
-                        continue
-
-                    # ===== CREATE PATH =====
-                    pu = self.create_product_update(row)
-                    self.safe_add_child(root, pu)
-                    self.assign_m2m_fields(pu, m2m_map, row, add_only=False)
-                    prod = self.create_product(
-                        row, program, language, iso_code, pu, created_dt, pub_date
-                    )
-                    self.safe_add_child(root, prod)
-                    ols = self.create_order_limits(prod, row)
+            for idx, row_series in df.iterrows():
+                row = row_series.to_dict()
+                result = self._process_row(idx, row, root, m2m_map)
+                if result.get("skip"):
+                    skipped.append(result)
+                else:
                     created_count += 1
-                    order_limits_count += len(ols)
-
-                except Exception as e:
-                    logger.exception(f"Row {idx+1} error: {e}")
-                    skipped.append({"row": idx + 1, "error": str(e)})
+                    order_limits_count += result.get("order_limits", 0)
 
         return Response(
             {
@@ -853,6 +783,105 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
             },
             status=status.HTTP_201_CREATED,
         )
+
+    def _load_dataframe(self, request):
+        file = request.FILES.get("product_excel")
+        if not file:
+            return None, Response(
+                {"error": "No merged Excel file uploaded."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            file.seek(0)
+            df = pd.read_excel(file, engine="openpyxl").where(
+                pd.notna(pd.read_excel(file, engine="openpyxl")), None
+            )
+        except Exception as e:
+            logger.exception("Error reading uploaded file")
+            return None, Response(
+                {"error": "Could not parse spreadsheet", "details": str(e)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if df.empty:
+            return None, Response(
+                {"message": "Uploaded spreadsheet contains no data rows."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return df, None
+
+    def _get_root_page(self):
+        try:
+            root = self.get_or_create_root_page()
+            return root, None
+        except Exception:
+            return None, Response(
+                {"error": "Unable to find or create products root page."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    def _process_row(self, idx, row, root, m2m_map):
+        """
+        Handles creation or skipping of a single product row.
+        Returns a dict with skip=True and error info or skip=False and order_limits count.
+        """
+        try:
+            # Required fields
+            for field in (
+                "product_key",
+                "title",
+                "language_id",
+                "gov_related_article",
+                "product_code",
+            ):
+                if not row.get(field):
+                    raise ValueError(f"Missing required {field}")
+
+            row = self.clean_row_data(row)
+            created_dt = self.convert_created_date(row.get("created"))
+            pub_date = self.get_publish_date(row.get("version_date"))
+
+            # Program lookup
+            program = None
+            pid = row.get("programme_id")
+            if pid:
+                program = Program.objects.filter(program_id=str(int(pid))).first()
+                if not program:
+                    raise ValueError(f"Program {pid} not found")
+
+            # Language lookup
+            language = LanguagePage.objects.filter(
+                language_id=row["language_id"]
+            ).first()
+            if not language:
+                raise ValueError(f"Language {row['language_id']} not found")
+            iso_code = language.iso_language_code.upper()
+
+            code = row["product_code"]
+            if Product.objects.filter(product_code=code).exists():
+                return {
+                    "skip": True,
+                    "row": idx + 1,
+                    "error": f"Product with code {code} already exists.",
+                }
+
+            # Create product update
+            pu = self.create_product_update(row)
+            self.safe_add_child(root, pu)
+            self.assign_m2m_fields(pu, m2m_map, row, add_only=False)
+
+            # Create main product
+            prod = self.create_product(
+                row, program, language, iso_code, pu, created_dt, pub_date
+            )
+            self.safe_add_child(root, prod)
+
+            # Create order limits
+            ols = self.create_order_limits(prod, row)
+            return {"skip": False, "order_limits": len(ols)}
+
+        except Exception as e:
+            logger.exception(f"Row {idx+1} error: {e}")
+            return {"skip": True, "row": idx + 1, "error": str(e)}
 
 
 class PresignedUrlMixin:
@@ -2470,7 +2499,6 @@ class ProgramProductsView(ListAPIView):
                 "returning %d products for program %s",
                 response.data,
                 program.program_id,
-
             )  # for debugging
 
             return response

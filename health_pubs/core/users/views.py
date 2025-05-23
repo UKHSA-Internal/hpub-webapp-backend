@@ -1,8 +1,13 @@
 import logging
 import os
 import sys
+from typing import Optional, Tuple
 import uuid
 import pandas as pd
+from dateutil import parser as dateutil_parser
+
+from django.utils import timezone
+import datetime
 
 from core.organizations.models import Organization
 from core.users.permissions import IsAdminUser
@@ -26,7 +31,7 @@ from django.shortcuts import get_object_or_404
 from django.http import JsonResponse
 from django.utils import timezone
 from django.utils.text import slugify
-from rest_framework import status, generics
+from rest_framework import status, generics, exceptions
 from rest_framework.status import HTTP_204_NO_CONTENT
 from rest_framework.generics import GenericAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -34,6 +39,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.decorators import api_view, permission_classes
 from wagtail.models import Page
 from django.db import transaction, DatabaseError, IntegrityError
 
@@ -138,287 +144,185 @@ def validate_azure_b2c_token(token):
 
 
 class UserSignUpView(APIView):
-    """
-    API endpoint for signing up a new user based on a decoded Azure B2C token.
-    """
+    """Handles post-signup user creation and token issuance."""
 
     permission_classes = [AllowAny]
 
     def post(self, request):
-        # Step 1: Validate token from header.
-        decoded_token = self._get_decoded_token(request)
-        if isinstance(decoded_token, Response):
-            return decoded_token
+        # 1. Extract and validate the raw token
+        id_token = self._get_bearer_token(request)
+        claims = self._validate_b2c_token(id_token)
 
-        # Step 2: Extract and validate user info.
-        user_info = self._extract_user_info(decoded_token)
-        if isinstance(user_info, Response):
-            return user_info
+        # 2. Pull out and verify user attributes
+        user_data = self._extract_and_validate_claims(claims, request.data)
 
-        first_name = user_info["first_name"]
-        last_name = user_info["last_name"]
-        email = user_info["email"]
-        mobile_number = user_info["mobile_number"]
-        role_name = user_info["role_name"]
+        # 3. Load related objects
+        role = self._get_role(user_data.pop("role_name"))
+        establishment, organization = self._get_establishment_and_org(
+            user_data.pop("establishment_id")
+        )
 
-        # Validate email format.
+        # 4. Find or create the Wagtail user page
+        user_page, created = self._find_or_create_user_page(
+            user_data, role, establishment, organization
+        )
+
+        # 5. Issue JWTs
+        short_token, long_token = self._generate_tokens(
+            user_page, user_data["role_name"]
+        )
+
+        # 6. Build the response
+        return self._build_response(user_page, created, short_token, long_token)
+
+    # ───────────────────────────────────────────────────────────────────────────────
+    # 1) AUTH HEADER & TOKEN VALIDATION
+    # ───────────────────────────────────────────────────────────────────────────────
+
+    def _get_bearer_token(self, request) -> str:
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            raise exceptions.AuthenticationFailed(
+                "Missing or malformed Authorization header"
+            )
+        return auth.split(" ", 1)[1]
+
+    def _validate_b2c_token(self, token: str) -> dict:
+        try:
+            return validate_token(token, token_type="access")
+        except Exception as e:
+            logger.warning("B2C token invalid: %s", e, exc_info=True)
+            raise exceptions.AuthenticationFailed("Invalid token")
+
+    # ───────────────────────────────────────────────────────────────────────────────
+    # 2) CLAIM EXTRACTION & VALIDATION
+    # ───────────────────────────────────────────────────────────────────────────────
+
+    def _extract_and_validate_claims(self, claims: dict, data: dict) -> dict:
+        # Normalize and validate email
+        email = (
+            (claims.get("email") or claims.get("email_address") or "").lower().strip()
+        )
+        if not email:
+            raise exceptions.ValidationError("Email missing in token")
         try:
             validate_email(email)
         except ValidationError:
-            logger.error("Invalid email format: %s", email)
-            return Response(
-                {"error": "Invalid email format"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            raise exceptions.ValidationError("Invalid email format")
 
-        # Step 3: Check for an existing user.
-        if User.objects.filter(email=email).exists():
-            logger.info("User with email %s already exists.", email)
-            existing_user = User.objects.get(email=email)
-            return self._return_user(
-                existing_user,
-                email,
-                role_name,
-                message=USER_EXISTS_MSG,
-                status_code=status.HTTP_200_OK,
-            )
-
-        # Step 4: Validate Role.
-        role = None
-        if role_name:
-            role = Role.objects.filter(name=role_name).first()
-        if role_name and not role:
-            logger.error("Role not found: %s", role_name)
-            return Response(
-                {"error": "Role not found"}, status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Step 5: Validate Establishment (if provided).
-        establishment_result = self._get_establishment_and_org(request)
-        if isinstance(establishment_result, Response):
-            return establishment_result
-        establishment, organization_ref = establishment_result
-
-        # Step 6: Retrieve or create the parent 'users' page.
-        parent_page = self._get_or_create_parent_page()
-        if isinstance(parent_page, Response):
-            return parent_page
-
-        # Step 7: Create the user instance.
-        try:
-            new_user_page = self._create_user_instance(
-                parent_page,
-                first_name,
-                last_name,
-                email,
-                mobile_number,
-                establishment,
-                organization_ref,
-                role,
-            )
-        except (IntegrityError, Exception) as ex:
-            return self._handle_create_user_error(ex, email, role_name)
-
-        # Step 8: Generate tokens and return response.
-        return self._return_user(
-            new_user_page, email, role_name, status_code=status.HTTP_201_CREATED
-        )
-
-    def _handle_create_user_error(self, ex, email, role_name):
-        error_str = str(ex)
-        if isinstance(ex, IntegrityError):
-            logger.error("Integrity error while creating user: %s", error_str)
-        else:
-            logger.error("Failed to create user: %s", error_str)
-
-        if (
-            "User with this Email already exists" in error_str
-            or "Page with this Path already exists" in error_str
-            or isinstance(ex, IntegrityError)
-        ):
-            existing_user = User.objects.filter(email=email).first()
-            if existing_user:
-                return self._return_user(
-                    existing_user,
-                    email,
-                    role_name,
-                    message=USER_EXISTS_MSG,
-                    status_code=status.HTTP_200_OK,
-                )
-
-        err_msg = (
-            "Integrity error while creating user page"
-            if isinstance(ex, IntegrityError)
-            else "Failed to create user page"
-        )
-        return Response(
-            {"error": err_msg},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
-
-    def _get_decoded_token(self, request):
-        auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
-            logger.error("Authorization header missing or improperly formatted.")
-            return Response(
-                {"error": "Invalid or missing Authorization token"},
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
-        try:
-            token = auth_header.split(" ")[1]
-        except IndexError:
-            logger.error("Authorization token not found after splitting header.")
-            return Response(
-                {"error": "Invalid Authorization header format"},
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
-        try:
-            decoded_token = validate_azure_b2c_token(token)
-            logger.info("Successfully decoded token: %s", decoded_token)
-            return decoded_token
-        except Exception as e:
-            logger.error("Token validation error: %s", str(e))
-            return Response(
-                {"error": f"Invalid token: {str(e)}"},
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
-
-    def _extract_user_info(self, decoded_token):
-        first_name = decoded_token.get("given_name", "").strip()
-        last_name = decoded_token.get("family_name", "").strip()
-        mobile_number = decoded_token.get("mobile_number", "").strip()
-        # Try to get email from one of two possible keys.
-        email = decoded_token.get("email_address") or decoded_token.get("email")
-        if email:
-            email = email.strip()
-        role_name = decoded_token.get("user_approle", "").strip() or "User"
-        logger.info(
-            "Extracted user_info: first_name=%s, last_name=%s, email=%s, role_name=%s",
-            first_name,
-            last_name,
-            email,
-            role_name,
-        )
-        if not email:
-            return Response(
-                {"error": "Email not found in token"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
         return {
-            "first_name": first_name,
-            "last_name": last_name,
             "email": email,
-            "mobile_number": mobile_number,
-            "role_name": role_name,
+            "first_name": (claims.get("given_name") or "").strip(),
+            "last_name": (claims.get("family_name") or "").strip(),
+            "mobile_number": (claims.get("mobile_number") or "").strip(),
+            "role_name": (claims.get("user_approle") or "").strip() or None,
+            "establishment_id": data.get("establishment_id"),
         }
 
-    def _get_establishment_and_org(self, request):
-        establishment_id = request.data.get("establishment_id")
-        if not establishment_id:
+    # ───────────────────────────────────────────────────────────────────────────────
+    # 3) ROLE & ESTABLISHMENT LOADING
+    # ───────────────────────────────────────────────────────────────────────────────
+
+    def _get_role(self, role_name: Optional[str]) -> Optional[Role]:
+        if not role_name:
+            return None
+        role = Role.objects.filter(name=role_name).first()
+        if not role:
+            raise exceptions.ValidationError("Role not found")
+        return role
+
+    def _get_establishment_and_org(
+        self, est_id: Optional[str]
+    ) -> Tuple[Optional[Establishment], Optional[Organization]]:
+        if not est_id:
             return None, None
-        establishment = Establishment.objects.filter(
-            establishment_id=establishment_id
-        ).first()
-        if not establishment:
-            logger.error("Establishment not found: %s", establishment_id)
-            return Response(
-                {"error": "Establishment not found"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-        return establishment, establishment.organization_ref
+        est = Establishment.objects.filter(establishment_id=est_id).first()
+        if not est:
+            raise exceptions.NotFound("Establishment not found")
+        return est, est.organization_ref
 
-    def _get_or_create_parent_page(self):
+    # ───────────────────────────────────────────────────────────────────────────────
+    # 4) USER PAGE CREATION
+    # ───────────────────────────────────────────────────────────────────────────────
+
+    def _find_or_create_user_page(self, info, role, est, org) -> Tuple[User, bool]:
         try:
-            parent_page = Page.objects.get(slug="users")
-            logger.info("Parent page 'users' found.")
-            return parent_page
-        except Page.DoesNotExist:
-            logger.warning("Parent page 'users' not found. Attempting to create one.")
-            root_page = Page.objects.first()
-            if not root_page:
-                logger.error("No root page available to attach 'users' page.")
-                return Response(
-                    {"error": "Root page not found"},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                )
-            parent_page = Page(
-                title="Users",
-                slug="users",
-                content_type=ContentType.objects.get_for_model(Page),
+            user = User.objects.get(email=info["email"])
+            return user, False
+        except User.DoesNotExist:
+            parent = self._get_or_create_parent_page()
+            unique_slug = slugify(
+                f"user-{info['first_name']}-{info['last_name']}-{uuid.uuid4()}"
             )
-            root_page.add_child(instance=parent_page)
-            logger.info("Parent page 'users' created.")
-            return parent_page
+            user = User(
+                title=f"{info['first_name']} {info['last_name']}".strip()
+                or info["email"],
+                slug=unique_slug,
+                user_id=str(uuid.uuid4()),
+                **info,
+                role_ref=role,
+                establishment_ref=est,
+                organization_ref=org,
+                email_verified=True,
+                is_authorized=True,
+            )
+            try:
+                with transaction.atomic():
+                    parent.add_child(instance=user)
+                return user, True
+            except IntegrityError as e:
+                logger.error("DB error creating user: %s", e, exc_info=True)
+                raise exceptions.APIException("Database error creating user")
 
-    def _create_user_instance(
-        self,
-        parent_page,
-        first_name,
-        last_name,
-        email,
-        mobile_number,
-        establishment,
-        organization_ref,
-        role,
-    ):
-        unique_slug = slugify(f"user-{first_name}-{last_name}-{uuid.uuid4()}")
-        user_instance = User(
-            title=f"User: {first_name} {last_name}",
-            slug=unique_slug,
-            user_id=str(uuid.uuid4()),
-            email=email,
-            first_name=first_name,
-            last_name=last_name,
-            email_verified=True,
-            is_authorized=True,
-            mobile_number=mobile_number,
-            establishment_ref=establishment,
-            organization_ref=organization_ref,
-            role_ref=role,
+    def _get_or_create_parent_page(self) -> Page:
+        page, created = Page.objects.get_or_create(
+            slug="users",
+            defaults={
+                "title": "Users",
+                "content_type": ContentType.objects.get_for_model(Page),
+                "path": Page.get_first_root_node().path,
+                "depth": Page.get_first_root_node().depth + 1,
+            },
         )
-        with transaction.atomic():
-            new_user_page = parent_page.add_child(instance=user_instance)
-        logger.info("User instance created successfully: %s", new_user_page)
-        return new_user_page
+        return page
 
-    def _return_user(
-        self, user_page, email, role_name, message=None, status_code=status.HTTP_200_OK
-    ):
-        """
-        Helper method to generate tokens and return the user data.
-        Includes a message only if provided (for existing users).
-        """
-        user_response_data = UserSerializer(user_page).data
+    # ───────────────────────────────────────────────────────────────────────────────
+    # 5) TOKEN GENERATION
+    # ───────────────────────────────────────────────────────────────────────────────
+
+    def _generate_tokens(self, user: User, role_name: Optional[str]) -> Tuple[str, str]:
         try:
-            short_term_token = generate_short_term_token(
-                user_page.user_id, email, role_name
-            )
-            long_term_token = generate_long_term_token(
-                user_page.user_id, email, role_name
-            )
-        except Exception as token_error:
-            logger.error("Token generation failed: %s", str(token_error))
-            return Response(
-                {"error": "Failed to generate authentication tokens"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-        response_data = {
-            "user": user_response_data,
-            "short_term_token": short_term_token,
-        }
-        if message:
-            response_data["message"] = message
-        response = Response(response_data, status=status_code)
+            short = generate_short_term_token(user.user_id, user.email, role_name)
+            long = generate_long_term_token(user.user_id, user.email, role_name)
+            return short, long
+        except Exception as e:
+            logger.error("Token generation failed: %s", e, exc_info=True)
+            raise exceptions.APIException("Token generation failed")
 
-        response.set_cookie(
-            key="long_term_token",
-            value=long_term_token,
+    # ───────────────────────────────────────────────────────────────────────────────
+    # 6) RESPONSE BUILDING
+    # ───────────────────────────────────────────────────────────────────────────────
+
+    def _build_response(
+        self, user: User, created: bool, short: str, long: str
+    ) -> Response:
+        serializer = UserSerializer(user)
+        payload = {"user": serializer.data, "short_term_token": short}
+        if not created:
+            payload["message"] = USER_EXISTS_MSG
+
+        resp = Response(
+            payload, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        )
+        resp.set_cookie(
+            "long_term_token",
+            long,
             httponly=True,
-            secure=(not settings.DEBUG),
-            samesite="Lax",  # or "Strict"/"None" based on frontend-backend setup
-            max_age=86400,  # 1 day
+            secure=not settings.DEBUG,
+            samesite="Lax",
+            max_age=86400,
         )
-        return response
+        return resp
 
 
 class UserLoginView(APIView):
@@ -719,6 +623,85 @@ class LogoutView(APIView):
         return response
 
 
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def pre_registration(request):
+    """
+    Called by Azure B2C (Pre-user-registration API connector).
+    Creates the Wagtail User page *before* B2C writes the account.
+    Return HTTP 200 if OK; any 4xx/5xx halts the B2C signup and surfaces the error.
+    """
+    data = request.data
+    # Azure standard claim names: givenName, surname, email, mobileNumber, userAppRole...
+    first_name = (data.get("givenName") or "").strip()
+    last_name = (data.get("surname") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+    mobile_number = (data.get("mobileNumber") or "").strip()
+    role_name = (data.get("userAppRole") or "").strip() or None
+
+    # 1) Validate email
+    if not email:
+        return Response(
+            {"error": "Email is required"}, status=status.HTTP_400_BAD_REQUEST
+        )
+    try:
+        validate_email(email)
+    except ValidationError:
+        return Response(
+            {"error": "Invalid email format"}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # 2) Check for existing
+    if User.objects.filter(email=email).exists():
+        return Response(
+            {"error": "User already exists"}, status=status.HTTP_409_CONFLICT
+        )
+
+    # 3) Find or create the parent “users” page
+    try:
+        parent = Page.objects.get(slug="users")
+    except Page.DoesNotExist:
+        root = Page.get_first_root_node()
+        parent = Page(
+            title="Users",
+            slug="users",
+            content_type=ContentType.objects.get_for_model(Page),
+        )
+        root.add_child(instance=parent)
+
+    # 4) Create the Wagtail user page
+    try:
+        unique_slug = slugify(f"user-{first_name}-{last_name}-{uuid.uuid4()}")
+        user_page = User(
+            title=f"{first_name} {last_name}".strip() or email,
+            slug=unique_slug,
+            user_id=str(uuid.uuid4()),
+            email=email,
+            first_name=first_name,
+            last_name=last_name,
+            email_verified=True,
+            is_authorized=True,
+            mobile_number=mobile_number,
+            role_ref=Role.objects.filter(name=role_name).first(),
+        )
+        with transaction.atomic():
+            parent.add_child(instance=user_page)
+    except IntegrityError:
+        logger.exception("Integrity error in pre_registration")
+        return Response(
+            {"error": "Database error creating user"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+    except Exception as e:
+        logger.exception("Unexpected error in pre_registration")
+        return Response(
+            {"error": f"Unexpected error: {e}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    return Response(status=status.HTTP_200_OK)
+
+
 class UserDetailView(GenericAPIView):
     queryset = User.objects.all()
     serializer_class = UserSerializer
@@ -830,21 +813,15 @@ class MigrateUsersAPIView(APIView):
             )
 
         users_df = self._read_excel_file(users_file)
-
-        missing_fields = self._validate_required_fields(users_df)
-        if missing_fields:
+        missing = self._validate_required_fields(users_df)
+        if missing:
             return JsonResponse(
-                {
-                    "error": f"Missing required fields in users file: {', '.join(missing_fields)}"
-                },
+                {"error": f"Missing required fields: {', '.join(missing)}"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Get or create the parent page for users
-        user_parent_page = self.get_or_create_parent_page(slug="users", title="Users")
-
-        # Process and create users in batches, under the parent page
-        self._process_users(users_df, user_parent_page)
+        parent_page = self.get_or_create_parent_page(slug="users", title="Users")
+        self._process_users(users_df, parent_page)
 
         logger.info("User migration completed successfully.")
         return JsonResponse(
@@ -853,234 +830,181 @@ class MigrateUsersAPIView(APIView):
         )
 
     def get_or_create_parent_page(self, slug, title):
-        """Retrieve or create a parent page for users."""
         try:
-            parent_page = Page.objects.get(slug=slug)
+            parent = Page.objects.get(slug=slug)
             logger.info(f"Parent page '{title}' found.")
         except Page.DoesNotExist:
-            logger.warning(f"Parent page '{title}' not found, creating new one.")
-            try:
-                root_page = Page.objects.first()
-                parent_page = Page(
-                    title=title,
-                    slug=slug,
-                    content_type=ContentType.objects.get_for_model(Page),
-                )
-                root_page.add_child(instance=parent_page)
-                logger.info(f"Parent page '{title}' created.")
-            except Exception as ex:
-                logger.error(f"Failed to create parent page: {str(ex)}")
-                raise
-        return parent_page
+            logger.warning(f"Parent page '{title}' not found, creating.")
+            root = Page.objects.first()
+            parent = Page(
+                title=title,
+                slug=slug,
+                content_type=ContentType.objects.get_for_model(Page),
+            )
+            root.add_child(instance=parent)
+            logger.info(f"Parent page '{title}' created.")
+        return parent
 
     def _read_excel_file(self, users_file):
         try:
-            users_df = pd.read_excel(users_file)
-            logger.info(
-                "Excel file read successfully. Number of records: %d", len(users_df)
-            )
-            return users_df
+            df = pd.read_excel(users_file)
+            logger.info("Excel read, %d records", len(df))
+            return df
         except Exception as e:
-            logger.error("Error reading Excel file: %s", str(e))
-            raise ValueError("Failed to read the provided Excel file.")
+            logger.error("Error reading Excel: %s", e)
+            raise ValueError("Failed to read Excel file.")
 
-    def _validate_required_fields(self, users_df):
-        required_user_fields = ["user_id", "email", "first_name"]
-        return [
-            field for field in required_user_fields if field not in users_df.columns
-        ]
+    def _validate_required_fields(self, df):
+        required = ["user_id", "email", "first_name"]
+        return [f for f in required if f not in df.columns]
 
-    def _process_users(self, users_df, user_parent_page):
-        # Get all existing user emails in one query to minimize database calls
+    def _process_users(self, df, parent_page):
         existing_emails = set(
-            User.objects.filter(email__in=users_df["email"]).values_list(
-                "email", flat=True
-            )
+            User.objects.filter(email__in=df["email"]).values_list("email", flat=True)
         )
-        batch_size = 25
-        users_to_create = []
 
-        for index, row in users_df.iterrows():
-            # Skip users that already exist in the database
-            if row["email"] in existing_emails:
-                logger.info(f"User with email {row['email']} already exists. Skipping.")
+        for _, row in df.iterrows():
+            email = row["email"]
+            if email in existing_emails:
+                logger.info("Skipping existing %s", email)
                 continue
 
-            user_data = self.extract_user_data(row)
-            user_instance = self._create_user_instance(user_data, user_parent_page)
+            data = self.extract_user_data(row)
 
-            if user_instance:
-                users_to_create.append(user_instance)
-                logger.debug("Processed user record %d: %s", index, user_data["email"])
-
-                # Save in batches
-                if len(users_to_create) >= batch_size:
-                    self._save_users_batch(users_to_create)
-                    users_to_create = []
-
-        # Save any remaining users in the last batch
-        if users_to_create:
-            self._save_users_batch(users_to_create)
-
-    def _save_users_batch(self, users_batch):
-        try:
-            with transaction.atomic():
-                for user in users_batch:
-                    user.save()
-            logger.info("Successfully saved a batch of %d users.", len(users_batch))
-        except Exception as e:
-            logger.error("Error creating users in the database: %s", str(e))
+            # reload parent so tree-state is fresh
+            fresh_parent = Page.objects.get(pk=parent_page.pk)
+            self._create_and_insert_user(data, fresh_parent)
 
     def extract_user_data(self, row):
-        user_id = row["user_id"] if pd.notnull(row["user_id"]) else str(uuid.uuid4())
-
-        # Check if user_id already exists
-        if User.objects.filter(user_id=user_id).exists():
-            logger.warning(
-                f"user_id '{user_id}' already exists. Generating a new UUID."
-            )
+        raw_id = row.get("user_id")
+        user_id = str(raw_id) if pd.notnull(raw_id) else str(uuid.uuid4())
+        attempts = 0
+        while User.objects.filter(user_id=user_id).exists() and attempts < 5:
             user_id = str(uuid.uuid4())
+            attempts += 1
+        if User.objects.filter(user_id=user_id).exists():
+            raise ValueError("Could not generate unique user_id")
 
-            # Optionally, add a loop to ensure uniqueness (with a max number of attempts)
-            attempts = 1
-            max_attempts = 5
-            while (
-                User.objects.filter(user_id=user_id).exists()
-                and attempts <= max_attempts
-            ):
-                logger.warning(
-                    f"Attempt {attempts}: user_id '{user_id}' already exists. Generating a new UUID."
-                )
-                user_id = str(uuid.uuid4())
-                attempts += 1
-
-            if User.objects.filter(user_id=user_id).exists():
-                logger.error(
-                    f"Failed to generate a unique user_id after {max_attempts} attempts."
-                )
-                raise ValueError("Unable to generate a unique user_id for the user.")
-        user_data = {
+        return {
             "user_id": user_id,
             "email": row["email"],
             "mobile_number": row.get("mobile_number"),
             "first_name": row["first_name"],
-            "last_name": row["last_name"],
+            "last_name": row.get("last_name"),
             "email_verified": row.get("email_verified"),
             "is_authorized": row.get("is_authorized"),
-            "last_login": self.parse_last_login(row.get("last_login")),
+            "last_login": self.parse_datetime_field(row.get("last_login")),
+            "created_at": self.parse_datetime_field(row.get("created_at")),
             "establishment_ref": (
-                self._get_establishment_ref(int(row.get("establishment_id")))
+                self._get_establishment_ref(int(row["establishment_id"]))
                 if pd.notnull(row.get("establishment_id"))
                 else None
             ),
             "organization_ref": (
-                self._get_organization_ref(int(row.get("organization_id")))
+                self._get_organization_ref(int(row["organization_id"]))
                 if pd.notnull(row.get("organization_id"))
                 else None
             ),
             "role_ref": (
-                self._get_role_ref(int(row.get("role_id")))
+                self._get_role_ref(int(row["role_id"]))
                 if pd.notnull(row.get("role_id"))
                 else None
             ),
         }
-        logger.debug("Extracted user data: %s", user_data)
-        return user_data
 
-    def parse_last_login(self, last_login_str):
-        if last_login_str in (None, "", "-", "N/A"):
+    def parse_datetime_field(self, raw):
+        if raw in (None, "", "-", "N/A") or pd.isna(raw):
             return None
 
-        try:
-            last_login = pd.to_datetime(last_login_str, errors="raise")
+        if isinstance(raw, (pd.Timestamp, datetime.datetime)):
+            dt = raw.to_pydatetime() if isinstance(raw, pd.Timestamp) else raw
+            if dt.year < 1900:
+                return None
+            return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
 
-            last_login = timezone.make_aware(last_login)
-            return last_login
-        except ValueError:
-            logger.warning(
-                "Invalid date format for last_login: %s. Setting to None.",
-                last_login_str,
-            )
-            return None
-
-    def _create_user_instance(self, user_data, user_parent_page):
-        """Create and return a User instance as a child page."""
-
-        # Debugging output
-        logging.info(f"User parent page: {user_parent_page}, User data: {user_data}")
-
-        try:
-            if pd.isna(user_data.get("last_login")):
-                user_data["last_login"] = None
-            user_instance = User.objects.get(email=user_data["email"])
-            logging.info(f"USER_EXISTS_MSG: {user_instance}")
-        except User.DoesNotExist:
-            # Prepare to create a new user instance
-            slug = slugify(f"user-{user_data['email']}-{str(uuid.uuid4())}")
-            if User.objects.filter(slug=slug).exists():
-                slug = f"{slug}-{str(uuid.uuid4())}"
-
-            user_instance = User(
-                title=f"User {user_data['first_name']}",
-                slug=slug,
-                user_id=user_data["user_id"],
-                email=user_data["email"],
-                mobile_number=user_data["mobile_number"],
-                first_name=user_data["first_name"],
-                last_name=user_data["last_name"],
-                email_verified=user_data["email_verified"],
-                is_authorized=user_data["is_authorized"],
-                establishment_ref=user_data["establishment_ref"],
-                organization_ref=user_data["organization_ref"],
-                role_ref=user_data["role_ref"],
-                last_login=user_data["last_login"],
-            )
-
+        s = str(raw).strip()
+        for fmt in ("%d-%b-%Y %H:%M:%S", "%m/%d/%Y %I:%M:%S %p"):
             try:
-                # Set path and depth for the new user if applicable
-                if user_parent_page.get_last_child() is None:
-                    # Create the path and depth for the first child
-                    user_instance.path = f"{user_parent_page.path}0001"
-                    user_instance.depth = user_parent_page.depth + 1
-                else:
-                    # Use add_child() for subsequent users
-                    user_parent_page.add_child(instance=user_instance)
+                dt = datetime.datetime.strptime(s, fmt)
+                if dt.year < 1900:
+                    return None
+                return timezone.make_aware(dt)
+            except ValueError:
+                continue
 
-                user_instance.save()
-                logger.info(f"User '{user_data['email']}' created successfully.")
-                return user_instance
-
-            except ValidationError as e:
-                logger.error(
-                    f"Validation error for user '{user_data['email']}': {str(e)}"
-                )
-                raise
-
-            except Exception as e:
-                logger.error(f"Failed to create user '{user_data['email']}': {str(e)}")
-                raise
-
-        return user_instance
-
-    def _get_establishment_ref(self, establishment_id):
         try:
-            return Establishment.objects.get(establishment_id=establishment_id)
+            dt = pd.to_datetime(s, errors="coerce")
+            if not pd.isna(dt) and dt.year >= 1900:
+                dt = dt.to_pydatetime()
+                return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+        except Exception:
+            pass
+
+        try:
+            dt = dateutil_parser.parse(s)
+            if dt.year < 1900:
+                return None
+            return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+        except Exception:
+            logger.warning("Unable to parse date: '%s'", s)
+            return None
+
+    def _create_and_insert_user(self, data, parent):
+        try:
+            if User.objects.filter(email=data["email"]).exists():
+                logger.info("User exists, skipping: %s", data["email"])
+                return
+
+            slug = slugify(f"user-{data['email']}-{uuid.uuid4()}")
+            inst = User(
+                title=f"User {data['first_name']}",
+                slug=slug,
+                user_id=data["user_id"],
+                email=data["email"],
+                mobile_number=data["mobile_number"],
+                first_name=data["first_name"],
+                last_name=data["last_name"],
+                email_verified=data["email_verified"],
+                is_authorized=data["is_authorized"],
+                establishment_ref=data["establishment_ref"],
+                organization_ref=data["organization_ref"],
+                role_ref=data["role_ref"],
+                last_login=data["last_login"],
+            )
+
+            if data.get("created_at"):
+                inst.created_at = data["created_at"]
+
+            # this add_child always sees the up-to-date tree in the DB
+            parent.add_child(instance=inst)
+            logger.info("Created user: %s", data["email"])
+
+        except ValidationError as ve:
+            logger.error("ValidationError %s: %s", data["email"], ve)
+            raise
+        except Exception as e:
+            logger.error("Error creating %s: %s", data["email"], e)
+            raise
+
+    def _get_establishment_ref(self, eid):
+        try:
+            return Establishment.objects.get(establishment_id=eid)
         except Establishment.DoesNotExist:
-            logger.warning("Establishment not found for id: %s", establishment_id)
+            logger.warning("Establishment %s not found", eid)
             return None
 
-    def _get_organization_ref(self, organization_id):
+    def _get_organization_ref(self, oid):
         try:
-            return Organization.objects.get(organization_id=organization_id)
+            return Organization.objects.get(organization_id=oid)
         except Organization.DoesNotExist:
-            logger.warning("Organization not found for id: %s", organization_id)
+            logger.warning("Organization %s not found", oid)
             return None
 
-    def _get_role_ref(self, role_id):
+    def _get_role_ref(self, rid):
         try:
-            return Role.objects.get(role_id=role_id)
+            return Role.objects.get(role_id=rid)
         except Role.DoesNotExist:
-            logger.warning("Role not found for id: %s", role_id)
+            logger.warning("Role %s not found", rid)
             return None
 
 

@@ -323,41 +323,48 @@ def _process_row(idx, row, cur, conn):
 
 
 def _process_column(cur, conn, update_ref_id, product_code, tag, col, row, has_row):
-    # Skip based on tag
-    if (tag == "download-only" and col == "print_download_file_name") or (
-        tag == "order-only" and col != "main_download_file_name"
-    ):
+    # --- Tag-based skips ---
+    if tag == "order-only" and col != "main_image_file_name":
+        # only main_image_file_name is allowed in order-only mode
+        return 0, 0, has_row
+
+    if tag == "download-only" and col == "print_download_file_name":
+        # print_download_file_name is not needed for download-only
         return 0, 0, has_row
 
     original = row.get(col, "").strip()
     if not original:
         return 0, 0, has_row
 
+    # --- File extension check ---
     ext = os.path.splitext(original)[1].lower().lstrip(".")
     if ext not in ALLOWED_EXTS[col]:
         logger.warning("  %s: extension '%s' not allowed; skipping", col, ext)
         return 0, 1, has_row
 
+    # --- Local file existence ---
     local_path = os.path.join(LOCAL_DIR, original)
     if not os.path.isfile(local_path):
         logger.warning("  missing file: %s; skipping", local_path)
         return 0, 1, has_row
 
+    # --- S3 upload ---
     safe_name = sanitize_filename(original)
     s3_key = f"{product_code}/{safe_name}"
-
     try:
         ensure_s3_object(local_path, s3_key)
     except Exception as e:
         logger.error("  S3 error for %s: %s", original, e)
         return 0, 1, has_row
 
+    # --- Presigned URL ---
     try:
         presigned = generate_presigned_get(BUCKET_NAME, s3_key, safe_name)
     except Exception as e:
         logger.error("  presign error for %s: %s", safe_name, e)
         return 0, 1, has_row
 
+    # --- Metadata retrieval ---
     try:
         md = get_file_metadata([presigned])[0]
     except Exception as e:
@@ -372,6 +379,7 @@ def _process_column(cur, conn, update_ref_id, product_code, tag, col, row, has_r
     }
     db_field = EXCEL_TO_DB[col]
 
+    # --- Database write or update ---
     try:
         if has_row:
             updated = update_db(cur, update_ref_id, db_field, metadata)

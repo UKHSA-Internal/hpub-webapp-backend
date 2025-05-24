@@ -9,9 +9,11 @@ from .views import (
     UserListView,
     UserLoginView,
     UserSignUpView,
+    pre_registration,
 )
 
 urlpatterns = [
+    path("users/pre-registration/", pre_registration, name="b2c-pre-registration"),
     path("users/signup/", UserSignUpView.as_view(), name="signup"),
     path("users/update/", UpdateUserView.as_view(), name="update-user-view"),
     path("users/login/", UserLoginView.as_view(), name="login"),

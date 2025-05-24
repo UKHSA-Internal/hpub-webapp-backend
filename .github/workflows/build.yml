@@ -193,7 +193,7 @@ jobs:
         echo prefix=$prefix >> $GITHUB_OUTPUT
 
     - name: End-to-end tests
-      if: ${{ matrix.environment }} != "prd"
+      if: ${{ matrix.environment != 'prd' && matrix.environment != 'preprod' }}
       env:
         BASE_URL: "https://${{ steps.url.outputs.prefix }}.test-and-trace.nhs.uk"
       run: |

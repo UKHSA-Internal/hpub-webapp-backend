@@ -36,7 +36,6 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.decorators import api_view, permission_classes
 from wagtail.models import Page
 from django.db import transaction, DatabaseError, IntegrityError
 
@@ -722,83 +721,91 @@ class LogoutView(APIView):
         return response
 
 
-@api_view(["POST"])
-@permission_classes([AllowAny])
-def pre_registration(request):
+class PreRegistrationView(APIView):
     """
     Called by Azure B2C (Pre-user-registration API connector).
     Creates the Wagtail User page *before* B2C writes the account.
-    Return HTTP 200 if OK; any 4xx/5xx halts the B2C signup and surfaces the error.
+    Returns HTTP 200 if OK; any 4xx/5xx halts the B2C signup and surfaces the error.
     """
-    data = request.data
-    # Azure standard claim names: givenName, surname, email, mobileNumber, userAppRole...
-    first_name = (data.get("givenName") or "").strip()
-    last_name = (data.get("surname") or "").strip()
-    email = (data.get("email") or "").strip().lower()
-    mobile_number = (data.get("mobileNumber") or "").strip()
-    role_name = (data.get("userAppRole") or "").strip() or None
 
-    # 1) Validate email
-    if not email:
-        return Response(
-            {"error": "Email is required"}, status=status.HTTP_400_BAD_REQUEST
-        )
-    try:
-        validate_email(email)
-    except ValidationError:
-        return Response(
-            {"error": "Invalid email format"}, status=status.HTTP_400_BAD_REQUEST
-        )
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+    http_method_names = ["post"]
 
-    # 2) Check for existing
-    if User.objects.filter(email=email).exists():
-        return Response(
-            {"error": "User already exists"}, status=status.HTTP_409_CONFLICT
-        )
+    def post(self, request, *args, **kwargs):
+        # 0) Verify shared secret so only Azure can hit this
+        secret = request.headers.get("X-PreReg-Secret")
+        if secret != settings.PRE_REG_SECRET:
+            logger.warning("Unauthorized pre-registration attempt")
+            return Response({"error": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
 
-    # 3) Find or create the parent “users” page
-    try:
-        parent = Page.objects.get(slug="users")
-    except Page.DoesNotExist:
-        root = Page.get_first_root_node()
-        parent = Page(
-            title="Users",
-            slug="users",
-            content_type=ContentType.objects.get_for_model(Page),
-        )
-        root.add_child(instance=parent)
+        data = request.data
+        first_name = (data.get("givenName") or "").strip()
+        last_name = (data.get("surname") or "").strip()
+        email = (data.get("email") or "").strip().lower()
+        mobile_number = (data.get("mobileNumber") or "").strip()
+        role_name = (data.get("userAppRole") or "").strip() or None
 
-    # 4) Create the Wagtail user page
-    try:
-        unique_slug = slugify(f"user-{first_name}-{last_name}-{uuid.uuid4()}")
-        user_page = User(
-            title=f"{first_name} {last_name}".strip() or email,
-            slug=unique_slug,
-            user_id=str(uuid.uuid4()),
-            email=email,
-            first_name=first_name,
-            last_name=last_name,
-            email_verified=True,
-            is_authorized=True,
-            mobile_number=mobile_number,
-            role_ref=Role.objects.filter(name=role_name).first(),
-        )
-        with transaction.atomic():
-            parent.add_child(instance=user_page)
-    except IntegrityError:
-        logger.exception("Integrity error in pre_registration")
-        return Response(
-            {"error": "Database error creating user"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
-    except Exception as e:
-        logger.exception("Unexpected error in pre_registration")
-        return Response(
-            {"error": f"Unexpected error: {e}"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        # 1) Validate email presence & format
+        if not email:
+            return Response(
+                {"error": "Email is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
 
-    return Response(status=status.HTTP_200_OK)
+        try:
+            validate_email(email)
+        except ValidationError:
+            return Response(
+                {"error": "Invalid email format"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # 2) Check for existing user page
+        if User.objects.filter(email=email).exists():
+            return Response(
+                {"error": "User already exists"}, status=status.HTTP_409_CONFLICT
+            )
+
+        # 3) Find-or-create parent “Users” page
+        try:
+            parent = Page.objects.get(slug="users")
+        except Page.DoesNotExist:
+            root = Page.get_first_root_node()
+            users_ct = ContentType.objects.get_for_model(Page)
+            parent = Page(title="Users", slug="users", content_type=users_ct)
+            root.add_child(instance=parent)
+
+        # 4) Create the User page
+        try:
+            unique_slug = slugify(f"user-{first_name}-{last_name}-{uuid.uuid4()}")
+            user_page = User(
+                title=f"{(first_name + ' ' + last_name).strip() or email}",
+                slug=unique_slug,
+                user_id=str(uuid.uuid4()),
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                email_verified=True,
+                is_authorized=True,
+                mobile_number=mobile_number,
+                role_ref=Role.objects.filter(name=role_name).first(),
+            )
+            with transaction.atomic():
+                parent.add_child(instance=user_page)
+
+        except IntegrityError:
+            logger.exception("Database integrity error during pre-registration")
+            return Response(
+                {"error": "Database error creating user"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        except Exception as e:
+            logger.exception("Unexpected error in pre-registration")
+            return Response(
+                {"error": f"Unexpected error: {e}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(status=status.HTTP_200_OK)
 
 
 class UserDetailView(GenericAPIView):

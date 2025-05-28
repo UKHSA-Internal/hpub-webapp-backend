@@ -24,7 +24,15 @@ class CustomTokenAuthentication(BaseAuthentication):
     with the appropriate helper.
     """
 
+    def __init__(self):
+        self._authentication_attempted = False
+
     def authenticate(self, request):
+        if self._authentication_attempted:
+            logger.debug("Authentication already attempted for this request")
+            return None
+        self._authentication_attempted = True
+
         logger.info("Starting token authentication.")
 
         token = self._get_token_from_request(request)

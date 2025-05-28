@@ -129,8 +129,8 @@ jobs:
     strategy:
       max-parallel: 1
       matrix:
-        environment: ["test", "uat"]
-        # environment: ["dev", "test", "uat"]
+        environment: ["test"]
+        # environment: ["dev", "test", "uat", "preprod"]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:
       contents: write
@@ -180,6 +180,8 @@ jobs:
       run: |
         if [ "$environment" == "prd" ]; then
           prefix=hpub
+        elif [ "$environment" == "preprod" ]; then
+          prefix=hpubpp
         elif [ "$environment" == "uat" ]; then
           prefix=hpub-uat
         elif [ "$environment" == "test" ]; then
@@ -193,7 +195,7 @@ jobs:
         echo prefix=$prefix >> $GITHUB_OUTPUT
 
     - name: End-to-end tests
-      if: ${{ matrix.environment }} != "prd"
+      if: ${{ matrix.environment != 'prd' && matrix.environment != 'preprod' }}
       env:
         BASE_URL: "https://${{ steps.url.outputs.prefix }}.test-and-trace.nhs.uk"
       run: |

@@ -24,6 +24,8 @@ from core.utils.token_generation_validation import (
     validate_token,
     validate_token_refresh,
 )
+
+from django.utils import timezone
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError, ObjectDoesNotExist
 from django.core.validators import validate_email

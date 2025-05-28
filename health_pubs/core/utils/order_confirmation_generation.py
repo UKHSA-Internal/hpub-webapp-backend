@@ -29,7 +29,6 @@ def generate_order_confirmation(order_instance):
     total_items = sum(
         item.quantity for item in OrderItem.objects.filter(order_ref=order_instance)
     )
-    # items_table += f"\nTotal Items: {total_items}"
 
     # Retrieve shipping address and user details
     user = order_instance.user_ref

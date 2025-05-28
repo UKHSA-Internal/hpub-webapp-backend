@@ -487,10 +487,9 @@ class OrderViewSet(viewsets.ModelViewSet):
                 user.email,
                 user.first_name,
                 confirmation["confirmation_number"],
-                confirmation["confirmation_date"],
-                confirmation["order_id"],
-                confirmation["order_status"],
+                confirmation["order_date"],
                 confirmation["items_table"],
+                confirmation["total_items"],
                 confirmation["shipping_address"],
             )
         except Exception as e:
@@ -747,10 +746,9 @@ class OrderViewSet(viewsets.ModelViewSet):
                 user_instance.email,
                 user_instance.first_name,
                 confirmation_message["confirmation_number"],
-                confirmation_message["confirmation_date"],
-                confirmation_message["order_id"],
-                confirmation_message["order_status"],
+                confirmation_message["order_date"],
                 confirmation_message["items_table"],
+                confirmation_message["total_items"],
                 confirmation_message["shipping_address"],
             )
 

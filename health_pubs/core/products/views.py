@@ -30,6 +30,7 @@ from core.utils.generate_s3_presigned_url import (
     generate_presigned_urls,
 )
 from rest_framework.views import APIView
+from rest_framework.generics import ListAPIView
 
 from core.utils.product_recommendation_system import get_recommended_products
 from core.vaccinations.models import Vaccination
@@ -40,7 +41,7 @@ from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from rest_framework.exceptions import ValidationError
 from django.db import DatabaseError, transaction
 from django.db.models import Q
-from django.http import Http404, JsonResponse
+from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils.text import slugify
 from django.views import View
@@ -2371,72 +2372,82 @@ class ProductAdminFilterView(APIView, ProductListMixin):
             )
 
 
-class ProgramProductsView(APIView, ProductListMixin):
+class ProgramProductsView(ListAPIView):
+    """
+    GET /api/v1/programmes/<program_id>/products/?page=<n>&sort_by=<field>
+    returns:
+    {
+      links: { next, previous },
+      count: <total>,
+      results: [ /* products */ ],
+      diseases: [ /* disease meta */ ],
+      vaccinations: [ /* vaccination meta */ ]
+    }
+    """
+
+    serializer_class = ProductSerializer
+    pagination_class = CustomPagination
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
-    def get_program_related_data(self, program):
-        """
-        Fetches related diseases and vaccinations for a given program.
-        """
+    def get_queryset(self):
+        program = get_object_or_404(Program, pk=self.kwargs["program_id"])
+        # find all the diseases/vaccinations linked to that program
         diseases = Disease.objects.filter(programs=program)
         vaccinations = Vaccination.objects.filter(programs=program)
-        return diseases, vaccinations
 
-    def get_program_products(self, program, diseases, vaccinations):
-        """
-        Builds the products queryset for a given program using related diseases and vaccinations.
-        """
-        diseases_q = Q(update_ref__diseases_ref__in=diseases)
-        vaccinations_q = Q(update_ref__vaccination_ref__in=vaccinations)
-        return (
-            Product.objects.filter(
-                Q(program_id=program)
-                & (diseases_q | vaccinations_q)
-                & Q(status="live")
-                & Q(is_latest=True)
+        # base product QS
+        qs = Product.objects.filter(
+            Q(program_id=program.pk)
+            & (
+                Q(update_ref__diseases_ref__in=diseases)
+                | Q(update_ref__vaccination_ref__in=vaccinations)
             )
-            .distinct()
-            .prefetch_related("update_ref__diseases_ref", "update_ref__vaccination_ref")
+            & Q(is_latest=True)
+            & Q(status="live")
         ).distinct()
 
-    def get(self, request, program_id):
-        try:
-            # Get program or raise 404.
-            program = get_object_or_404(Program, pk=program_id)
-            # Fetch related data.
-            diseases, vaccinations = self.get_program_related_data(program)
-            # Build products queryset.
-            products_qs = self.get_program_products(program, diseases, vaccinations)
-            # Sort and paginate.
-            sorted_qs = self.get_sorted_queryset(products_qs, request)
-            data, paginator = self.paginate_and_serialize(sorted_qs, request)
-            # Process S3 URLs.
+        # apply ordering
+        sort_by = self.request.GET.get("sort_by", "created_at")
+        if sort_by.lstrip("-") in VALID_SORT_FIELDS:
+            qs = qs.order_by(sort_by)
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        # DRF’s ListAPIView handles pagination for us
+        page = self.paginate_queryset(self.get_queryset())
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            data = serializer.data
+
+            # batch‐generate presigned S3 URLs
             all_urls = extract_s3_urls(data)
-            presigned_urls = generate_presigned_urls(all_urls)
-            update_product_urls(data, presigned_urls)
-            # Prepare response.
-            response_data = {
-                "products": data,
-                "diseases": DiseaseSerializer(diseases, many=True).data,
-                "vaccinations": VaccinationSerializer(vaccinations, many=True).data,
-            }
-            return paginator.get_paginated_response(
-                response_data, status_code=status.HTTP_200_OK
-            )
-        except Http404:
-            return Response(
-                {"detail": "Program not found."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-        except Exception as e:
-            logger.exception(
-                "An error occurred while fetching program products: %s", str(e)
-            )
-            return Response(
-                {"detail": UNEXPECTED_ERROR_MSG},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            presigned = generate_presigned_urls(all_urls)
+            update_product_urls(data, presigned)
+
+            response = self.get_paginated_response(data)
+
+            # now tack on your programme's meta lists
+            program = get_object_or_404(Program, pk=kwargs["program_id"])
+            diseases = Disease.objects.filter(programs=program)
+            vaccinations = Vaccination.objects.filter(programs=program)
+
+            response.data["diseases"] = DiseaseSerializer(diseases, many=True).data
+            response.data["vaccinations"] = VaccinationSerializer(
+                vaccinations, many=True
+            ).data
+
+            logger.info(
+                "returning %d products for program %s",
+                response.data,
+                program.program_id,
+            )  # for debugging
+
+            return response
+
+        # fallback if no pagination
+        serializer = self.get_serializer(self.get_queryset(), many=True)
+        return Response(serializer.data)
 
 
 class IncompleteProductsView(View):

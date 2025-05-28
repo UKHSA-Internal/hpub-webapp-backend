@@ -17,190 +17,184 @@ from pptx import Presentation
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- ISO A-series sizes in millimetres ---
+ISO_A_SIZES_MM = {
+    "A0": (841, 1189),
+    "A1": (594, 841),
+    "A2": (420, 594),
+    "A3": (297, 420),
+    "A4": (210, 297),
+    "A5": (148, 210),
+    "A6": (105, 148),
+}
 
-# Function to download file from pre-signed S3 URL
+
 def download_from_presigned_url(presigned_url):
     with NamedTemporaryFile(delete=False) as tmp_file:
-        response = requests.get(presigned_url)
-        tmp_file.write(response.content)
+        resp = requests.get(presigned_url)
+        tmp_file.write(resp.content)
         return tmp_file.name
 
 
-# Function to convert file size to a human-readable format
 def convert_file_size(size_bytes):
     if size_bytes < 1024:
         return f"{size_bytes} Bytes"
-    elif size_bytes < 1024**2:
+    if size_bytes < 1024**2:
         return f"{size_bytes / 1024:.2f} KB"
-    elif size_bytes < 1024**3:
-        return f"{size_bytes / (1024 ** 2):.2f} MB"
-    else:
-        return f"{size_bytes / (1024 ** 3):.2f} GB"
+    if size_bytes < 1024**3:
+        return f"{size_bytes / (1024**2):.2f} MB"
+    return f"{size_bytes / (1024**3):.2f} GB"
 
 
-# Function to convert duration in seconds to a human-readable format
 def format_duration(seconds):
     if seconds < 60:
         return f"{seconds:.2f} seconds"
-    elif seconds < 3600:
-        return f"{seconds / 60:.2f} minutes"
-    else:
-        hours = seconds // 3600
-        minutes = (seconds % 3600) // 60
-        return f"{int(hours)} hours {int(minutes)} minutes"
+    if seconds < 3600:
+        return f"{seconds/60:.2f} minutes"
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    return f"{hours} hours {minutes} minutes"
 
 
-# Function to extract metadata based on file type
+def points_to_mm(pt):
+    """Convert PDF points (1 pt = 1/72 in) to millimetres."""
+    return (pt / 72) * 25.4
 
 
-def get_file_metadata(presigned_urls):
-    metadata_list = []
-
-    for presigned_url in presigned_urls:
-        logger.info("Processing presigned URL: %s", presigned_url)
-
-        # Download the file from the presigned URL
-        try:
-            file_path = download_from_presigned_url(presigned_url)
-            logger.info("Downloaded file to: %s", file_path)
-
-            # Check the file size
-            file_size = Path(file_path).stat().st_size
-            human_readable_size = convert_file_size(file_size)
-            logger.info("File size: %s", human_readable_size)
-
-            # Use python-magic to detect file type
-            mime = magic.Magic(mime=True)
-            file_type = mime.from_file(file_path)
-            logger.info("Detected file type: %s", file_type)
-
-            # Initialize the metadata dictionary
-            metadata = {
-                "URL": presigned_url,
-                "file_size": human_readable_size,
-                "file_type": file_type,
-            }
-
-            # Extract additional metadata based on file type
-            if file_type == "application/pdf":
-                num_pages, dimensions, page_size = get_pdf_metadata(file_path)
-                metadata["number_of_pages"] = num_pages
-                metadata["dimensions"] = dimensions
-                metadata["page_size"] = page_size
-
-            elif file_type.startswith("video/"):
-                duration = get_video_duration(file_path)
-                formatted_duration = format_duration(duration)
-                metadata["duration"] = formatted_duration
-
-            elif file_type.startswith("audio/"):
-                duration = get_audio_duration(file_path)
-                formatted_duration = format_duration(duration)
-                metadata["duration"] = formatted_duration
-
-            elif file_type.startswith("image/"):
-                dimensions = get_image_dimensions(file_path)
-                metadata["dimensions"] = dimensions
-
-            elif (
-                file_type
-                == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-            ):
-                num_slides = get_pptx_metadata(file_path)
-                metadata["number_of_slides"] = num_slides
-                metadata["number_of_pages"] = num_slides
-
-            elif (
-                file_type
-                == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            ):
-                num_sheets = get_xlsx_metadata(file_path)
-                metadata["number_of_pages"] = num_sheets
-
-            elif file_type == "application/vnd.oasis.opendocument.text":
-                num_paragraphs = get_odt_metadata(file_path)
-                metadata["number_of_paragraphs"] = num_paragraphs
-
-            elif file_type == "image/gif":
-                duration = get_gif_duration(file_path)
-                metadata["duration"] = format_duration(duration)
-
-            elif (
-                file_type
-                == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            ):
-                num_paragraphs = get_docx_metadata(file_path)
-                metadata["number_of_paragraphs"] = num_paragraphs
-
-            # Append the metadata to the list
-            metadata_list.append(metadata)
-
-        except Exception as e:
-            logger.error("Failed to process URL %s: %s", presigned_url, str(e))
-            continue
-
-    logger.info("Extracted metadata for %d files", len(metadata_list))
-    return metadata_list
+def detect_iso_page_size(width_pt, height_pt):
+    """
+    Always return the closest ISO A-series size name for given dimensions in points.
+    """
+    w_mm = points_to_mm(width_pt)
+    h_mm = points_to_mm(height_pt)
+    best_name, best_delta = None, float("inf")
+    for name, (std_w, std_h) in ISO_A_SIZES_MM.items():
+        # check both orientations
+        delta1 = abs(w_mm - std_w) + abs(h_mm - std_h)
+        delta2 = abs(w_mm - std_h) + abs(h_mm - std_w)
+        delta = min(delta1, delta2)
+        if delta < best_delta:
+            best_name, best_delta = name, delta
+    return best_name
 
 
-# Function to extract dimensions of an image
-def get_image_dimensions(file_path):
-    with Image.open(file_path) as img:
-        return img.size  # Returns (width, height)
-
-
-# file metadata extraction functions
 def get_pdf_metadata(file_path):
     with open(file_path, "rb") as f:
-        pdf_reader = PyPDF2.PdfReader(f)
-        num_pages = len(pdf_reader.pages)
-        # dimensions of the first page
-        page_size = pdf_reader.pages[0].mediabox
-        dimensions = (page_size.width, page_size.height)
-
-    return num_pages, dimensions, page_size
+        reader = PyPDF2.PdfReader(f)
+        num_pages = len(reader.pages)
+        box = reader.pages[0].mediabox
+        w_pt, h_pt = float(box.width), float(box.height)
+        dimensions_pt = (w_pt, h_pt)
+        page_size = detect_iso_page_size(w_pt, h_pt)
+    return num_pages, dimensions_pt, page_size
 
 
 def get_video_duration(file_path):
-    video = mp.VideoFileClip(file_path)
-    duration = video.duration  # duration in seconds
-    return duration
+    return mp.VideoFileClip(file_path).duration
 
 
 def get_audio_duration(file_path):
-    audio = MP3(file_path)
-    duration = audio.info.length  # duration in seconds
-    return duration
+    return MP3(file_path).info.length
+
+
+def get_image_dimensions(file_path):
+    with Image.open(file_path) as img:
+        return img.size  # (width, height)
 
 
 def get_pptx_metadata(file_path):
-    presentation = Presentation(file_path)
-    num_slides = len(presentation.slides)
-    return num_slides
+    return len(Presentation(file_path).slides)
 
 
 def get_xlsx_metadata(file_path):
-    workbook = openpyxl.load_workbook(file_path, read_only=True)
-    num_sheets = len(workbook.sheetnames)
-    return num_sheets
+    return len(openpyxl.load_workbook(file_path, read_only=True).sheetnames)
 
 
 def get_odt_metadata(file_path):
-    doc = load_odt(file_path)
-    num_paragraphs = len(doc.getElementsByType("text:p"))
-    return num_paragraphs
+    return len(load_odt(file_path).getElementsByType("text:p"))
 
 
 def get_gif_duration(file_path):
     with Image.open(file_path) as img:
-        duration = (
-            sum(frame.info["duration"] for frame in ImageSequence.Iterator(img))
-            / 1000.0
-        )  # Convert to seconds
-    return duration
+        total_ms = sum(fr.info.get("duration", 0) for fr in ImageSequence.Iterator(img))
+    return total_ms / 1000.0
 
 
 def get_docx_metadata(file_path):
-    doc = Document(file_path)
-    num_paragraphs = len(doc.paragraphs)
-    return num_paragraphs
+    return len(Document(file_path).paragraphs)
+
+
+def get_file_metadata(presigned_urls):
+    results = []
+    for url in presigned_urls:
+        logger.info("Processing URL: %s", url)
+        try:
+            path = download_from_presigned_url(url)
+            size = Path(path).stat().st_size
+            hr_size = convert_file_size(size)
+            mime = magic.Magic(mime=True).from_file(path)
+
+            md = {
+                "URL": url,
+                "file_size": hr_size,
+                "file_type": mime,
+            }
+
+            if mime == "application/pdf":
+                pages, dims, layout = get_pdf_metadata(path)
+                md.update(
+                    {
+                        "number_of_pages": pages,
+                        "dimensions_pt": dims,
+                        "page_size": layout,
+                    }
+                )
+
+            elif mime.startswith("video/"):
+                dur = get_video_duration(path)
+                md["duration"] = format_duration(dur)
+
+            elif mime.startswith("audio/"):
+                dur = get_audio_duration(path)
+                md["duration"] = format_duration(dur)
+
+            elif mime.startswith("image/"):
+                md["dimensions"] = get_image_dimensions(path)
+
+            elif (
+                mime
+                == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            ):
+                slides = get_pptx_metadata(path)
+                md["number_of_slides"] = slides
+                md["number_of_pages"] = slides
+
+            elif (
+                mime
+                == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ):
+                sheets = get_xlsx_metadata(path)
+                md["number_of_pages"] = sheets
+
+            elif mime == "application/vnd.oasis.opendocument.text":
+                paras = get_odt_metadata(path)
+                md["number_of_paragraphs"] = paras
+
+            elif mime == "image/gif":
+                dur = get_gif_duration(path)
+                md["duration"] = format_duration(dur)
+
+            elif (
+                mime
+                == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ):
+                paras = get_docx_metadata(path)
+                md["number_of_paragraphs"] = paras
+
+            results.append(md)
+
+        except Exception as e:
+            logger.error("Error processing %s: %s", url, e)
+
+    logger.info("Completed metadata for %d files", len(results))
+    return results

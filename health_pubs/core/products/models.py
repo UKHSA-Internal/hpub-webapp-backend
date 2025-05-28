@@ -358,10 +358,12 @@ class Product(Page):
             slug = slugify(product_title)
             product_url = f"{domain_name}/{slug}/{candidate_code}"
             language_name = prod.get("language_name", "")
+            iso_language_code = prod.get("iso_language_code", "")
             existing_languages.append(
                 {
                     "language_name": language_name,
                     "product_url": product_url,
+                    "iso_language_code": iso_language_code,
                 }
             )
 

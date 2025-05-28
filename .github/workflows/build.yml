@@ -180,6 +180,8 @@ jobs:
       run: |
         if [ "$environment" == "prd" ]; then
           prefix=hpub
+        elif [ "$environment" == "preprod" ]; then
+          prefix=hpubpp
         elif [ "$environment" == "uat" ]; then
           prefix=hpub-uat
         elif [ "$environment" == "test" ]; then

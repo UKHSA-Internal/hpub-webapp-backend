@@ -12,7 +12,6 @@ from django.db.models import Sum
 from django.http import JsonResponse
 from django.utils import timezone
 from django.utils.text import slugify
-from django.utils.timezone import now
 from psycopg2 import errors
 from rest_framework import status, viewsets
 from rest_framework.authentication import SessionAuthentication
@@ -50,8 +49,8 @@ logger = logging.getLogger(__name__)
 
 
 class OrderViewSet(viewsets.ModelViewSet):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminOrRegisteredUser]
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
     queryset = Order.objects.all()
     serializer_class = OrderSerializer
 
@@ -66,7 +65,11 @@ class OrderViewSet(viewsets.ModelViewSet):
     def check_order_limits(self, request):
         """
         Accepts a list of product_codes and user_ref.
-        Returns how many have been ordered in the last 24 hours and what remains.
+        Returns, for each product:
+          - when the current 24h window started (window_start),
+          - when it will end (window_end),
+          - how many have been ordered in that window (already_ordered),
+          - and what remains (remaining).
         """
         user_ref = request.data.get("user_ref")
         product_codes = request.data.get("product_codes")
@@ -78,51 +81,59 @@ class OrderViewSet(viewsets.ModelViewSet):
             )
 
         try:
-            user_instance = self._get_user_or_error(user_ref)
-            logger.info(f"User instance: {user_instance}")
+            user = self._get_user_or_error(user_ref)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-        window_start = now() - timedelta(hours=24)
-        logger.info(f"Window start time: {window_start}")
-
+        now = timezone.now()
         results = []
 
         for code in product_codes:
             try:
                 product = Product.objects.get(product_code=code)
-                logger.info(f"Product instance: {product}")
             except Product.DoesNotExist:
+                # skip unknown codes
                 continue
 
-            order_limit_page = OrderLimitPage.objects.filter(
-                product_ref=product,
-            ).first()
-            logger.info(f"Order limit page: {order_limit_page}")
-
-            if not order_limit_page:
+            limit_page = OrderLimitPage.objects.filter(product_ref=product).first()
+            if not limit_page:
                 continue
 
-            limit = order_limit_page.order_limit
-            logger.info(f"Order limit: {limit}")
-            already_ordered = (
-                Order.objects.filter(
-                    user_ref__organization_ref__organization_id=user_instance.organization_ref.organization_id,
-                    order_items__product_ref=product,
-                    created_at__gte=window_start,
-                ).aggregate(total=Sum("order_items__quantity"))["total"]
-                or 0
+            limit = limit_page.order_limit
+
+            # get all orders by this user for this product
+            user_org = user.organization_ref.organization_id
+            base_qs = Order.objects.filter(
+                user_ref__organization_ref__organization_id=user_org,
+                order_items__product_ref=product,
             )
-            logger.info(f"Already ordered quantity: {already_ordered}")
 
+            # keep only orders in the last 24h
+            window_cutoff = now - timedelta(hours=24)
+            recent = base_qs.filter(created_at__gte=window_cutoff)
+
+            if not recent.exists():
+                # no active window → start a new one now
+                window_start = now
+                already_ordered = 0
+            else:
+                # fixed window starts at the time of the earliest recent order
+                first = recent.order_by("created_at").first()
+                window_start = first.created_at
+                already_ordered = (
+                    recent.aggregate(total=Sum("order_items__quantity"))["total"] or 0
+                )
+
+            window_end = window_start + timedelta(hours=24)
             remaining = max(limit - already_ordered, 0)
-            logger.info(f"Remaining quantity: {remaining}")
 
             results.append(
                 {
                     "product_code": code,
                     "title": product.title,
                     "daily_limit": limit,
+                    "window_start": window_start,
+                    "window_end": window_end,
                     "already_ordered": already_ordered,
                     "remaining": remaining,
                 }

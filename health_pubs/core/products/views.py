@@ -29,8 +29,12 @@ from core.utils.generate_s3_presigned_url import (
     generate_inline_presigned_urls,
     generate_presigned_urls,
 )
+from .filters import ProductFilter
+from rest_framework import generics
 from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
+from rest_framework.filters import OrderingFilter, SearchFilter
+from django_filters.rest_framework import DjangoFilterBackend
 
 from core.utils.product_recommendation_system import get_recommended_products
 from core.vaccinations.models import Vaccination
@@ -2244,6 +2248,30 @@ class ProductSearchUserView(BaseProductSearchView):
     def get_default_query(self) -> Q:
         # User view only shows live, latest products.
         return Q(is_latest=True, status="live")
+
+
+class ProductUsersSearchFilterAPIView(generics.ListAPIView):
+    """
+    GET /api/v1/products/user/search/filter/
+      ?q=foo
+      &audiences=A,B
+      &languages=en,fr
+      &download_mode=download_only
+      &recently_updated=2025-01-01T00:00:00Z
+      &ordering=-updated_at
+    """
+
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+    serializer_class = ProductSearchSerializer
+    pagination_class = CustomPagination
+    queryset = Product.objects.filter(status="live", is_latest=True)
+
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_class = ProductFilter
+    search_fields = ["product_title", "product_code_no_dashes"]
+    ordering_fields = VALID_SORT_FIELDS
+    ordering = ["product_title", "-updated_at"]
 
 
 class ProductUsersFilterView(APIView, ProductListMixin):

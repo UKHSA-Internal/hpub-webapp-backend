@@ -15,6 +15,7 @@ from .views import (
     ProductStatusUpdateView,
     ProductUpdateView,
     ProductUsersListView,
+    ProductUsersSearchFilterAPIView,
     ProductViewSet,
     ProgramProductsView,
     ProductUsersFilterView,
@@ -66,5 +67,10 @@ urlpatterns = [
         "<str:program_id>/products",
         ProgramProductsView.as_view(),
         name="program-products",
+    ),
+    path(
+        "user/search/filter/",
+        ProductUsersSearchFilterAPIView.as_view(),
+        name="product-search",
     ),
 ] + router.urls

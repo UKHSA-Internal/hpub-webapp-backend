@@ -68,14 +68,34 @@ def prepare_product_data(product_instance, required_fields_enum, status):
     Prepares the product data in a format to send to EventBridge,
     keeping the correct keys and including the required fields.
     """
+    normalised_status = STATUS_MAPPING.get(status, status)
     update_instance = product_instance.update_ref
     logger.info(f"update_instance: {update_instance}")
+    # -------------------- Draft ------------------------------------- #
+    if status == "draft":
+        return {
+            "publicationId": str(product_instance.product_code),
+            "title": product_instance.product_title,
+            "status": normalised_status,
+            "maxOrder": [],
+            "uom": update_instance.unit_of_measure,
+            "runToZero": update_instance.run_to_zero,
+            "costCentre": "",
+            "localCode": "",
+            "client": client.client_name.value,
+            "invoicingClient": invoicing_client.invoice_client.value,
+            "productGroup": product_group.product_group_name.value,
+            "minimumStockLevel": 0,
+            "relatedArticle": "",
+            "stockOwner": [],
+            "stockReferral": [],
+        }
 
     # Map the product data to the expected keys
     product_data = {
         "publicationId": str(product_instance.product_code),
         "title": product_instance.product_title,
-        "status": STATUS_MAPPING.get(status, status),
+        "status": normalised_status,
         "maxOrder": [
             {
                 "companyKeys": order_limit.full_external_keys,

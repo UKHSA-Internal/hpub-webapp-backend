@@ -49,8 +49,8 @@ logger = logging.getLogger(__name__)
 
 
 class OrderViewSet(viewsets.ModelViewSet):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminOrRegisteredUser]
     queryset = Order.objects.all()
     serializer_class = OrderSerializer
 

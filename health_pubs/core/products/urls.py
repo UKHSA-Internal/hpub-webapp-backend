@@ -64,7 +64,7 @@ urlpatterns = [
     path("user_filter", ProductUsersFilterView.as_view(), name="user-product-filter"),
     path("admin_filter", ProductAdminFilterView.as_view(), name="admin-product-filter"),
     path(
-        "<str:program_id>/products",
+        "<str:program_id>/products/",
         ProgramProductsView.as_view(),
         name="program-products",
     ),

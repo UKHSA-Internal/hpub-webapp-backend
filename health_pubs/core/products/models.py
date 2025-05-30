@@ -329,7 +329,12 @@ class Product(Page):
                     status="live",
                 )
                 .exclude(pk=self.pk)
-                .values("language_name", "product_title", "product_code")
+                .values(
+                    "language_name",
+                    "product_title",
+                    "product_code",
+                    "iso_language_code",
+                )
             )
         except Exception as e:
             logger.error("Error querying products: %s", e)
@@ -357,8 +362,10 @@ class Product(Page):
             # Construct the product URL using a slug of the title
             slug = slugify(product_title)
             product_url = f"{domain_name}/{slug}/{candidate_code}"
+
             language_name = prod.get("language_name", "")
             iso_language_code = prod.get("iso_language_code", "")
+
             existing_languages.append(
                 {
                     "language_name": language_name,

@@ -30,10 +30,12 @@ ISO_A_SIZES_MM = {
 
 
 def download_from_presigned_url(presigned_url):
-    with NamedTemporaryFile(delete=False) as tmp_file:
-        resp = requests.get(presigned_url)
-        tmp_file.write(resp.content)
-        return tmp_file.name
+    with NamedTemporaryFile(delete=False) as tmp:
+        with requests.get(presigned_url, stream=True) as resp:
+            resp.raise_for_status()
+            for chunk in resp.iter_content(10 * 1024 * 1024):  # 10 MB at a time
+                tmp.write(chunk)
+        return tmp.name
 
 
 def convert_file_size(size_bytes):

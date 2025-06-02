@@ -1,10 +1,9 @@
-# core/utils/download_helpers.py
 import logging
-from typing import Dict, List, Union
-
+from typing import Dict, Union, List
 import importlib
-from rest_framework import serializers
+import json
 
+from rest_framework import serializers
 from core.utils.extract_file_metadata import get_file_metadata
 
 logger = logging.getLogger(__name__)
@@ -12,36 +11,105 @@ logger = logging.getLogger(__name__)
 
 def _get_file_metadata_serializer():
     """
-    Lazy-import to avoid circular reference. Called only after
+    Lazy‐import to avoid circular reference. Called only after
     core.products.serializers has finished initialising.
     """
     module = importlib.import_module("core.products.serializers")
     return module.FileMetadataSerializer
 
 
-def _normalise_entry(entry: Union[str, Dict]) -> Dict:
-    if isinstance(entry, str):
-        meta = get_file_metadata([entry])
-        return (
-            meta[0]
-            if meta
-            else {
-                "URL": entry,
-                "file_size": "Unknown",
-                "file_type": "application/octet-stream",
-                "s3_bucket_url": entry,
-            }
-        )
-
-    defaults = {
-        "file_size": "Unknown",
+def _minimal_stub_for_url(url: str) -> Dict:
+    """
+    Return a minimal, GDS‐compliant stub for a URL if we cannot retrieve real metadata.
+    Uses "0 Bytes" for size and "application/octet-stream" for MIME.
+    """
+    return {
+        "URL": url,
+        "file_size": "0 Bytes",
         "file_type": "application/octet-stream",
-        "s3_bucket_url": entry.get("URL", ""),
+        "s3_bucket_url": url,
     }
-    return {**defaults, **entry}
+
+
+def _normalise_entry(entry: Union[str, Dict]) -> Dict:
+    """
+    If entry is a string, treat it as a URL and attempt to fetch real metadata.
+    If get_file_metadata fails or returns an empty list, fall back to a minimal stub.
+
+    If entry is already a dict, attempt to fill in any missing fields from
+    get_file_metadata(entry["URL"]) if available.  Otherwise, fall back to a minimal stub.
+    """
+    # 1) If entry is just a string → URL
+    if isinstance(entry, str):
+        url = entry
+        try:
+            meta_list = get_file_metadata([url])
+        except Exception as e:
+            logger.warning("Error calling get_file_metadata(%s): %s", url, e)
+            meta_list = []
+
+        if meta_list:
+            # Use the first (and only) element returned by get_file_metadata
+            return meta_list[0]
+        else:
+            # Fallback stub
+            return _minimal_stub_for_url(url)
+
+    # 2) If entry is already a dict
+    if isinstance(entry, dict):
+        url = entry.get("URL")
+        base_metadata: Dict = {}
+
+        if url:
+            # Try fetching real metadata if we have a URL field
+            try:
+                meta_list = get_file_metadata([url])
+            except Exception as e:
+                logger.warning("Error calling get_file_metadata(%s): %s", url, e)
+                meta_list = []
+
+            if meta_list:
+                base_metadata = meta_list[0]
+            else:
+                base_metadata = _minimal_stub_for_url(url)
+        else:
+            # No URL at all—just provide a stub with no URL
+            base_metadata = {
+                "URL": "",
+                "file_size": "0 Bytes",
+                "file_type": "application/octet-stream",
+                "s3_bucket_url": "",
+            }
+
+        # Now merge `entry` on top of base_metadata, so that any explicitly provided keys
+        # in `entry` take precedence. Everything else is filled from base_metadata.
+        merged = {**base_metadata, **entry}
+
+        # Ensure that at least these keys exist, even if someone passed a dict missing them:
+        merged.setdefault("URL", "")
+        merged.setdefault("file_size", base_metadata.get("file_size", "0 Bytes"))
+        merged.setdefault(
+            "file_type", base_metadata.get("file_type", "application/octet-stream")
+        )
+        merged.setdefault("s3_bucket_url", base_metadata.get("s3_bucket_url", ""))
+
+        return merged
+
+    # 3) If entry is some unexpected type, return an empty stub with no URL
+    logger.warning("Unexpected entry type in _normalise_entry: %r", entry)
+    return {
+        "URL": "",
+        "file_size": "0 Bytes",
+        "file_type": "application/octet-stream",
+        "s3_bucket_url": "",
+    }
 
 
 def parse_downloads(download_data) -> Dict[str, Union[str, List[Dict]]]:
+    """
+    Parses a JSON‐like structure of downloads, normalizing each entry
+    so that `FileMetadataSerializer` always sees a consistent dict.
+    """
     if not download_data:
         return {
             "main_download_url": None,
@@ -51,10 +119,8 @@ def parse_downloads(download_data) -> Dict[str, Union[str, List[Dict]]]:
             "transcript_url": [],
         }
 
-    # Accept JSON string or decoded dict
+    # Accept JSON string or already‐decoded dict
     if isinstance(download_data, str):
-        import json
-
         try:
             download_data = json.loads(download_data)
         except json.JSONDecodeError:
@@ -67,14 +133,14 @@ def parse_downloads(download_data) -> Dict[str, Union[str, List[Dict]]]:
                 "transcript_url": [],
             }
 
-    FileMetadataSerializer = _get_file_metadata_serializer()  # <── lazy import
+    file_metadata_serializer = _get_file_metadata_serializer()
 
     def _build_list(lst):
         out = []
         for raw in lst:
-            meta = _normalise_entry(raw)
+            normalized = _normalise_entry(raw)
             try:
-                out.append(FileMetadataSerializer(meta).data)
+                out.append(file_metadata_serializer(normalized).data)
             except serializers.ValidationError as exc:
                 logger.warning("Skipping invalid file metadata entry: %s", exc)
         return out

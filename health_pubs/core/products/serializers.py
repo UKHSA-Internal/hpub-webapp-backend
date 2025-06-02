@@ -22,50 +22,6 @@ from core.utils.download_helpers import parse_downloads
 logger = logging.getLogger(__name__)
 
 
-# def parse_downloads(download_data):
-#     """
-#     Helper function to parse and format the product downloads.
-#     It attempts to decode the JSON data if it is a string and returns a dictionary
-#     with the expected structure.
-#     """
-
-#     if download_data is None:
-#         # Optionally log that there was no data provided.
-#         logger.warning("No download_data provided; returning default values")
-#         return {
-#             "main_download_url": None,
-#             "video_url": None,
-#             "web_download_url": [],
-#             "print_download_url": [],
-#             "transcript_url": [],
-#         }
-#     try:
-#         downloads = (
-#             json.loads(download_data)
-#             if isinstance(download_data, str)
-#             else download_data
-#         )
-#     except json.JSONDecodeError as e:
-#         logger.error("Error parsing downloads data: %s", e)
-#         downloads = {}
-
-#     return {
-#         "main_download_url": downloads.get("main_download_url"),
-#         "video_url": downloads.get("video_url"),
-#         "web_download_url": [
-#             FileMetadataSerializer(m).data
-#             for m in downloads.get("web_download_url", [])
-#         ],
-#         "print_download_url": [
-#             FileMetadataSerializer(m).data
-#             for m in downloads.get("print_download_url", [])
-#         ],
-#         "transcript_url": [
-#             FileMetadataSerializer(m).data for m in downloads.get("transcript_url", [])
-#         ],
-#     }
-
-
 class FileMetadataSerializer(serializers.Serializer):
     URL = serializers.URLField(required=True)
     inline_presigned_s3_url = serializers.URLField(required=False)

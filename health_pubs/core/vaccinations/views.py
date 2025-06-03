@@ -254,7 +254,7 @@ class VaccinationBulkUploadViewSet(viewsets.ViewSet):
         vid = row.get("id")
         name = row.get("label")
         key = row.get("key")
-        desc = row.get("description") or ""
+        desc = row.get("description", "")
         progs = row.get("program_names")
 
         # Required fields

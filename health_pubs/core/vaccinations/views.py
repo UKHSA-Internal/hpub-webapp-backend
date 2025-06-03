@@ -1,6 +1,8 @@
 import logging
 import uuid
-
+import pandas as pd
+from django.utils import timezone
+from django.contrib.contenttypes.models import ContentType
 from core.programs.models import Program
 from core.users.permissions import IsAdminUser
 from core.utils.custom_token_authentication import CustomTokenAuthentication
@@ -177,6 +179,120 @@ class VaccinationNameCheckViewSet(viewsets.ViewSet):
         # Check case-insensitively if a vaccination with the same name already exists.
         exists = Vaccination.objects.filter(name__iexact=vaccination_name).exists()
         return Response({"unique": not exists}, status=status.HTTP_200_OK)
+
+
+class VaccinationBulkUploadViewSet(viewsets.ViewSet):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+
+    @action(detail=False, methods=["post"], url_path="bulk-upload")
+    def bulk_upload(self, request):
+        # 1. Load and validate the Excel
+        df, error_resp = self._load_excel(request)
+        if error_resp:
+            return error_resp
+
+        # 2. Ensure parent page exists
+        parent_page = self._get_parent_page()
+
+        # 3. Iterate rows
+        created, errors = self._process_rows(df, parent_page)
+
+        # 4. Return result
+        return Response(
+            {"created": created, "errors": errors}, status=201 if created else 400
+        )
+
+    def _load_excel(self, request):
+        excel = request.FILES.get("excel_file")
+        if not excel:
+            return None, Response(
+                {"error": "Excel file is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        name = excel.name.lower()
+        if not name.endswith((".xlsx", ".xls")):
+            return None, Response(
+                {"error": "Upload a valid Excel file (.xlsx or .xls)"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            df = pd.read_excel(excel)
+        except Exception as e:
+            return None, Response(
+                {"error": f"Failed to read Excel file: {e}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return df, None
+
+    def _get_parent_page(self):
+        try:
+            return Page.objects.get(slug="vaccination-bulk")
+        except Page.DoesNotExist:
+            root = Page.objects.first()
+            parent = Page(
+                title="VaccinationBulk",
+                slug="vaccination-bulk",
+                content_type=ContentType.objects.get_for_model(Page),
+            )
+            root.add_child(instance=parent)
+            return parent
+
+    def _process_rows(self, df, parent_page):
+        created, errors = [], []
+        for idx, row in df.iterrows():
+            data, err = self._process_row(idx, row, parent_page)
+            if data:
+                created.append(data)
+            else:
+                errors.append(err)
+        return created, errors
+
+    def _process_row(self, index, row, parent_page):
+        vid = row.get("id")
+        name = row.get("label")
+        key = row.get("key")
+        desc = row.get("description", "")
+        progs = row.get("program_names")
+
+        # Required fields
+        if pd.isna(vid) or pd.isna(name):
+            return None, {"row": index + 1, "error": "Missing required fields"}
+
+        # Duplicate check
+        if Vaccination.objects.filter(vaccination_id=vid).exists():
+            return None, {
+                "row": index + 1,
+                "error": f"Vaccination with ID {vid} already exists",
+            }
+
+        # Instantiate
+        slug = slugify(f"{name}{timezone.now()}")
+        vac = Vaccination(
+            title=name,
+            slug=slug,
+            vaccination_id=vid,
+            name=name,
+            key=key,
+            description=desc,
+        )
+
+        try:
+            parent_page.add_child(instance=vac)
+            vac.save()
+
+            # M2M programs
+            if pd.notna(progs):
+                names = [p.strip() for p in progs.split(",")]
+                queryset = Program.objects.filter(programme_name__in=names)
+                vac.programs.set(queryset)
+
+            return VaccinationSerializer(vac).data, None
+
+        except Exception as e:
+            return None, {"row": index + 1, "error": str(e)}
 
 
 #

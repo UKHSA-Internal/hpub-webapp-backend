@@ -21,14 +21,17 @@ def generate_order_confirmation(order_instance):
 
     items = OrderItem.objects.filter(order_ref=order_instance)
 
+    # Fetch order items
+    order_items = OrderItem.objects.filter(order_ref=order_instance)
+
     # Build the ordered products list in a table-like format
     items_table = "\n".join(
         f"{idx}. {item.product_ref.title}(Quantity - {item.quantity})"
         for idx, item in enumerate(items, start=1)
     )
-    total_items = sum(
-        item.quantity for item in OrderItem.objects.filter(order_ref=order_instance)
-    )
+
+    # Total items (sum of quantities)
+    total_items = sum(item.quantity for item in order_items)
 
     # Retrieve shipping address and user details
     user = order_instance.user_ref

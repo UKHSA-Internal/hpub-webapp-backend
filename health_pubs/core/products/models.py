@@ -214,7 +214,6 @@ class Product(Page):
     language_name = models.CharField(max_length=30)
 
     file_url = models.URLField(max_length=255, null=True, blank=True)
-    suppress_event = models.BooleanField(default=False)
 
     # Reference to ProductUpdate (optional)
     update_ref = models.OneToOneField(
@@ -229,8 +228,16 @@ class Product(Page):
         help_text="When true, suppress all EventBridge events on status changes.",
     )
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(
+        default=timezone.now,
+        blank=True,
+        help_text="If not provided, set to now on first save.",
+    )
+    updated_at = models.DateTimeField(
+        default=timezone.now,
+        blank=True,
+        help_text="If not provided, set to now on every save.",
+    )
 
     # Panels for Wagtail Admin
     content_panels = Page.content_panels + [
@@ -254,11 +261,25 @@ class Product(Page):
     ]
 
     def save(self, *args, **kwargs):
-        # Automatically populate `product_code_no_dashes` by removing dashes and spaces
+        now = timezone.now()
+
+        if self._state.adding:
+            # new instance…
+            if self.created_at is None:
+                self.created_at = now
+            # only set updated_at on create if nobody passed one
+            if self.updated_at is None:
+                self.updated_at = now
+        else:
+            # existing instance: always bump updated_at
+            self.updated_at = now
+
+        # keep your product_code_no_dashes logic
         if self.product_code:
-            self.product_code_no_dashes = self.product_code.replace("-", "").replace(
-                " ", ""
+            self.product_code_no_dashes = (
+                str(self.product_code).replace("-", "").replace(" ", "")
             )
+
         super().save(*args, **kwargs)
 
     def is_due_to_publish(self):
@@ -288,90 +309,83 @@ class Product(Page):
             return ""
         return code[:required_length]
 
+    def _get_common_prefix(self, other: str, min_length: int = 3) -> str:
+        """
+        Longest common prefix between self.product_code and other,
+        provided it's at least `min_length` chars.
+        """
+        a = self.product_code or ""
+        b = other or ""
+        prefix = []
+        for ch1, ch2 in zip(a, b):
+            if ch1 == ch2:
+                prefix.append(ch1)
+            else:
+                break
+        prefix = "".join(prefix)
+        return prefix if len(prefix) >= min_length else ""
+
     @property
     def existing_languages(self):
         """
-        Retrieves a list of available languages for the product.
-
-        It filters products that share the same program and key, are marked as the latest,
-        and excludes the current product. Then, it builds a list of dictionaries containing the
-        language name and a generated URL if the candidate product's core code (first 3 characters)
-        matches the current product's code.
-
-        Returns:
-            list[dict]: List of dicts with keys "language_name" and "product_url".
+        Find all other `live` & `is_latest` products in the same program,
+        prefer those sharing `product_key` if any exist, then filter by
+        having a common prefix >= 3 chars.
         """
-        # Retrieve base domain from config
+        # 1) base URL
         try:
-            config = Config()
-            domain_name = config.get_hpub_base_api_url().rstrip("/")
+            domain = Config().get_hpub_base_api_url().rstrip("/")
         except Exception as e:
-            logger.error("Error retrieving configuration: %s", e)
+            logger.error("Config error: %s", e)
             return []
 
-        # Validate self.product_code and extract its core
-        self_product_code = getattr(self, "product_code", None)
-        if not isinstance(self_product_code, str):
-            logger.error("Invalid or missing product_code attribute on %r", self)
-            return []
-        self_core = self._get_core_code(self_product_code)
-        if not self_core:
-            # Product code is too short to extract a valid core
+        # 2) our code
+        my_code = getattr(self, "product_code", None)
+        if not isinstance(my_code, str):
+            logger.error("Missing product_code on %r", self)
             return []
 
-        # Query related products, excluding the current one
-        try:
-            products_qs = (
-                Product.objects.filter(
-                    program_id=self.program_id,
-                    product_key=self.product_key,
-                    is_latest=True,
-                    status="live",
-                )
-                .exclude(pk=self.pk)
-                .values(
-                    "language_name",
-                    "product_title",
-                    "product_code",
-                    "iso_language_code",
-                )
-            )
-        except Exception as e:
-            logger.error("Error querying products: %s", e)
-            return []
+        # 3) fetch siblings
+        base_qs = Product.objects.filter(
+            program_id=self.program_id,
+            is_latest=True,
+            status="live",
+        ).exclude(pk=self.pk)
 
-        existing_languages = []
-        for prod in products_qs:
-            candidate_code = prod.get("product_code", "")
-            candidate_core = self._get_core_code(candidate_code)
-            if not candidate_core:
-                # Skip candidates with invalid code format
-                continue
-            if candidate_core != self_core:
-                # Skip products with non-matching core codes
+        # if any share this product_key, narrow to them
+        if self.product_key:
+            keyed = base_qs.filter(product_key=self.product_key)
+            qs = keyed if keyed.exists() else base_qs
+        else:
+            qs = base_qs
+
+        # 4) build list by prefix match
+        langs = []
+        for p in qs.values(
+            "language_name", "product_title", "product_code", "iso_language_code"
+        ):
+            cand = p["product_code"]
+            prefix = self._get_common_prefix(cand)
+            if not prefix:
                 continue
 
-            product_title = prod.get("product_title", "")
-            if not product_title or not isinstance(product_title, str):
-                logger.warning(
-                    "Missing or invalid product_title for product code %s",
-                    candidate_code,
-                )
+            title = p["product_title"] or ""
+            if not title:
+                logger.warning("No title for %r", cand)
                 continue
 
-            # Construct the product URL using a slug of the title
-            slug = slugify(product_title)
-            product_url = f"{domain_name}/{slug}/{candidate_code}"
-
-            language_name = prod.get("language_name", "")
-            iso_language_code = prod.get("iso_language_code", "")
-
-            existing_languages.append(
+            slug = slugify(title)
+            url = f"{domain}/{slug}/{cand}"
+            langs.append(
                 {
-                    "language_name": language_name,
-                    "product_url": product_url,
-                    "iso_language_code": iso_language_code,
+                    "language_name": p["language_name"],
+                    "product_url": url,
+                    "iso_language_code": p["iso_language_code"],
                 }
             )
+        logger.debug("Existing languages: %s", langs)
 
-        return existing_languages
+        return langs
+
+
+#

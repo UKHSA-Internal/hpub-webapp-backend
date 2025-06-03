@@ -550,6 +550,83 @@ def _process_remote_file(url: str) -> Tuple[int, str, Optional[Path]]:
     return size, mime, temp_probe_file
 
 
+def _is_local_file(url: str) -> Optional[Path]:
+    """
+    Determine if the given URL corresponds to an existing local file.
+    Returns the Path if local, otherwise None.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme in ("", "file"):
+        try:
+            candidate = Path(parsed.path)
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        except Exception as e:
+            logger.debug(f"Cannot interpret '{url}' as local file: {e}")
+    return None
+
+
+def _get_basic_info(source: Union[str, Path]) -> Tuple[int, str, Optional[Path], bool]:
+    """
+    For a local Path, return (size, mime, temp_probe_file, is_local=True).
+    For a URL (string), return (size, mime, temp_probe_file, is_local=False).
+    """
+    if isinstance(source, Path):
+        size, mime, temp_file = _process_local_file(source)
+        return size, mime, temp_file, True
+
+    size, mime, temp_file = _process_remote_file(source)
+    return size, mime, temp_file, False
+
+
+def _finalize_size_mime(
+    size: int, mime: str, temp_file: Optional[Path], url: str
+) -> Tuple[int, str]:
+    """
+    If a temp file exists, re‐probe to update size and mime. Otherwise,
+    if size and mime are still missing, default to DEFAULT_MIME.
+    """
+    if temp_file and temp_file.exists():
+        return _reprobe_file(temp_file, size, mime)
+
+    if size == 0 and not mime:
+        logger.warning(
+            f"Unable to determine size/type for {url}; defaulting to {DEFAULT_MIME}"
+        )
+        mime = DEFAULT_MIME
+
+    return size, mime
+
+
+def _extract_all_metadata(
+    mime: str, temp_file: Optional[Path], url: str
+) -> Dict[str, Union[str, int, float, tuple]]:
+    """
+    Based on mime and presence of a temp file, extract additional metadata:
+      - For video, run ffprobe on temp file or URL.
+      - For other types, run the appropriate extractor on temp file.
+    """
+    extra: Dict[str, Union[str, int, float, tuple]] = {}
+    if mime.startswith("video/"):
+        source = temp_file if (temp_file and temp_file.exists()) else url
+        extra = _extract_video_metadata(source)
+    elif temp_file and temp_file.exists():
+        extra = _extract_additional_metadata(mime, temp_file)
+    return extra
+
+
+def _cleanup_temp_file(temp_file: Optional[Path], is_local: bool, url: str) -> None:
+    """
+    Remove the temporary file if it was downloaded for a remote URL.
+    """
+    if temp_file and not is_local and temp_file.exists():
+        try:
+            temp_file.unlink()
+            logger.info(f"Removed temporary file {temp_file} for {url}")
+        except Exception as e:
+            logger.warning(f"Error removing temp file {temp_file}: {e}")
+
+
 def get_file_metadata(
     urls: List[str],
 ) -> List[Dict[str, Union[str, int, float, tuple]]]:
@@ -557,12 +634,12 @@ def get_file_metadata(
     For each URL (or local file path), gather metadata including:
       - file_size (human-readable)
       - file_type (MIME)
-      - If image → image_dimensions (width, height) in pixels
-      - If PDF → number_of_pages, page_size (ISO A0–A10)
+      - If image → image_dimensions
+      - If PDF → number_of_pages, page_size
       - If audio → audio_duration
-      - If video → video_dimensions, video_duration  (via ffprobe on either URL or local file)
+      - If video → video_dimensions, video_duration
       - If DOCX → paragraph_count, word_count
-      - If PPTX → slide_count, slide_size (ISO A0–A10)
+      - If PPTX → slide_count, slide_size
       - If XLSX → sheet_count
       - If ODT → paragraph_count_odt
     Returns a list of metadata dicts.
@@ -573,54 +650,17 @@ def get_file_metadata(
         logger.info(f"Starting metadata extraction for: {url}")
         meta: Dict[str, Union[str, int, float, tuple]] = {"URL": url}
 
-        parsed = urlparse(url)
-        is_local = False
-        local_path: Optional[Path] = None
-
-        if parsed.scheme in ("", "file"):
-            try:
-                candidate = Path(parsed.path)
-                if candidate.exists() and candidate.is_file():
-                    local_path = candidate
-                    is_local = True
-            except Exception as e:
-                logger.debug(f"Cannot interpret '{url}' as local file: {e}")
-
-        if is_local and local_path is not None:
-            size, mime, temp_probe_file = _process_local_file(local_path)
-        else:
-            size, mime, temp_probe_file = _process_remote_file(url)
-
-        if temp_probe_file and temp_probe_file.exists():
-            size, mime = _reprobe_file(temp_probe_file, size, mime)
-        else:
-            if size == 0 and not mime:
-                logger.warning(
-                    f"Unable to determine size/type for {url}; defaulting to {DEFAULT_MIME}"
-                )
-                mime = DEFAULT_MIME
+        local_path = _is_local_file(url)
+        size, mime, temp_file, is_local = _get_basic_info(local_path or url)
+        size, mime = _finalize_size_mime(size, mime, temp_file, url)
 
         meta["file_size"] = _hr(size)
         meta["file_type"] = mime or DEFAULT_MIME
 
-        if mime.startswith("video/"):
-            video_source = (
-                temp_probe_file
-                if (temp_probe_file and temp_probe_file.exists())
-                else url
-            )
-            video_meta = _extract_video_metadata(video_source)
-            meta.update(video_meta)
-        elif temp_probe_file and temp_probe_file.exists():
-            additional = _extract_additional_metadata(mime, temp_probe_file)
-            meta.update(additional)
+        extra = _extract_all_metadata(mime, temp_file, url)
+        meta.update(extra)
 
-        if temp_probe_file and not is_local and temp_probe_file.exists():
-            try:
-                temp_probe_file.unlink()
-                logger.info(f"Removed temporary file {temp_probe_file} for {url}")
-            except Exception as e:
-                logger.warning(f"Error removing temp file {temp_probe_file}: {e}")
+        _cleanup_temp_file(temp_file, is_local, url)
 
         results.append(meta)
         logger.info(f"Finished {url}. Metadata → {json.dumps(meta)}")

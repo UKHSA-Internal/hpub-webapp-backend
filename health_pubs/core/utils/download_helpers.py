@@ -34,73 +34,52 @@ def _minimal_stub_for_url(url: str) -> Dict:
     }
 
 
+def _get_url_metadata(url: str) -> Dict:
+    """
+    Try to fetch real metadata for a URL. If that fails or returns empty, return a minimal stub.
+    """
+    try:
+        meta_list = get_file_metadata([url])
+    except Exception as e:
+        logger.warning("Error calling get_file_metadata(%s): %s", url, e)
+        return _minimal_stub_for_url(url)
+
+    if meta_list:
+        return meta_list[0]
+    return _minimal_stub_for_url(url)
+
+
 def _normalise_entry(entry: Union[str, Dict]) -> Dict:
     """
-    If entry is a string, treat it as a URL and attempt to fetch real metadata.
-    If get_file_metadata fails or returns an empty list, fall back to a minimal stub.
-
-    If entry is already a dict, attempt to fill in any missing fields from
-    get_file_metadata(entry["URL"]) if available.  Otherwise, fall back to a minimal stub.
+    Normalize an entry (string or dict) into a complete metadata dict.
     """
-    # 1) If entry is just a string → URL
+    # If entry is a string, treat it as a URL
     if isinstance(entry, str):
-        url = entry
-        try:
-            meta_list = get_file_metadata([url])
-        except Exception as e:
-            logger.warning("Error calling get_file_metadata(%s): %s", url, e)
-            meta_list = []
+        return _get_url_metadata(entry)
 
-        if meta_list:
-            # Use the first (and only) element returned by get_file_metadata
-            return meta_list[0]
-        else:
-            # Fallback stub
-            return _minimal_stub_for_url(url)
-
-    # 2) If entry is already a dict
+    # If entry is a dict, fill in missing fields
     if isinstance(entry, dict):
-        url = entry.get("URL")
-        base_metadata: Dict = {}
-
+        url = entry.get("URL", "")
         if url:
-            # Try fetching real metadata if we have a URL field
-            try:
-                meta_list = get_file_metadata([url])
-            except Exception as e:
-                logger.warning("Error calling get_file_metadata(%s): %s", url, e)
-                meta_list = []
-
-            if meta_list:
-                base_metadata = meta_list[0]
-            else:
-                base_metadata = _minimal_stub_for_url(url)
+            base = _get_url_metadata(url)
         else:
-            # No URL at all—just provide a stub with no URL
-            base_metadata = {
+            base = {
                 "URL": "",
                 "file_size": DEFAULT_FILE_SIZE,
                 "file_type": DEFAULT_FILE_TYPE,
                 "s3_bucket_url": "",
             }
 
-        # Now merge `entry` on top of base_metadata, so that any explicitly provided keys
-        # in `entry` take precedence. Everything else is filled from base_metadata.
-        merged = {**base_metadata, **entry}
-
-        # Ensure that at least these keys exist, even if someone passed a dict missing them:
+        # Merge explicit fields from entry over base metadata
+        merged = {**base, **entry}
         merged.setdefault("URL", "")
-        merged.setdefault(
-            "file_size", base_metadata.get("file_size", DEFAULT_FILE_SIZE)
-        )
-        merged.setdefault(
-            "file_type", base_metadata.get("file_type", DEFAULT_FILE_TYPE)
-        )
-        merged.setdefault("s3_bucket_url", base_metadata.get("s3_bucket_url", ""))
+        merged.setdefault("file_size", base.get("file_size", DEFAULT_FILE_SIZE))
+        merged.setdefault("file_type", base.get("file_type", DEFAULT_FILE_TYPE))
+        merged.setdefault("s3_bucket_url", base.get("s3_bucket_url", ""))
 
         return merged
 
-    # 3) If entry is some unexpected type, return an empty stub with no URL
+    # Unexpected type: return empty stub
     logger.warning("Unexpected entry type in _normalise_entry: %r", entry)
     return {
         "URL": "",

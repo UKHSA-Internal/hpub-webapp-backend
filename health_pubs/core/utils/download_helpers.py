@@ -8,6 +8,9 @@ from core.utils.extract_file_metadata import get_file_metadata
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_FILE_SIZE = "0 Bytes"
+DEFAULT_FILE_TYPE = "application/octet-stream"
+
 
 def _get_file_metadata_serializer():
     """
@@ -21,12 +24,12 @@ def _get_file_metadata_serializer():
 def _minimal_stub_for_url(url: str) -> Dict:
     """
     Return a minimal, GDS‐compliant stub for a URL if we cannot retrieve real metadata.
-    Uses "0 Bytes" for size and "application/octet-stream" for MIME.
+    Uses DEFAULT_FILE_SIZE for size and "application/octet-stream" for MIME.
     """
     return {
         "URL": url,
-        "file_size": "0 Bytes",
-        "file_type": "application/octet-stream",
+        "file_size": DEFAULT_FILE_SIZE,
+        "file_type": DEFAULT_FILE_TYPE,
         "s3_bucket_url": url,
     }
 
@@ -76,8 +79,8 @@ def _normalise_entry(entry: Union[str, Dict]) -> Dict:
             # No URL at all—just provide a stub with no URL
             base_metadata = {
                 "URL": "",
-                "file_size": "0 Bytes",
-                "file_type": "application/octet-stream",
+                "file_size": DEFAULT_FILE_SIZE,
+                "file_type": DEFAULT_FILE_TYPE,
                 "s3_bucket_url": "",
             }
 
@@ -87,9 +90,11 @@ def _normalise_entry(entry: Union[str, Dict]) -> Dict:
 
         # Ensure that at least these keys exist, even if someone passed a dict missing them:
         merged.setdefault("URL", "")
-        merged.setdefault("file_size", base_metadata.get("file_size", "0 Bytes"))
         merged.setdefault(
-            "file_type", base_metadata.get("file_type", "application/octet-stream")
+            "file_size", base_metadata.get("file_size", DEFAULT_FILE_SIZE)
+        )
+        merged.setdefault(
+            "file_type", base_metadata.get("file_type", DEFAULT_FILE_TYPE)
         )
         merged.setdefault("s3_bucket_url", base_metadata.get("s3_bucket_url", ""))
 
@@ -99,8 +104,8 @@ def _normalise_entry(entry: Union[str, Dict]) -> Dict:
     logger.warning("Unexpected entry type in _normalise_entry: %r", entry)
     return {
         "URL": "",
-        "file_size": "0 Bytes",
-        "file_type": "application/octet-stream",
+        "file_size": DEFAULT_FILE_SIZE,
+        "file_type": DEFAULT_FILE_TYPE,
         "s3_bucket_url": "",
     }
 

@@ -307,7 +307,7 @@ class DiseaseBulkUploadViewSet(viewsets.ViewSet):
         did = row.get("id")
         name = row.get("label")
         key = row.get("key")
-        desc = row.get("description") or ""
+        desc = row.get("description", "")
         programs = row.get("program_names")
 
         # Required‐field check

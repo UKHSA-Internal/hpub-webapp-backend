@@ -5,7 +5,7 @@ import subprocess
 import shlex
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Dict, List, Union, Optional
+from typing import Dict, List, Tuple, Union, Optional
 from urllib.parse import urlparse, urlsplit, parse_qs
 
 import magic
@@ -85,9 +85,7 @@ def _find_closest_iso_size(width_mm: float, height_mm: float) -> str:
     best_name = None
     best_diff = float("inf")
     for name, (iso_w, iso_h) in ISO_A_SIZES_MM.items():
-        # direct orientation
         diff_direct = abs(w_r - iso_w) + abs(h_r - iso_h)
-        # rotated orientation
         diff_rotated = abs(w_r - iso_h) + abs(h_r - iso_w)
 
         if diff_direct < best_diff:
@@ -97,7 +95,7 @@ def _find_closest_iso_size(width_mm: float, height_mm: float) -> str:
             best_diff = diff_rotated
             best_name = name
 
-    return best_name or "A4"  # fallback to A4 if something unexpected
+    return best_name or "A4"
 
 
 def _is_presigned_s3(url: str) -> bool:
@@ -109,6 +107,94 @@ def _is_presigned_s3(url: str) -> bool:
     return any(k.startswith("X-Amz-") for k in qs)
 
 
+def _fetch_via_head(url: str, session: requests.Session) -> Tuple[int, str]:
+    """
+    Attempt to retrieve size and content type using a HEAD request.
+    Returns (size_in_bytes, content_type_or_empty).
+    """
+    size = 0
+    content_type = ""
+    try:
+        resp = session.head(url, allow_redirects=True, timeout=15)
+        resp.raise_for_status()
+        head_cl = resp.headers.get("Content-Length")
+        if head_cl:
+            try:
+                size = int(head_cl)
+                logger.info(f"HEAD → size={_hr(size)} for {url}")
+            except ValueError as e:
+                logger.warning(f"Error parsing Content-Length from HEAD: {e}")
+        ct = resp.headers.get("Content-Type", "")
+        if ct:
+            content_type = ct
+            logger.debug(f"HEAD → type={content_type} for {url}")
+    except requests.RequestException as e:
+        logger.warning(f"HEAD request failed for {url}: {e}")
+    return size, content_type
+
+
+def _fetch_via_range(
+    url: str, session: requests.Session, current_type: str
+) -> Tuple[int, str]:
+    """
+    Attempt to retrieve size (and possibly content type) using a Range request.
+    Returns (size_in_bytes, updated_content_type).
+    """
+    size = 0
+    content_type = current_type
+    try:
+        headers = {"Range": "bytes=0-0"}
+        resp = session.get(url, headers=headers, stream=True, timeout=15)
+        resp.raise_for_status()
+        content_range = resp.headers.get("Content-Range", "")
+        if content_range and "/" in content_range:
+            total_str = content_range.split("/")[-1]
+            try:
+                size = int(total_str)
+                logger.info(f"Range → size={_hr(size)} for {url}")
+            except ValueError as e:
+                logger.warning(f"Cannot parse Content-Range '{content_range}': {e}")
+        if not content_type:
+            ct = resp.headers.get("Content-Type", "")
+            if ct:
+                content_type = ct
+                logger.debug(f"Range → type={content_type} for {url}")
+    except requests.RequestException as e:
+        logger.warning(f"Range request failed for {url}: {e}")
+    return size, content_type
+
+
+def _fetch_via_stream(
+    url: str, session: requests.Session, current_type: str
+) -> Tuple[int, str]:
+    """
+    Stream the entire file to measure size manually.
+    Returns (size_in_bytes, updated_content_type).
+    """
+    size = 0
+    content_type = current_type
+    try:
+        resp = session.get(url, stream=True, timeout=120)
+        resp.raise_for_status()
+        bytes_accum = 0
+        for chunk in resp.iter_content(chunk_size=8192):
+            if not chunk:
+                break
+            bytes_accum += len(chunk)
+        size = bytes_accum
+        logger.info(f"Streamed full file → size={_hr(size)} for {url}")
+        if not content_type:
+            ct = resp.headers.get("Content-Type", "")
+            if ct:
+                content_type = ct
+                logger.debug(f"Streamed → type={content_type} for {url}")
+    except requests.RequestException as e:
+        logger.error(f"Failed to stream {url}: {e}")
+    except Exception as e:
+        logger.critical(f"Unexpected streaming error for {url}: {e}")
+    return size, content_type
+
+
 def _fetch_remote_file_size_and_type(url: str) -> Dict[str, Union[int, str]]:
     """
     Attempt to retrieve Content-Length and Content-Type for a remote URL via:
@@ -118,78 +204,19 @@ def _fetch_remote_file_size_and_type(url: str) -> Dict[str, Union[int, str]]:
 
     Returns a dict: {"size": <int bytes>, "content_type": "<mime/type>"}
     """
-    size: int = 0
-    content_type: str = ""
     session = requests.Session()
+    size, content_type = _fetch_via_head(url, session)
 
-    logger.info(f"Attempting to fetch size/type via HEAD for {url}")
-    # 1) HEAD
-    try:
-        resp_head = session.head(url, allow_redirects=True, timeout=15)
-        resp_head.raise_for_status()
-        head_cl = resp_head.headers.get("Content-Length")
-        if head_cl:
-            try:
-                size = int(head_cl)
-                logger.info(f"HEAD → size={_hr(size)} for {url}")
-            except ValueError as e:
-                logger.warning(f"Error parsing Content-Length from HEAD: {e}")
-        ct_head = resp_head.headers.get("Content-Type", "")
-        if ct_head:
-            content_type = ct_head
-            logger.debug(f"HEAD → type={content_type} for {url}")
-    except requests.RequestException as e:
-        logger.warning(f"HEAD request failed for {url}: {e}")
-
-    # 2) Range if HEAD gave no size
     if size <= 0:
-        logger.info(f"HEAD did not yield size; attempting Range request for {url}")
-        try:
-            headers = {"Range": "bytes=0-0"}
-            resp_range = session.get(url, headers=headers, stream=True, timeout=15)
-            resp_range.raise_for_status()
-            content_range = resp_range.headers.get("Content-Range", "")
-            if content_range and "/" in content_range:
-                total_str = content_range.split("/")[-1]
-                try:
-                    size = int(total_str)
-                    logger.info(f"Range → size={_hr(size)} for {url}")
-                except ValueError as e:
-                    logger.warning(f"Cannot parse Content-Range '{content_range}': {e}")
-            if not content_type:
-                ct_range = resp_range.headers.get("Content-Type", "")
-                if ct_range:
-                    content_type = ct_range
-                    logger.debug(f"Range → type={content_type} for {url}")
-        except requests.RequestException as e:
-            logger.warning(f"Range request failed for {url}: {e}")
+        size_range, content_type = _fetch_via_range(url, session, content_type)
+        if size_range > 0:
+            size = size_range
 
-    # 3) Full GET if still no size
     if size <= 0:
-        logger.info(f"Range failed; streaming full file to measure size for {url}")
-        try:
-            resp_stream = session.get(url, stream=True, timeout=120)
-            resp_stream.raise_for_status()
-            bytes_accum = 0
-            for chunk in resp_stream.iter_content(chunk_size=8192):
-                if not chunk:
-                    break
-                bytes_accum += len(chunk)
-            size = bytes_accum
-            logger.info(f"Streamed full file → size={_hr(size)} for {url}")
-            if not content_type:
-                ct_stream = resp_stream.headers.get("Content-Type", "")
-                if ct_stream:
-                    content_type = ct_stream
-                    logger.debug(f"Streamed → type={content_type} for {url}")
-        except requests.RequestException as e:
-            logger.error(f"Failed to stream {url}: {e}")
-            size = 0
-        except Exception as e:
-            logger.critical(f"Unexpected streaming error for {url}: {e}")
-            size = 0
+        size_stream, content_type = _fetch_via_stream(url, session, content_type)
+        if size_stream > 0:
+            size = size_stream
 
-    # 4) Guess from extension if still no type
     if not content_type:
         guessed = mimetypes.guess_type(urlsplit(url).path)[0]
         content_type = guessed if guessed else DEFAULT_MIME
@@ -198,7 +225,7 @@ def _fetch_remote_file_size_and_type(url: str) -> Dict[str, Union[int, str]]:
     return {"size": size, "content_type": content_type}
 
 
-def _get_local_file_info(local_path: Path) -> (int, str, Path):
+def _get_local_file_info(local_path: Path) -> Tuple[int, str, Path]:
     """
     Get size and MIME for a local file.
     Returns (size_in_bytes, mime_type, path_for_probe).
@@ -218,7 +245,7 @@ def _get_local_file_info(local_path: Path) -> (int, str, Path):
     return size, mime, local_path
 
 
-def _needs_deep_probe(url: str, mime: str, size: int) -> bool:
+def _needs_deep_probe(mime: str, size: int) -> bool:
     """
     Decide if a remote file should be downloaded for deeper probing.
 
@@ -242,10 +269,10 @@ def _download_to_temp(url: str) -> Optional[Path]:
     """
     logger.info(f"Downloading {url} for deep probing")
     try:
-        resp_dl = requests.get(url, stream=True, timeout=60)
-        resp_dl.raise_for_status()
+        resp = requests.get(url, stream=True, timeout=60)
+        resp.raise_for_status()
         with NamedTemporaryFile(delete=False, suffix=".tmp") as tmpf:
-            for chunk in resp_dl.iter_content(chunk_size=8192):
+            for chunk in resp.iter_content(chunk_size=8192):
                 if not chunk:
                     break
                 tmpf.write(chunk)
@@ -259,7 +286,9 @@ def _download_to_temp(url: str) -> Optional[Path]:
     return None
 
 
-def _reprobe_file(temp_path: Path, current_size: int, current_mime: str) -> (int, str):
+def _reprobe_file(
+    temp_path: Path, current_size: int, current_mime: str
+) -> Tuple[int, str]:
     """
     Re-check size and MIME based on the temporary file.
     """
@@ -351,7 +380,6 @@ def _extract_video_metadata(source: Union[Path, str]) -> Dict[str, Union[tuple, 
     """
     result: Dict[str, Union[tuple, str]] = {}
     try:
-        # Pass the source (either local file path or URL) directly to ffprobe
         cmd = (
             f"ffprobe -v quiet -print_format json -show_format -show_streams "
             f"{shlex.quote(str(source))}"
@@ -465,7 +493,7 @@ def _extract_additional_metadata(
 ) -> Dict[str, Union[str, int, tuple]]:
     """
     Dispatch to appropriate extractor based on MIME type.
-    (Used only when we have a local file downloaded.)
+    (Used only when we have a local file downloaded or local path.)
     """
     if mime.startswith("image/"):
         return _extract_image_metadata(temp_path)
@@ -495,6 +523,33 @@ def _extract_additional_metadata(
     return {}
 
 
+def _process_local_file(local_path: Path) -> Tuple[int, str, Path]:
+    """
+    Handle a local file: get its size, MIME, and return the path for further probing.
+    """
+    return _get_local_file_info(local_path)
+
+
+def _process_remote_file(url: str) -> Tuple[int, str, Optional[Path]]:
+    """
+    Handle a remote file: fetch size and MIME, then download if deep probe is needed.
+    Returns (size, mime, temp_probe_file_or_None).
+    """
+    size = 0
+    mime = ""
+    temp_probe_file: Optional[Path] = None
+
+    remote_info = _fetch_remote_file_size_and_type(url)
+    size = remote_info["size"]
+    mime = remote_info["content_type"]
+    logger.debug(f"Remote fetch → size={_hr(size)}, type={mime} for {url}")
+
+    if _needs_deep_probe(mime, size):
+        temp_probe_file = _download_to_temp(url)
+
+    return size, mime, temp_probe_file
+
+
 def get_file_metadata(
     urls: List[str],
 ) -> List[Dict[str, Union[str, int, float, tuple]]]:
@@ -517,11 +572,11 @@ def get_file_metadata(
     for url in urls:
         logger.info(f"Starting metadata extraction for: {url}")
         meta: Dict[str, Union[str, int, float, tuple]] = {"URL": url}
-        parsed = urlparse(url)
 
-        # Determine if local file path
+        parsed = urlparse(url)
         is_local = False
         local_path: Optional[Path] = None
+
         if parsed.scheme in ("", "file"):
             try:
                 candidate = Path(parsed.path)
@@ -531,26 +586,11 @@ def get_file_metadata(
             except Exception as e:
                 logger.debug(f"Cannot interpret '{url}' as local file: {e}")
 
-        size = 0
-        mime = ""
-        temp_probe_file: Optional[Path] = None
-
-        # 1) Local file
         if is_local and local_path is not None:
-            size, mime, temp_probe_file = _get_local_file_info(local_path)
-
+            size, mime, temp_probe_file = _process_local_file(local_path)
         else:
-            # 2) Remote file: HEAD/Range/full‐GET
-            remote_info = _fetch_remote_file_size_and_type(url)
-            size = remote_info["size"]
-            mime = remote_info["content_type"]
-            logger.debug(f"Remote fetch → size={_hr(size)}, type={mime} for {url}")
+            size, mime, temp_probe_file = _process_remote_file(url)
 
-            # 3) Deep probe if needed (skip videos here)
-            if _needs_deep_probe(url, mime, size):
-                temp_probe_file = _download_to_temp(url)
-
-        # 4) Re-probe if temp file exists
         if temp_probe_file and temp_probe_file.exists():
             size, mime = _reprobe_file(temp_probe_file, size, mime)
         else:
@@ -560,13 +600,10 @@ def get_file_metadata(
                 )
                 mime = DEFAULT_MIME
 
-        # Base metadata
         meta["file_size"] = _hr(size)
         meta["file_type"] = mime or DEFAULT_MIME
 
-        # 5a) If this is a video, run ffprobe directly on URL (or local file) without downloading whole file
         if mime.startswith("video/"):
-            # If we have a local file, pass its path; otherwise pass the URL
             video_source = (
                 temp_probe_file
                 if (temp_probe_file and temp_probe_file.exists())
@@ -574,13 +611,10 @@ def get_file_metadata(
             )
             video_meta = _extract_video_metadata(video_source)
             meta.update(video_meta)
-
-        # 5b) For everything else, if we have a local temp file, extract via that
         elif temp_probe_file and temp_probe_file.exists():
             additional = _extract_additional_metadata(mime, temp_probe_file)
             meta.update(additional)
 
-        # 6) Clean up temporary file if it was downloaded (but NOT if it was local)
         if temp_probe_file and not is_local and temp_probe_file.exists():
             try:
                 temp_probe_file.unlink()

@@ -31,28 +31,18 @@ def get_secret_value(secret_id):
     """Fetch the secret value from AWS Secrets Manager."""
     try:
         client = aws_clients.secrets_manager_client
-        logger.debug(f"Retrieving secret for {secret_id}")
         response = client.get_secret_value(SecretId=secret_id)
 
         # Check if the secret is a string or binary
         if "SecretString" in response:
-            logger.debug(f"SecretString retrieved for {secret_id}")
             return response["SecretString"]
         elif "SecretBinary" in response:
-            logger.debug(f"SecretBinary retrieved for {secret_id}")
             # For binary secrets, decode to a string format
             return response["SecretBinary"].decode("utf-8")
         else:
             raise ValueError("SecretString and SecretBinary are undefined")
-    except ClientError as e:
-        logger.error(f'Error retrieving secret: {e.response["Error"]["Message"]}')
-        error_response = {
-            "Error": {
-                "Code": "SecretRetrievalError",
-                "Message": f'Error retrieving secret: {e.response["Error"]["Message"]}',
-            }
-        }
-        raise ClientError(error_response, "GetSecretValue")
+    except ClientError:
+        raise Exception("Failed to retrieve secret from Secrets Manager.")
 
 
 #

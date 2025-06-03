@@ -25,10 +25,7 @@ router = DefaultRouter()
 router.register(r"products", ProductViewSet, basename="products")
 
 urlpatterns = [
-    # 1) Mount the router first so all @action routes (including
-    #    bulk-update-orderlimits and bulk-upload) are seen before any catch-alls.
     path("", include(router.urls)),
-    # 2) One-off endpoints that don’t risk colliding with “/<product_code>/…”
     path(
         "incomplete-products/",
         IncompleteProductsView.as_view(),
@@ -82,4 +79,4 @@ urlpatterns = [
         ProductStatusUpdateView.as_view(),
         name="product-status-update",
     ),
-]
+] + router.urls

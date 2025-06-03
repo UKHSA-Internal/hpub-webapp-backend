@@ -361,7 +361,9 @@ class Product(Page):
 
         # 4) build list by prefix match
         langs = []
-        for p in qs.values("language_name", "product_title", "product_code"):
+        for p in qs.values(
+            "language_name", "product_title", "product_code", "iso_language_code"
+        ):
             cand = p["product_code"]
             prefix = self._get_common_prefix(cand)
             if not prefix:
@@ -378,6 +380,7 @@ class Product(Page):
                 {
                     "language_name": p["language_name"],
                     "product_url": url,
+                    "iso_language_code": p["iso_language_code"],
                 }
             )
         logger.debug("Existing languages: %s", langs)

@@ -6,6 +6,10 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger(__name__)
 
 
+class SecretRetrievalError(Exception):
+    """Raised when unable to retrieve a secret from AWS Secrets Manager."""
+
+
 class AWSClients:
     _instance = None
     _secrets_manager_client = None
@@ -41,8 +45,10 @@ def get_secret_value(secret_id):
             return response["SecretBinary"].decode("utf-8")
         else:
             raise ValueError("SecretString and SecretBinary are undefined")
-    except ClientError:
-        raise Exception("Failed to retrieve secret from Secrets Manager.")
+    except ClientError as e:
+        raise SecretRetrievalError(
+            "Failed to retrieve secret from Secrets Manager."
+        ) from e
 
 
 #

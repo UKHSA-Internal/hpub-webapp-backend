@@ -1164,12 +1164,16 @@ class ProductStatusUpdateView(View):
         except (DatabaseError, TimeoutError) as e:
             logger.exception(f"Error occurred while updating product status: {str(e)}")
             return handle_error(
-                ErrorCode.DATABASE_ERROR
-                if isinstance(e, DatabaseError)
-                else ErrorCode.TIMEOUT_ERROR,
-                ErrorMessage.DATABASE_ERROR
-                if isinstance(e, DatabaseError)
-                else ErrorMessage.TIMEOUT_ERROR,
+                (
+                    ErrorCode.DATABASE_ERROR
+                    if isinstance(e, DatabaseError)
+                    else ErrorCode.TIMEOUT_ERROR
+                ),
+                (
+                    ErrorMessage.DATABASE_ERROR
+                    if isinstance(e, DatabaseError)
+                    else ErrorMessage.TIMEOUT_ERROR
+                ),
                 status_code=500 if isinstance(e, DatabaseError) else 504,
             )
         except json.JSONDecodeError:

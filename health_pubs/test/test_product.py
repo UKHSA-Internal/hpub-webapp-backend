@@ -59,9 +59,9 @@ class DummyProductSerializer:
             "product_code": obj.product_code,
             "product_title": obj.product_title,
             "update_ref": {
-                "product_downloads": obj.update_ref.product_downloads
-                if obj.update_ref
-                else {}
+                "product_downloads": (
+                    obj.update_ref.product_downloads if obj.update_ref else {}
+                )
             },
         }
 
@@ -84,6 +84,7 @@ DUMMY_ADMIN_PRODUCT_FILTER_URL = "/dummy/admin-product-filter/"
 DUMMY_PRODUCT_SEARCH_USER_URL = "/dummy/product-search-user/"
 DUMMY_PRODUCT_UPDATE_URL = "/dummy/update-product-detail/P-001/"
 DUMMY_PRODUCT_CREATE_URL = "/dummy/create-product/"
+
 
 # Dummy context manager to replace transaction.atomic
 class DummyContextManager:
@@ -245,11 +246,14 @@ def test_product_status_update_success(mock_filter):
     mock_filter.return_value = dummy_qs
 
     force_authenticate(request, user=get_dummy_user(is_admin=True))
-    with patch.object(ProductStatusUpdateView, "permission_classes", []), patch.object(
-        ProductStatusUpdateView,
-        "handle_error",
-        side_effect=lambda err, msg, status_code: Response(
-            {"error_message": msg}, status=status_code
+    with (
+        patch.object(ProductStatusUpdateView, "permission_classes", []),
+        patch.object(
+            ProductStatusUpdateView,
+            "handle_error",
+            side_effect=lambda err, msg, status_code: Response(
+                {"error_message": msg}, status=status_code
+            ),
         ),
     ):
         view = ProductStatusUpdateView.as_view()
@@ -275,19 +279,25 @@ def test_admin_product_filter_success(mock_filter):
 
     request = factory.get(url, {"product_title": "Product"})
     force_authenticate(request, user=get_dummy_user(is_admin=True))
-    with patch.object(ProductAdminFilterView, "permission_classes", []), patch.object(
-        ProductAdminFilterView,
-        "_collect_download_urls",
-        return_value=["https://example.com/file.png"],
-    ), patch.object(
-        ProductAdminFilterView,
-        "_update_product_downloads_with_presigned_urls",
-        return_value=None,
-    ), patch(
-        "core.products.views.ProductSerializer",
-        new=lambda instance, many=False: DummyProductSerializer(instance, many=many),
-    ), patch.object(
-        ProductAdminFilterView, "pagination_class", DummyPagination
+    with (
+        patch.object(ProductAdminFilterView, "permission_classes", []),
+        patch.object(
+            ProductAdminFilterView,
+            "_collect_download_urls",
+            return_value=["https://example.com/file.png"],
+        ),
+        patch.object(
+            ProductAdminFilterView,
+            "_update_product_downloads_with_presigned_urls",
+            return_value=None,
+        ),
+        patch(
+            "core.products.views.ProductSerializer",
+            new=lambda instance, many=False: DummyProductSerializer(
+                instance, many=many
+            ),
+        ),
+        patch.object(ProductAdminFilterView, "pagination_class", DummyPagination),
     ):
         view = ProductAdminFilterView.as_view()
         response = view(request)
@@ -311,19 +321,25 @@ def test_product_search_user_success(mock_filter):
 
     request = factory.get(url, {"product_code": "P-002"})
     force_authenticate(request, user=get_dummy_user())
-    with patch.object(ProductSearchUserView, "permission_classes", []), patch.object(
-        ProductSearchUserView,
-        "_collect_download_urls",
-        return_value=["https://example.com/file2.png"],
-    ), patch.object(
-        ProductSearchUserView,
-        "_update_product_downloads_with_presigned_urls",
-        return_value=None,
-    ), patch(
-        "core.products.views.ProductSerializer",
-        new=lambda instance, many=False: DummyProductSerializer(instance, many=many),
-    ), patch.object(
-        ProductSearchUserView, "pagination_class", DummyPagination
+    with (
+        patch.object(ProductSearchUserView, "permission_classes", []),
+        patch.object(
+            ProductSearchUserView,
+            "_collect_download_urls",
+            return_value=["https://example.com/file2.png"],
+        ),
+        patch.object(
+            ProductSearchUserView,
+            "_update_product_downloads_with_presigned_urls",
+            return_value=None,
+        ),
+        patch(
+            "core.products.views.ProductSerializer",
+            new=lambda instance, many=False: DummyProductSerializer(
+                instance, many=many
+            ),
+        ),
+        patch.object(ProductSearchUserView, "pagination_class", DummyPagination),
     ):
         view = ProductSearchUserView.as_view()
         response = view(request)
@@ -398,11 +414,14 @@ def test_product_status_update_database_error(mock_filter):
     )
     force_authenticate(request, user=get_dummy_user(is_admin=True))
 
-    with patch.object(ProductStatusUpdateView, "permission_classes", []), patch.object(
-        ProductStatusUpdateView,
-        "handle_error",
-        side_effect=lambda err, msg, status_code: Response(
-            {"error_message": str(msg)}, status=status_code
+    with (
+        patch.object(ProductStatusUpdateView, "permission_classes", []),
+        patch.object(
+            ProductStatusUpdateView,
+            "handle_error",
+            side_effect=lambda err, msg, status_code: Response(
+                {"error_message": str(msg)}, status=status_code
+            ),
         ),
     ):
         view = ProductStatusUpdateView.as_view()

@@ -56,9 +56,11 @@ def test_token_refresh_success():
     dummy_user = get_dummy_user()
     refresh_token = "dummy_refresh_token"
 
-    with patch("core.users.views.validate_token_refresh") as mock_validate, patch(
-        "core.users.views.generate_short_term_token"
-    ) as mock_generate, patch("core.users.views.User.objects.get") as mock_user_get:
+    with (
+        patch("core.users.views.validate_token_refresh") as mock_validate,
+        patch("core.users.views.generate_short_term_token") as mock_generate,
+        patch("core.users.views.User.objects.get") as mock_user_get,
+    ):
         mock_validate.return_value = {
             "user_id": dummy_user.user_id,
             "email": dummy_user.email,
@@ -86,15 +88,13 @@ def test_token_refresh_expired_token():
     factory = APIRequestFactory()
     refresh_token = "expired_token"
 
-    with patch("core.users.views.validate_token_refresh") as mock_validate, patch(
-        "core.users.views.refresh_b2c_token"
-    ) as mock_refresh, patch(
-        "core.users.views.validate_token"
-    ) as mock_validate_token, patch(
-        "core.users.views.generate_short_term_token"
-    ) as mock_generate, patch(
-        "core.users.views.User.objects.get"
-    ) as mock_user_get:
+    with (
+        patch("core.users.views.validate_token_refresh") as mock_validate,
+        patch("core.users.views.refresh_b2c_token") as mock_refresh,
+        patch("core.users.views.validate_token") as mock_validate_token,
+        patch("core.users.views.generate_short_term_token") as mock_generate,
+        patch("core.users.views.User.objects.get") as mock_user_get,
+    ):
         # First, simulate expired refresh token
         mock_validate.side_effect = jwt.ExpiredSignatureError()
         # Then, simulate a successful token refresh

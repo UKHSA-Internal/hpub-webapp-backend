@@ -466,9 +466,11 @@ class AddressViewSet(viewsets.ModelViewSet):
         address_parent_page = self._get_or_create_parent_page("addresses")
         for _, row in addresses_df.iterrows():
             address_data = {
-                "address_id": row["address_id"]
-                if pd.notnull(row["address_id"])
-                else str(uuid.uuid4()),
+                "address_id": (
+                    row["address_id"]
+                    if pd.notnull(row["address_id"])
+                    else str(uuid.uuid4())
+                ),
                 "address_line1": row["address_line1"],
                 "address_line2": row.get("address_line2", ""),
                 "address_line3": row.get("address_line3", ""),

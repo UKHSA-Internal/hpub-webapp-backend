@@ -109,11 +109,13 @@ def test_create_for_admin_success(
         mock_product_get.return_value = dummy_product
 
         # --- Patch Order.save, refresh_from_db, and ContentType lookup to avoid DB access ---
-        with patch("core.orders.models.Order.save", lambda self: None), patch(
-            "core.orders.models.Order.refresh_from_db", lambda self: None
-        ), patch(
-            "django.contrib.contenttypes.models.ContentType.objects.get_for_model",
-            return_value=MagicMock(_state=MagicMock(db="default")),
+        with (
+            patch("core.orders.models.Order.save", lambda self: None),
+            patch("core.orders.models.Order.refresh_from_db", lambda self: None),
+            patch(
+                "django.contrib.contenttypes.models.ContentType.objects.get_for_model",
+                return_value=MagicMock(_state=MagicMock(db="default")),
+            ),
         ):
             # --- Prepare payload ---
             payload = {
@@ -247,11 +249,13 @@ def test_create_for_regular_user_success(
     mock_create_order_instance.return_value = dummy_order
 
     # --- Patch Order.save, Order.refresh_from_db, and ContentType lookup to avoid DB access ---
-    with patch("core.orders.models.Order.save", lambda self: None), patch(
-        "core.orders.models.Order.refresh_from_db", lambda self: None
-    ), patch(
-        "django.contrib.contenttypes.models.ContentType.objects.get_for_model",
-        return_value=MagicMock(),
+    with (
+        patch("core.orders.models.Order.save", lambda self: None),
+        patch("core.orders.models.Order.refresh_from_db", lambda self: None),
+        patch(
+            "django.contrib.contenttypes.models.ContentType.objects.get_for_model",
+            return_value=MagicMock(),
+        ),
     ):
         # --- Prepare payload ---
         payload = {

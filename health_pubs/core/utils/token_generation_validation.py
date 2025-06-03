@@ -5,17 +5,24 @@ import jwt
 from core.users.models import InvalidatedToken
 from django.conf import settings
 from django.utils import timezone
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def validate_token(token, token_type="access", user=None):
     """Validates token based on type and expiration."""
     # Check if the token has been invalidated for this user
+    prefix = token[:10]
     if user and InvalidatedToken.objects.filter(token=token, user=user).exists():
+        logger.error("Token %s already invalidated for user %s", prefix, user.email)
         raise ValueError("Token has been invalidated for this user")
 
     try:
+        logger.debug("Validating %s-token %s...", token_type, prefix)
         payload = jwt.decode(token, settings.PUBLIC_KEY, algorithms=["RS256"])
         if payload["type"] != token_type:
+            logger.error("Token %s has wrong type %s", prefix, payload.get("type"))
             raise ValueError("Incorrect token type")
         return payload
     except jwt.ExpiredSignatureError:

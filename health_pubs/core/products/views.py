@@ -1877,7 +1877,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
 
         existing_product = Product.objects.filter(
             program_name=program.programme_name,
-            product_title__icontains=product_title,
+            product_title__iexact=product_title,
         ).first()
         product_key, version_number = self.get_product_key_and_version(
             program, product_title, language_id
@@ -1941,7 +1941,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
     def get_product_key_and_version(self, program, product_title, language_id):
         product_title_ = product_title.strip()
         existing_product = Product.objects.filter(
-            program_name=program.programme_name, product_title__icontains=product_title_
+            program_name=program.programme_name, product_title__iexact=product_title_
         ).first()
         if existing_product:
             if existing_product.language_id == language_id:

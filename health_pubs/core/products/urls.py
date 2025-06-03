@@ -1,4 +1,4 @@
-from django.urls import path
+from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
 from .views import (
@@ -16,23 +16,44 @@ from .views import (
     ProductUpdateView,
     ProductUsersListView,
     ProductUsersSearchFilterAPIView,
-    ProductViewSet,
-    ProgramProductsView,
     ProductUsersFilterView,
+    ProgramProductsView,
+    ProductViewSet,
 )
 
 router = DefaultRouter()
 router.register(r"products", ProductViewSet, basename="products")
 
 urlpatterns = [
+    path("", include(router.urls)),
     path(
         "incomplete-products/",
         IncompleteProductsView.as_view(),
         name="incomplete-products",
     ),
     path("create/", ProductCreateView.as_view(), name="create-product"),
+    path("bulk-delete/", ProductDeleteAll.as_view(), name="product-bulk-delete"),
     path("admin/all/", ProductAdminListView.as_view(), name="list-products-admin"),
     path("users/all/", ProductUsersListView.as_view(), name="list-products-user"),
+    path(
+        "search/admin/", ProductSearchAdminView.as_view(), name="product-search-admin"
+    ),
+    path("search/user/", ProductSearchUserView.as_view(), name="product-search-user"),
+    path("user_filter/", ProductUsersFilterView.as_view(), name="user-product-filter"),
+    path(
+        "admin_filter/", ProductAdminFilterView.as_view(), name="admin-product-filter"
+    ),
+    path(
+        "user/search/filter/",
+        ProductUsersSearchFilterAPIView.as_view(),
+        name="product-search",
+    ),
+    path(
+        "<str:program_id>/products/",
+        ProgramProductsView.as_view(),
+        name="program-products",
+    ),
+    # 3) Legacy “catch-all” detail routes at the very end
     path(
         "<str:product_code>/",
         ProductDetailView.as_view({"get": "retrieve"}),
@@ -53,24 +74,9 @@ urlpatterns = [
         ProductDetailDelete.as_view(),
         name="delete-product",
     ),
-    path("bulk-delete/", ProductDeleteAll.as_view(), name="product_bulk_delete"),
     path(
         "<str:product_code>/status/",
         ProductStatusUpdateView.as_view(),
         name="product-status-update",
-    ),
-    path("search/admin", ProductSearchAdminView.as_view(), name="product-search-admin"),
-    path("search/user", ProductSearchUserView.as_view(), name="product-search-user"),
-    path("user_filter", ProductUsersFilterView.as_view(), name="user-product-filter"),
-    path("admin_filter", ProductAdminFilterView.as_view(), name="admin-product-filter"),
-    path(
-        "<str:program_id>/products/",
-        ProgramProductsView.as_view(),
-        name="program-products",
-    ),
-    path(
-        "user/search/filter/",
-        ProductUsersSearchFilterAPIView.as_view(),
-        name="product-search",
     ),
 ] + router.urls

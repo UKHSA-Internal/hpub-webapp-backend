@@ -1,6 +1,8 @@
 import logging
 import uuid
 
+import pandas as pd
+from django.utils import timezone
 from core.programs.models import Program
 from core.users.permissions import IsAdminUser
 from core.utils.custom_token_authentication import CustomTokenAuthentication
@@ -12,6 +14,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from wagtail.models import Page
+from django.contrib.contenttypes.models import ContentType
 
 from .models import Disease
 from .serializers import DiseaseSerializer
@@ -240,6 +243,109 @@ class DiseaseNameCheckViewSet(viewsets.ViewSet):
         # Check case-insensitively if a disease with the same name already exists.
         exists = Disease.objects.filter(name__iexact=disease_name).exists()
         return Response({"unique": not exists}, status=status.HTTP_200_OK)
+
+
+class DiseaseBulkUploadViewSet(viewsets.ViewSet):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+
+    @action(detail=False, methods=["post"], url_path="bulk-upload")
+    def bulk_upload(self, request):
+        # 1. Validate upload
+        excel_file = request.FILES.get("excel_file")
+        if not excel_file:
+            return Response({"error": "Excel file is required"}, status=400)
+
+        name = excel_file.name.lower()
+        if not name.endswith((".xlsx", ".xls")):
+            return Response(
+                {"error": "Upload a valid Excel file (.xlsx or .xls)"}, status=400
+            )
+
+        # 2. Read into DataFrame
+        try:
+            df = pd.read_excel(excel_file)
+        except Exception as e:
+            return Response({"error": f"Failed to read Excel file: {e}"}, status=400)
+
+        # 3. Ensure parent page exists
+        parent_page = self._get_parent_page()
+
+        # 4. Process rows
+        created, errors = [], []
+        for idx, row in df.iterrows():
+            data, error = self._process_row(idx, row, parent_page)
+            if data:
+                created.append(data)
+            else:
+                errors.append(error)
+
+        status_code = (
+            status.HTTP_201_CREATED if created else status.HTTP_400_BAD_REQUEST
+        )
+        return Response({"created": created, "errors": errors}, status=status_code)
+
+    def _get_parent_page(self):
+        """Fetch or create the 'disease-bulk' Page under the root."""
+        try:
+            return Page.objects.get(slug="disease-bulk")
+        except Page.DoesNotExist:
+            root = Page.objects.first()
+            parent = Page(
+                title="DiseaseBulk",
+                slug="disease-bulk",
+                content_type=ContentType.objects.get_for_model(Page),
+            )
+            root.add_child(instance=parent)
+            return parent
+
+    def _process_row(self, index, row, parent_page):
+        """
+        Try to create a Disease from this row.
+        Returns (serialized_data, None) on success, or (None, error_dict) on failure.
+        """
+        did = row.get("id")
+        name = row.get("label")
+        key = row.get("key")
+        desc = row.get("description", "")
+        programs = row.get("program_names")
+
+        # Required‐field check
+        if pd.isna(did) or pd.isna(name):
+            return None, {"row": index + 1, "error": "Missing required fields"}
+
+        # Duplicate‐ID check
+        if Disease.objects.filter(disease_id=did).exists():
+            return None, {
+                "row": index + 1,
+                "error": f"Disease with ID {did} already exists",
+            }
+
+        # Build and save
+        slug = slugify(f"{name}{timezone.now()}{uuid.uuid4()}")
+        disease = Disease(
+            title=name,
+            slug=slug,
+            disease_id=did,
+            name=name,
+            key=key,
+            description=desc,
+        )
+
+        try:
+            parent_page.add_child(instance=disease)
+            disease.save()
+
+            # Associate programs if provided
+            if pd.notna(programs):
+                names = [p.strip() for p in programs.split(",")]
+                qs = Program.objects.filter(programme_name__in=names)
+                disease.programs.set(qs)
+
+            return DiseaseSerializer(disease).data, None
+
+        except Exception as e:
+            return None, {"row": index + 1, "error": str(e)}
 
 
 #

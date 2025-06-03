@@ -274,3 +274,7 @@ class Config:
     @staticmethod
     def get_db_name():
         return Config.get_value("DB_NAME", is_secret=False)
+
+    @staticmethod
+    def get_django_debug_value():
+        return Config.get_value("DJANGO_DEBUG", is_secret=False)

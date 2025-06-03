@@ -29,8 +29,12 @@ from core.utils.generate_s3_presigned_url import (
     generate_inline_presigned_urls,
     generate_presigned_urls,
 )
+from .filters import ProductFilter
+from rest_framework import generics
 from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
+from rest_framework.filters import OrderingFilter, SearchFilter
+from django_filters.rest_framework import DjangoFilterBackend
 
 from core.utils.product_recommendation_system import get_recommended_products
 from core.vaccinations.models import Vaccination
@@ -1907,7 +1911,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
 
         existing_product = Product.objects.filter(
             program_name=program.programme_name,
-            product_title__icontains=product_title,
+            product_title__iexact=product_title,
         ).first()
         product_key, version_number = self.get_product_key_and_version(
             program, product_title, language_id
@@ -1971,7 +1975,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
     def get_product_key_and_version(self, program, product_title, language_id):
         product_title_ = product_title.strip()
         existing_product = Product.objects.filter(
-            program_name=program.programme_name, product_title__icontains=product_title_
+            program_name=program.programme_name, product_title__iexact=product_title_
         ).first()
         if existing_product:
             if existing_product.language_id == language_id:
@@ -2278,6 +2282,30 @@ class ProductSearchUserView(BaseProductSearchView):
     def get_default_query(self) -> Q:
         # User view only shows live, latest products.
         return Q(is_latest=True, status="live")
+
+
+class ProductUsersSearchFilterAPIView(generics.ListAPIView):
+    """
+    GET /api/v1/products/user/search/filter/
+      ?q=foo
+      &audiences=A,B
+      &languages=en,fr
+      &download_mode=download_only
+      &recently_updated=2025-01-01T00:00:00Z
+      &ordering=-updated_at
+    """
+
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+    serializer_class = ProductSearchSerializer
+    pagination_class = CustomPagination
+    queryset = Product.objects.filter(status="live", is_latest=True)
+
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_class = ProductFilter
+    search_fields = ["product_title", "product_code_no_dashes"]
+    ordering_fields = VALID_SORT_FIELDS
+    ordering = ["product_title", "-updated_at"]
 
 
 class ProductUsersFilterView(APIView, ProductListMixin):

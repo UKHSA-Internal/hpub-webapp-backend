@@ -1,4 +1,3 @@
-from datetime import datetime
 from .confirmation_generator import generate_confirmation_number
 from core.orders.models import OrderItem
 
@@ -20,22 +19,19 @@ def generate_order_confirmation(order_instance):
     # Generate unique confirmation number
     confirmation_number = generate_confirmation_number()
 
-    # Order status and confirmation timestamp setup
-    order_status = "Submitted"  # Assuming the status is "Submitted" for all orders
-    confirmation_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    items = OrderItem.objects.filter(order_ref=order_instance)
 
     # Fetch order items
     order_items = OrderItem.objects.filter(order_ref=order_instance)
 
     # Build the ordered products list in a table-like format
     items_table = "\n".join(
-        f" - Item: {item.product_ref.title} - Quantity: {item.quantity}"
-        for item in OrderItem.objects.filter(order_ref=order_instance)
+        f"{idx}. {item.product_ref.title}(Quantity - {item.quantity})"
+        for idx, item in enumerate(items, start=1)
     )
     total_items = sum(
         item.quantity for item in OrderItem.objects.filter(order_ref=order_instance)
     )
-    items_table += f"\nTotal Items: {total_items}"
 
     # Total items (sum of quantities)
     total_items = sum(item.quantity for item in order_items)
@@ -43,16 +39,15 @@ def generate_order_confirmation(order_instance):
     # Retrieve shipping address and user details
     user = order_instance.user_ref
     address = order_instance.address_ref
+    order_date = order_instance.created_at.strftime("%Y-%m-%d %H:%M:%S")
     shipping_address = {
         "name": f"{user.first_name} {user.last_name}",
-        "department": user.establishment_ref.name if user.establishment_ref else "-",
-        "organisation": user.organization_ref.name if user.organization_ref else "-",
         "address_line_1": title_case(address.address_line1) or "-",
         "address_line_2": title_case(address.address_line2) or "-",
         "address_line_3": title_case(address.address_line3) or "-",
         "city": title_case(address.city) or "-",
         "postcode": address.postcode or "-",
-        "country": title_case(address.country) or "-",
+        "country": "Uk",
         "telephone": user.mobile_number or "-",
     }
 
@@ -60,8 +55,7 @@ def generate_order_confirmation(order_instance):
     result = {
         "confirmation_number": confirmation_number,
         "order_id": str(order_instance.order_id),
-        "order_status": order_status,
-        "confirmation_date": confirmation_date,
+        "order_date": order_date,
         "items_table": items_table,
         "total_items": total_items,
         "shipping_address": shipping_address,

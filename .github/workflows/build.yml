@@ -129,8 +129,7 @@ jobs:
     strategy:
       max-parallel: 1
       matrix:
-        environment: ["test", "uat", "preprod"]
-        # environment: ["dev", "test", "uat"]
+        environment: ["dev", "test", "uat", "preprod"]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:
       contents: write

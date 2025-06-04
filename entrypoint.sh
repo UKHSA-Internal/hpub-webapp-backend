@@ -12,6 +12,14 @@ echo "DB USER: $DB_USER"
 echo "=============================="
 wagtail_version=$(python -c "import wagtail; print(wagtail.__version__)")
 echo "Wagtail version: $wagtail_version"
+echo "=============================="
+echo "Running makemigrations..."
+makemigrations_output=$(python manage.py makemigrations --verbosity=2 2>&1) || {
+  echo "MAKEMIGRATIONS FAILED:"
+  echo "$makemigrations_output"
+  exit 1
+}
+echo "$makemigrations_output"
 # -----------------------------------------------------------------------------
 # Step 1: List current migration status
 # -----------------------------------------------------------------------------

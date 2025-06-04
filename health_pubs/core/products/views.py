@@ -2000,7 +2000,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
                 product_key=existing_product.product_key,
                 language_id=language_id,
                 is_latest=True,
-            ).update(is_latest=False, status="archived")
+            ).update(is_latest=False, status="archived", updated_at=timezone.now())
             logger.info(
                 "Previous versions archived for product_key: %s",
                 existing_product.product_key,

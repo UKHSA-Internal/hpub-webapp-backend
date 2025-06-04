@@ -155,65 +155,117 @@ class OrderViewSet(viewsets.ModelViewSet):
     def _get_or_create_analytics_index(self):
         """
         Fetch the Page with slug="event-analytics-index", or create it under
-        the root if it doesn't exist yet.
+        the root if it doesn't exist yet. Use select_for_update to avoid
+        concurrent creation collisions.
         """
-        try:
-            return Page.objects.get(slug="event-analytics-index")
-        except Page.DoesNotExist:
-            root = Page.objects.first()
-            analytics_index = Page(
-                title="Event Analytics",
-                slug="event-analytics-index",
-                # Use the EventAnalytics content type so add_child knows what to do
-                content_type=ContentType.objects.get_for_model(EventAnalytics),
-            )
-            root.add_child(instance=analytics_index)
-            root.save()
-            logger.info("Parent page 'event-analytics-index' created.")
+        for attempt in range(3):
+            try:
+                with transaction.atomic():
+                    # Lock the root page to prevent concurrent creation
+                    root = Page.objects.select_for_update().get(
+                        pk=Page.objects.first().pk
+                    )
+                    analytics_index = Page.objects.filter(
+                        slug="event-analytics-index"
+                    ).first()
+                    if analytics_index:
+                        return analytics_index
+
+                    analytics_index = Page(
+                        title="Event Analytics",
+                        slug="event-analytics-index",
+                        # Use the EventAnalytics content type so add_child knows what to do
+                        content_type=ContentType.objects.get_for_model(EventAnalytics),
+                    )
+                    root.add_child(instance=analytics_index)
+                    root.save()
+                    logger.info("Parent page 'event-analytics-index' created.")
+                    return analytics_index
+            except IntegrityError as exc:
+                # If unique constraint violation on path, retry
+                cause = getattr(exc, "__cause__", None)
+                if (
+                    isinstance(cause, errors.UniqueViolation)
+                    and getattr(cause.diag, "constraint_name", "")
+                    == "wagtailcore_page_path_key"
+                    and attempt < 2
+                ):
+                    time.sleep(0.1 * (2**attempt))
+                    continue
+                logger.exception("Error creating or retrieving analytics index page.")
+                raise APIException(
+                    ErrorMessage.PAGE_CREATION_ERROR, ErrorCode.PAGE_CREATION_ERROR
+                )
+        # Fallback: try fetching without creating (should exist by now or raise)
+        analytics_index = Page.objects.filter(slug="event-analytics-index").first()
+        if analytics_index:
             return analytics_index
+        raise APIException(
+            ErrorMessage.PAGE_CREATION_ERROR, ErrorCode.PAGE_CREATION_ERROR
+        )
 
     def record_reorder_events(self, order_instance: Order, request):
         """
         For each order item in the given order, if the user has a previous order
         for the same product, record a "reorder" EventAnalytics page under the
-        analytics index, so wagtail will set depth/path correctly.
+        analytics index. Wrap in retry logic to mitigate concurrent path collisions.
         """
         session_id = request.headers.get("X-Session-ID", "unknown")
         user = order_instance.user_ref
 
-        analytics_index = self._get_or_create_analytics_index()
+        for attempt in range(3):
+            try:
+                with transaction.atomic():
+                    # Lock the analytics index page to ensure unique path allocation
+                    analytics_index = self._get_or_create_analytics_index()
+                    analytics_index = Page.objects.select_for_update().get(
+                        pk=analytics_index.pk
+                    )
 
-        for item in order_instance.order_items.all():
-            product = item.product_ref
+                    for item in order_instance.order_items.all():
+                        product = item.product_ref
 
-            previous_orders = Order.objects.filter(
-                user_ref=user, order_items__product_ref=product
-            ).exclude(order_id=order_instance.order_id)
-            if not previous_orders.exists():
-                continue
+                        previous_orders = Order.objects.filter(
+                            user_ref=user, order_items__product_ref=product
+                        ).exclude(order_id=order_instance.order_id)
+                        if not previous_orders.exists():
+                            continue
 
-            # 1) Instantiate (but do NOT save yet)
-            event_page = EventAnalytics(
-                title=f"Reorder of {product.title}",
-                slug=slugify(f"reorder-{product.product_code}-{uuid.uuid4()}"),
-                event_type="reorder",
-                user_ref=user,
-                session_id=session_id,
-                metadata={
-                    "order_id": order_instance.order_id,
-                    "product_code": product.product_code,
-                    "quantity": item.quantity,
-                    "timestamp": timezone.now().isoformat(),
-                },
-            )
+                        # Instantiate (but do NOT save yet)
+                        event_page = EventAnalytics(
+                            title=f"Reorder of {product.title}",
+                            slug=slugify(
+                                f"reorder-{product.product_code}-{uuid.uuid4()}"
+                            ),
+                            event_type="reorder",
+                            user_ref=user,
+                            session_id=session_id,
+                            metadata={
+                                "order_id": order_instance.order_id,
+                                "product_code": product.product_code,
+                                "quantity": item.quantity,
+                                "timestamp": timezone.now().isoformat(),
+                            },
+                        )
 
-            # 2) Add it as a child (this sets path, depth, etc. and saves)
-            analytics_index.add_child(instance=event_page)
+                        # Add it as a child (this sets path, depth, etc. and saves)
+                        analytics_index.add_child(instance=event_page)
 
-            logger.info(
-                f"Recorded reorder event page (id={event_page.id}) "
-                f"for user {user.user_id}, product {product.product_code}"
-            )
+                        logger.info(
+                            f"Recorded reorder event page (id={event_page.id}) "
+                            f"for user {user.user_id}, product {product.product_code}"
+                        )
+
+                    return  # Successfully recorded all reorder events; exit loop
+
+            except (IntegrityError, DjangoValidationError) as exc:
+                if self._is_collision(exc) and attempt < 2:
+                    time.sleep(0.1 * (2**attempt))
+                    continue
+                logger.exception(
+                    f"Failed to record reorder events retry attempt {attempt}: {exc}"
+                )
+                raise
 
     def _create_order(self, request, admin=False):
         # 1) Extract and validate raw inputs

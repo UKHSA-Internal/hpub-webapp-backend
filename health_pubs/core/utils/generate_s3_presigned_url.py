@@ -57,20 +57,20 @@ def _parse_s3_url(url: str) -> Tuple[Optional[str], Optional[str]]:
     bucket_name: Optional[str] = None
     object_key: Optional[str] = None
 
-    # 1) URL form: "{bucket}.s3.amazonaws.com" or "{bucket}.s3.<region>.amazonaws.com"
-    if host.endswith(".amazonaws.com") and ".s3." in host:
-        # Split on the first occurrence of ".s3." so that bucket can contain dots
-        bucket_name = host.split(".s3.", 1)[0]
+    # 1) URL form: "{bucket}.s3.amazonaws.com" or "{bucket}.s3.<region>.amazonaws.com" or "{bucket}.s3-<region>.amazonaws.com"
+    if host.endswith(".amazonaws.com") and (".s3." in host or ".s3-" in host):
+        # Split on the first occurrence of ".s3." or ".s3-" so that bucket can contain dots
+        if ".s3." in host:
+            bucket_name = host.split(".s3.", 1)[0]
+        else:
+            bucket_name = host.split(".s3-", 1)[0]
         object_key = path
 
     # 2) URL form: "s3.amazonaws.com/{bucket}/{key...}"
-    elif host == "s3.amazonaws.com":
-        parts = path.split("/", 1)
-        if len(parts) == 2:
-            bucket_name, object_key = parts[0], parts[1]
-
     # 3) URL form: "s3-<region>.amazonaws.com/{bucket}/{key...}"
-    elif host.startswith("s3-") and host.endswith(".amazonaws.com"):
+    elif host == "s3.amazonaws.com" or (
+        host.startswith("s3-") and host.endswith(".amazonaws.com")
+    ):
         parts = path.split("/", 1)
         if len(parts) == 2:
             bucket_name, object_key = parts[0], parts[1]

@@ -51,8 +51,8 @@ def _parse_s3_url(url: str) -> Tuple[Optional[str], Optional[str]]:
     Returns (bucket_name, object_key) or (None, None) if parsing fails.
     """
     parsed = urlparse(url)
-    host = parsed.netloc  # e.g. "my.bucket.name.s3.eu-west-2.amazonaws.com"
-    path = parsed.path.lstrip("/")  # e.g. "some/path with spaces.mp4"
+    host = parsed.netloc
+    path = parsed.path.lstrip("/")
 
     bucket_name: Optional[str] = None
     object_key: Optional[str] = None

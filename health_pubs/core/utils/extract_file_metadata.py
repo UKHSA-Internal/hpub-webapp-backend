@@ -44,7 +44,7 @@ ISO_A_SIZES_MM = {
 # Default MIME type when unknown
 DEFAULT_MIME = "application/octet-stream"
 
-# --- ISO A-series sizes in millimetres ---
+# --- ISO A-series sizes in millimetres (for PDF/PPTX page/slide detection) ---
 ISO_A_SIZES_MM = {
     "A0": (841, 1189),
     "A1": (594, 841),
@@ -116,6 +116,38 @@ def _is_presigned_s3(url: str) -> bool:
     """
     qs = parse_qs(urlsplit(url).query)
     return any(k.startswith("X-Amz-") for k in qs)
+
+
+def _parse_s3_url(url: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Parse an S3 URL into (bucket_name, object_key). Supports:
+      - https://{bucket}.s3.amazonaws.com/{key}
+      - https://{bucket}.s3-{region}.amazonaws.com/{key}
+      - https://s3.amazonaws.com/{bucket}/{key}
+    Returns (None, None) if parsing fails.
+    """
+    parsed = urlparse(url)
+    host = parsed.netloc
+    path = parsed.path.lstrip("/")
+
+    bucket_name: Optional[str] = None
+    object_key: Optional[str] = None
+
+    # Case: bucket in hostname: bucket.s3.amazonaws.com or bucket.s3-region.amazonaws.com
+    if host.endswith(".s3.amazonaws.com") or (
+        ".s3-" in host and host.endswith(".amazonaws.com")
+    ):
+        bucket_name = host.split(".")[0]
+        object_key = path
+    # Case: s3.amazonaws.com/bucket/key
+    elif host == "s3.amazonaws.com":
+        parts = path.split("/", 1)
+        if len(parts) == 2:
+            bucket_name, object_key = parts[0], parts[1]
+
+    if not bucket_name or not object_key:
+        return None, None
+    return bucket_name, object_key
 
 
 def _fetch_via_head(url: str, session: requests.Session) -> Tuple[int, str]:
@@ -213,6 +245,7 @@ def _fetch_remote_file_size_and_type(url: str) -> Dict[str, Union[int, str]]:
       2) If HEAD fails or has no Content-Length, a Range request (bytes=0-0)
       3) If still unknown, a full GET streaming to measure size manually
 
+    After fetching, if content_type is missing or generic, guess based on the URL extension.
     Returns a dict: {"size": <int bytes>, "content_type": "<mime/type>"}
     """
     session = requests.Session()
@@ -228,10 +261,21 @@ def _fetch_remote_file_size_and_type(url: str) -> Dict[str, Union[int, str]]:
         if size_stream > 0:
             size = size_stream
 
-    if not content_type:
+    # If content_type is still empty or generic, guess from extension
+    if not content_type or content_type in (
+        "application/octet-stream",
+        "binary/octet-stream",
+        "",
+    ):
         guessed = mimetypes.guess_type(urlsplit(url).path)[0]
-        content_type = guessed if guessed else DEFAULT_MIME
-        logger.debug(f"Guessed MIME type '{content_type}' from extension for {url}")
+        if guessed:
+            content_type = guessed
+            logger.debug(f"Guessed MIME type '{content_type}' from extension for {url}")
+        else:
+            content_type = DEFAULT_MIME
+            logger.debug(
+                f"No guessable extension for {url}; defaulting to {DEFAULT_MIME}"
+            )
 
     return {"size": size, "content_type": content_type}
 
@@ -327,7 +371,7 @@ def _extract_image_metadata(temp_path: Path) -> Dict[str, tuple]:
     try:
         with Image.open(temp_path) as img:
             w_px, h_px = img.width, img.height
-            result["image_dimensions"] = (w_px, h_px)
+            result["dimensions"] = (w_px, h_px)
             logger.debug(f"Image dims: {w_px}×{h_px} px for {temp_path}")
     except Exception as e:
         logger.warning(f"Failed to read image dimensions for {temp_path}: {e}")
@@ -377,8 +421,8 @@ def _extract_audio_metadata(temp_path: Path) -> Dict[str, str]:
     try:
         audio = MP3(str(temp_path))
         duration = audio.info.length
-        result["audio_duration"] = _format_duration(duration)
-        logger.debug(f"Audio duration: {result['audio_duration']} for {temp_path}")
+        result["duration"] = _format_duration(duration)
+        logger.debug(f"Audio duration: {result['duration']} for {temp_path}")
     except Exception as e:
         logger.warning(f"Failed to read audio duration for {temp_path}: {e}")
     return result
@@ -408,14 +452,14 @@ def _extract_video_metadata(source: Union[Path, str]) -> Dict[str, Union[tuple, 
                 w = video_stream.get("width")
                 h = video_stream.get("height")
                 if w and h:
-                    result["video_dimensions"] = (int(w), int(h))
+                    result["dimensions"] = (int(w), int(h))
                     logger.debug(f"Video dims: {w}×{h} for {source}")
             fmt = info.get("format", {})
             dur_str = fmt.get("duration")
             if dur_str:
                 dur = float(dur_str)
-                result["video_duration"] = _format_duration(dur)
-                logger.debug(f"Video duration: {result['video_duration']} for {source}")
+                result["duration"] = _format_duration(dur)
+                logger.debug(f"Video duration: {result['duration']} for {source}")
         else:
             logger.warning(f"ffprobe error for {source}: {completed.stderr}")
     except Exception as e:
@@ -433,8 +477,8 @@ def _extract_docx_metadata(temp_path: Path) -> Dict[str, int]:
         paras = [p.text for p in doc.paragraphs if p.text]
         para_count = len(paras)
         word_count = sum(len(p.split()) for p in paras)
-        result["paragraph_count"] = para_count
-        result["word_count"] = word_count
+        result["number_of_paragraphs"] = para_count
+        result["number_of_words"] = word_count
         logger.debug(f"DOCX paras={para_count}, words={word_count} for {temp_path}")
     except Exception as e:
         logger.warning(f"Failed to read DOCX metadata for {temp_path}: {e}")
@@ -444,13 +488,13 @@ def _extract_docx_metadata(temp_path: Path) -> Dict[str, int]:
 def _extract_pptx_metadata(temp_path: Path) -> Dict[str, Union[int, str]]:
     """
     Extract PPTX slide count and ISO A-series slide size.
-    Always returns 'slide_count' and 'slide_size' as ISO name.
+    Always returns 'number_of_slides' and 'slide_size' as ISO name.
     """
     result: Dict[str, Union[int, str]] = {}
     try:
         prs = Presentation(str(temp_path))
         slide_count = len(prs.slides)
-        result["slide_count"] = slide_count
+        result["number_of_slides"] = slide_count
         logger.debug(f"PPTX slides: {slide_count} for {temp_path}")
 
         emu_per_inch = 914400.0
@@ -477,7 +521,7 @@ def _extract_xlsx_metadata(temp_path: Path) -> Dict[str, int]:
     try:
         wb = openpyxl.load_workbook(str(temp_path), read_only=True, data_only=True)
         sheet_count = len(wb.sheetnames)
-        result["sheet_count"] = sheet_count
+        result["number_of_sheets"] = sheet_count
         logger.debug(f"XLSX sheets: {sheet_count} for {temp_path}")
     except Exception as e:
         logger.warning(f"Failed to read XLSX metadata for {temp_path}: {e}")
@@ -492,7 +536,7 @@ def _extract_odt_metadata(temp_path: Path) -> Dict[str, int]:
     try:
         odt = load_odt(str(temp_path))
         paras = odt.getElementsByType(P)
-        result["paragraph_count_odt"] = len(paras)
+        result["number_of_paragraphs_odt"] = len(paras)
         logger.debug(f"ODT paras: {len(paras)} for {temp_path}")
     except Exception as e:
         logger.warning(f"Failed to read ODT metadata for {temp_path}: {e}")
@@ -543,18 +587,20 @@ def _process_local_file(local_path: Path) -> Tuple[int, str, Path]:
 
 def _process_remote_file(url: str) -> Tuple[int, str, Optional[Path]]:
     """
-    Handle a remote file: fetch size and MIME, then download if deep probe is needed.
+    Handle a remote file: fetch size and MIME (with guessing), then download if deep probe is needed.
     Returns (size, mime, temp_probe_file_or_None).
     """
     size = 0
     mime = ""
     temp_probe_file: Optional[Path] = None
 
+    # 1) fetch approximate size & content-type
     remote_info = _fetch_remote_file_size_and_type(url)
     size = remote_info["size"]
     mime = remote_info["content_type"]
     logger.debug(f"Remote fetch → size={_hr(size)}, type={mime} for {url}")
 
+    # 2) If this is a type that needs deep probing (PDF/images/audio/office), download it
     if _needs_deep_probe(mime, size):
         temp_probe_file = _download_to_temp(url)
 
@@ -643,16 +689,17 @@ def get_file_metadata(
 ) -> List[Dict[str, Union[str, int, float, tuple]]]:
     """
     For each URL (or local file path), gather metadata including:
+      - URL
       - file_size (human-readable)
       - file_type (MIME)
-      - If image → image_dimensions
-      - If PDF → number_of_pages, page_size
-      - If audio → audio_duration
-      - If video → video_dimensions, video_duration
-      - If DOCX → paragraph_count, word_count
-      - If PPTX → slide_count, slide_size
-      - If XLSX → sheet_count
-      - If ODT → paragraph_count_odt
+      - If image → dimensions (width×height in pixels)
+      - If PDF → number_of_pages, page_size (ISO A-series)
+      - If audio → duration
+      - If video → dimensions, duration
+      - If DOCX → number_of_paragraphs, number_of_words
+      - If PPTX → number_of_slides, slide_size
+      - If XLSX → number_of_sheets
+      - If ODT → number_of_paragraphs_odt
     Returns a list of metadata dicts.
     """
     results: List[Dict[str, Union[str, int, float, tuple]]] = []
@@ -668,9 +715,11 @@ def get_file_metadata(
         meta["file_size"] = _hr(size)
         meta["file_type"] = mime or DEFAULT_MIME
 
+        # Extract additional metadata if we downloaded a temp file (or can probe locally)
         extra = _extract_all_metadata(mime, temp_file, url)
         meta.update(extra)
 
+        # Clean up any temporary download
         _cleanup_temp_file(temp_file, is_local, url)
 
         results.append(meta)

@@ -13,39 +13,64 @@ echo "=============================="
 wagtail_version=$(python -c "import wagtail; print(wagtail.__version__)")
 echo "Wagtail version: $wagtail_version"
 echo "=============================="
-echo "Running makemigrations..."
-makemigrations_output=$(python manage.py makemigrations --verbosity=2 2>&1) || {
-  echo "MAKEMIGRATIONS FAILED:"
-  echo "$makemigrations_output"
-  exit 1
-}
-echo "$makemigrations_output"
+
 # -----------------------------------------------------------------------------
-# Step 1: List current migration status
+# Step 1: Check for migration files under "core" (or sub‐apps) and generate if empty
 # -----------------------------------------------------------------------------
 echo "=============================="
-echo "Listing migrations..."
+echo "Checking for existing migration files under 'core/'…"
+# Count any files that look like migrations (e.g. 0001_initial.py, etc.)
+migration_count=$(find core -type f -path "*/migrations/[0-9]*_*.py" | wc -l)
+
+if [ "$migration_count" -eq 0 ]; then
+  echo "No migration files found (besides __init__.py)."
+  echo "Running 'makemigrations' to generate them…"
+  makemig_output=$(python manage.py makemigrations --verbosity=2 2>&1) || {
+    echo "MAKEMIGRATIONS FAILED:"
+    echo "$makemig_output"
+    exit 1
+  }
+  echo "$makemig_output"
+
+  # Re‐count after generating
+  migration_count=$(find core -type f -path "*/migrations/[0-9]*_*.py" | wc -l)
+  if [ "$migration_count" -eq 0 ]; then
+    echo "ERROR: Still no migration files after running makemigrations."
+    exit 1
+  fi
+
+  echo "Generated $migration_count migration file(s)."
+else
+  echo "Found $migration_count existing migration file(s)."
+fi
+echo "=============================="
+
+# -----------------------------------------------------------------------------
+# Step 2: List current migration status
+# -----------------------------------------------------------------------------
+echo "Listing migrations…"
 migrations_output=$(python manage.py showmigrations --verbosity=2 --no-color 2>&1) || {
   echo "SHOWMIGRATIONS FAILED:"
   echo "$migrations_output"
   exit 1
 }
 echo "$migrations_output"
+
 # -----------------------------------------------------------------------------
-# Step 2: Count pending migrations
+# Step 3: Count pending migrations
 # -----------------------------------------------------------------------------
-# Remove any ANSI color codes (just in case)
+# Strip any ANSI color codes (in case)
 clean_output=$(echo "$migrations_output" | sed 's/\x1B\[[0-9;]*[a-zA-Z]//g')
-# Count lines that have the pending migration marker, assuming lines start with optional whitespace then "[ ]"
+# Count lines marked “[ ]” (not applied yet)
 pending_count=$(echo "$clean_output" | grep -E -c "^\s*\[ \]")
 echo "Number of pending migrations: $pending_count"
 
 # -----------------------------------------------------------------------------
-# Step 3: Apply pending migrations if needed
+# Step 4: Apply pending migrations if needed
 # -----------------------------------------------------------------------------
 if [ "$pending_count" -gt 0 ]; then
   echo "=============================="
-  echo "Applying pending migrations..."
+  echo "Applying pending migrations…"
   migrate_output=$(python manage.py migrate --verbosity=2 2>&1) || {
     echo "MIGRATE FAILED:"
     echo "$migrate_output"
@@ -57,7 +82,7 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 4: Start the cron service and schedule the cron jobs
+# Step 5: Start the cron service and schedule the cron jobs
 # -----------------------------------------------------------------------------
 # ───────────────────────────────────────────────────────────────────────────────
 # Schedule: check upcoming drafts at 07:00
@@ -68,7 +93,7 @@ chmod 0644 /etc/cron.d/check_upcoming_drafts
 echo "Scheduled: check_upcoming_drafts at 07:00 daily."
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Schedule: publish scheduled products at 00:00
+# Schedule: publish scheduled products at 16:50 (GMT)
 # ───────────────────────────────────────────────────────────────────────────────
 echo "50 16 * * * root cd /app && python manage.py publish_scheduled_products \
     >> /var/log/publish_scheduled_products.log 2>&1" > /etc/cron.d/publish_scheduled_products
@@ -76,8 +101,8 @@ chmod 0644 /etc/cron.d/publish_scheduled_products
 echo "Scheduled: publish_scheduled_products at 16:50 GMT daily."
 
 # -----------------------------------------------------------------------------
-# Step 5: Start the Gunicorn WSGI server
+# Step 6: Start the Gunicorn WSGI server
 # -----------------------------------------------------------------------------
 echo "=============================="
-echo "Starting Gunicorn..."
+echo "Starting Gunicorn…"
 exec gunicorn health_pubs.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 600

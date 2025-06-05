@@ -1,5 +1,3 @@
-# health_pubs/core/utils/generate_s3_presigned_url.py
-
 import logging
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -49,29 +47,29 @@ def _parse_s3_url(url: str) -> Tuple[Optional[str], Optional[str]]:
       - https://s3.amazonaws.com/{bucket}/{key}
       - https://s3-<region>.amazonaws.com/{bucket}/{key}
       - https://{bucket}.s3-<region>.amazonaws.com/{key}
+    Correctly handles bucket names containing dots by splitting on the first ".s3.".
     Returns (bucket_name, object_key) or (None, None) if parsing fails.
     """
     parsed = urlparse(url)
-    host = parsed.netloc  # e.g. "my-bucket.s3.eu-west-2.amazonaws.com"
+    host = parsed.netloc  # e.g. "my.bucket.name.s3.eu-west-2.amazonaws.com"
     path = parsed.path.lstrip("/")  # e.g. "some/path with spaces.mp4"
 
     bucket_name: Optional[str] = None
     object_key: Optional[str] = None
 
-    # 1) URL form:  "{bucket}.s3.amazonaws.com"  or  "{bucket}.s3.<region>.amazonaws.com"
-    #    → we can split on '.' and take the leftmost label as bucket.
+    # 1) URL form: "{bucket}.s3.amazonaws.com" or "{bucket}.s3.<region>.amazonaws.com"
     if host.endswith(".amazonaws.com") and ".s3." in host:
-        # e.g. host = "aw-hpub-euw2-dev-s3-publications-media.s3.eu-west-2.amazonaws.com"
-        bucket_name = host.split(".")[0]
+        # Split on the first occurrence of ".s3." so that bucket can contain dots
+        bucket_name = host.split(".s3.", 1)[0]
         object_key = path
 
-    # 2) URL form:  "s3.amazonaws.com/{bucket}/{key...}"
+    # 2) URL form: "s3.amazonaws.com/{bucket}/{key...}"
     elif host == "s3.amazonaws.com":
         parts = path.split("/", 1)
         if len(parts) == 2:
             bucket_name, object_key = parts[0], parts[1]
 
-    # 3) URL form:  "s3-<region>.amazonaws.com/{bucket}/{key...}" (less common but still valid)
+    # 3) URL form: "s3-<region>.amazonaws.com/{bucket}/{key...}"
     elif host.startswith("s3-") and host.endswith(".amazonaws.com"):
         parts = path.split("/", 1)
         if len(parts) == 2:

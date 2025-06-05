@@ -1,5 +1,3 @@
-# health_pubs/core/utils/generate_s3_presigned_url.py
-
 import logging
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -45,8 +43,11 @@ def _parse_s3_url(url: str) -> Tuple[Optional[str], Optional[str]]:
     Given a URL, attempt to parse out the S3 bucket name and object key.
     Supports URLs of the form:
       - https://{bucket}.s3.amazonaws.com/{key}
+      - https://{bucket}.s3.<region>.amazonaws.com/{key}
       - https://s3.amazonaws.com/{bucket}/{key}
-      - https://{bucket}.s3-{region}.amazonaws.com/{key}
+      - https://s3-<region>.amazonaws.com/{bucket}/{key}
+      - https://{bucket}.s3-<region>.amazonaws.com/{key}
+    Correctly handles bucket names containing dots by splitting on the first ".s3.".
     Returns (bucket_name, object_key) or (None, None) if parsing fails.
     """
     parsed = urlparse(url)
@@ -56,23 +57,24 @@ def _parse_s3_url(url: str) -> Tuple[Optional[str], Optional[str]]:
     bucket_name: Optional[str] = None
     object_key: Optional[str] = None
 
-    # Case 1: bucket is part of the hostname, e.g. "bucket.s3.amazonaws.com"
-    if (
-        host.endswith(".s3.amazonaws.com")
-        or ".s3-" in host
-        and host.endswith(".amazonaws.com")
-    ):
-        # bucket.s3.amazonaws.com or bucket.s3-region.amazonaws.com
-        bucket_name = host.split(".")[0]
+    # 1) URL form: "{bucket}.s3.amazonaws.com" or "{bucket}.s3.<region>.amazonaws.com" or "{bucket}.s3-<region>.amazonaws.com"
+    if host.endswith(".amazonaws.com") and (".s3." in host or ".s3-" in host):
+        # Split on the first occurrence of ".s3." or ".s3-" so that bucket can contain dots
+        if ".s3." in host:
+            bucket_name = host.split(".s3.", 1)[0]
+        else:
+            bucket_name = host.split(".s3-", 1)[0]
         object_key = path
 
-    # Case 2: "s3.amazonaws.com/bucket/key..." style
-    elif host == "s3.amazonaws.com":
+    # 2) URL form: "s3.amazonaws.com/{bucket}/{key...}"
+    # 3) URL form: "s3-<region>.amazonaws.com/{bucket}/{key...}"
+    elif host == "s3.amazonaws.com" or (
+        host.startswith("s3-") and host.endswith(".amazonaws.com")
+    ):
         parts = path.split("/", 1)
         if len(parts) == 2:
             bucket_name, object_key = parts[0], parts[1]
 
-    # Invalid or unsupported format
     if not bucket_name or not object_key:
         logger.warning(f"Unable to parse S3 bucket/key from URL: {url}")
         return None, None
@@ -120,7 +122,8 @@ def generate_presigned_urls(urls: List[str], expiration: int = 3600) -> Dict[str
         except ClientError as client_err:
             error_code = client_err.response.get("Error", {}).get("Code", "")
             logger.error(
-                f"ClientError generating presigned URL for {original_url}: {error_code} – {client_err}"
+                f"ClientError generating presigned URL for {original_url}: "
+                f"{error_code} – {client_err}"
             )
         except Exception as e:
             logger.error(f"Unexpected error for {original_url}: {e}")

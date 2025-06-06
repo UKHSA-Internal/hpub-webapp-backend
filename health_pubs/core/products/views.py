@@ -2527,11 +2527,11 @@ class ProgramProductsView(ListAPIView):
                 vaccinations, many=True
             ).data
 
-            logger.info(
-                "returning %d products for program %s",
-                response.data,
-                program.program_id,
-            )  # for debugging
+            # logger.info(
+            #     "returning %d products for program %s",
+            #     response.data,
+            #     program.program_id,
+            # )  # for debugging
 
             return response
 

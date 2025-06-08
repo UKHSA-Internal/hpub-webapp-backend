@@ -248,13 +248,11 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
         request = self.context.get("request", None)
         if request and hasattr(request, "user"):
             user = request.user
-            logger.info(f"User: {user}")
+            # logger.info(f"User: {user}")
             logger.info(f"Request: {request}")
             if user.is_authenticated:
                 role_name = getattr(user.role_ref, "name", "No role assigned")
-                logger.info(
-                    f"User '{user.email}' with role '{role_name}' accessed fields."
-                )
+                logger.info(f"User with role '{role_name}' accessed fields.")
                 if not user.role_ref or user.role_ref.name.lower() not in [
                     "admin",
                     "user",

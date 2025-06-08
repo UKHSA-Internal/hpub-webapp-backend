@@ -103,30 +103,35 @@ VALID_SORT_FIELDS = [
 ]
 
 
-_DIGITS = list("123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_DIGITS = list("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 _BASE = len(_DIGITS)
 
 
 def generate_product_key(last_key: str | None) -> str:
     """
-    Increments a 'base-35' number whose digits run 1–9, A–Z.
-    If last_key is None, returns '1'. Otherwise rolls over
-    so that '9'→'A', 'Z'→'11', '1Z'→'21', etc.
-    """
-    if not last_key:
-        return _DIGITS[0]
+    Increments a base-36 “number” whose digits run 0–9 then A–Z.
+    If last_key is None, returns '1'. Otherwise rolls over so that:
 
-    # turn into list of integer positions
+      '0' → '1'
+      '9' → 'A'
+      'Z' → '10'
+      '10' → '11'
+      etc.
+    """
+    # very first key
+    if not last_key:
+        return "1"
+
+    # turn into list of integer positions (0..35)
     try:
         positions = [_DIGITS.index(ch) for ch in last_key]
-    except ValueError:
-        raise ValueError(f"Invalid last_key: {last_key!r}")
+    except ValueError as e:
+        raise ValueError(f"Invalid last_key: {last_key!r}") from e
 
     # add one, carrying through
-    i = len(positions) - 1
-    carry = 1
+    i, carry = len(positions) - 1, 1
     while i >= 0 and carry:
-        positions[i] += carry
+        positions[i] += 1
         if positions[i] >= _BASE:
             positions[i] = 0
             carry = 1
@@ -134,10 +139,11 @@ def generate_product_key(last_key: str | None) -> str:
             carry = 0
         i -= 1
 
-    # if we still have a carry, prepend a new '1' digit
+    # if we still have a carry, prepend '1' (i.e. index 1 in _DIGITS)
     if carry:
-        positions.insert(0, 0)
+        positions.insert(0, _DIGITS.index("1"))
 
+    # rebuild the string
     return "".join(_DIGITS[pos] for pos in positions)
 
 

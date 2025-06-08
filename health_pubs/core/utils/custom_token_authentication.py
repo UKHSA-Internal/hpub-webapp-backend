@@ -28,80 +28,87 @@ class CustomTokenAuthentication(BaseAuthentication):
         self._authentication_attempted = False
 
     def authenticate(self, request):
+        # 1) Ensure single attempt
         if self._authentication_attempted:
-            logger.debug("Authentication already attempted for this request")
+            logger.debug("Authentication already attempted")
             return None
         self._authentication_attempted = True
 
-        logger.info("Starting token authentication.")
+        logger.debug("Starting token authentication")
 
+        # 2) Retrieve token
         token = self._get_token_from_request(request)
         if not token:
-            logger.error("No token found in header or cookie.")
+            logger.info("No token provided")
+            return None
+
+        # 3) Decode unverified to inspect type/issuer
+        try:
+            unverified = jwt.decode(
+                token, options={"verify_signature": False, "verify_aud": False}
+            )
+        except jwt.ExpiredSignatureError:
+            logger.warning("Token expired")
+            raise AuthenticationFailed("Token has expired")
+        except jwt.DecodeError:
+            logger.warning("Token decode error")
+            raise AuthenticationFailed("Invalid token format")
+        except Exception:
+            logger.error("Unexpected error decoding token")
+            return None
+
+        # 4) Azure B2C token
+        if "iss" in unverified:
+            logger.debug("Azure B2C token detected")
+            from core.users.views import (
+                validate_azure_b2c_token,
+            )  # avoid circular import
+
+            try:
+                payload = validate_azure_b2c_token(token)
+            except Exception:
+                logger.warning("Azure B2C validation failed")
+                raise AuthenticationFailed("Invalid Azure B2C token")
+
+            email = payload.get("email_address")
+            user = User.objects.filter(email=email).first()
+            if not user:
+                logger.info("Azure B2C user not found")
+                return None
+
+            logger.info("Azure B2C user authenticated")
+            return (user, None)
+
+        # 5) Custom access / refresh tokens
+        token_type = unverified.get("type")
+        if token_type not in ("access", "refresh"):
+            logger.info("Unsupported token type")
             return None
 
         try:
-            # Decode the token without signature or audience validation to inspect claims.
-            unverified_payload = jwt.decode(
-                token, options={"verify_signature": False, "verify_aud": False}
-            )
-            logger.debug("Unverified token payload: %s", unverified_payload)
-
-            # If the token contains an issuer claim, we assume it's an Azure B2C token.
-            if "iss" in unverified_payload:
-                logger.info("Detected Azure B2C token. Importing validator locally.")
-                # Import here to avoid circular dependency.
-                from core.users.views import validate_azure_b2c_token
-
-                payload = validate_azure_b2c_token(token)
-                email = payload.get("email_address")
-                user = User.objects.filter(email=email).first()
-                if user:
-                    logger.info("Authenticated Azure B2C user: %s", user)
-                    return (user, None)
-                logger.warning(
-                    "Azure B2C token valid but no matching user found for email: %s",
-                    email,
-                )
-                return None
-
-            # Handle custom token types based on the 'type' claim.
-            token_type = unverified_payload.get("type")
             if token_type == "access":
                 payload = validate_token(token, token_type=token_type)
-                user = User.objects.filter(user_id=payload.get("user_id")).first()
-                if user:
-                    logger.info("Authenticated user with access token: %s", user)
-                    return (user, None)
-                logger.warning(
-                    "Access token valid but no matching user found for user_id: %s",
-                    payload.get("user_id"),
-                )
-                return None
-
-            elif token_type == "refresh":
+            else:  # refresh
                 payload = validate_token_refresh(token, token_type=token_type)
-                user = User.objects.filter(user_id=payload.get("user_id")).first()
-                if user:
-                    logger.info("Authenticated user with refresh token: %s", user)
-                    return (user, None)
-                logger.warning(
-                    "Refresh token valid but no matching user found for user_id: %s",
-                    payload.get("user_id"),
-                )
-                return None
-
-            else:
-                logger.info("Invalid or missing token type in token claims.")
-                return None
-
         except jwt.ExpiredSignatureError:
+            logger.warning("%s token expired", token_type.capitalize())
             raise AuthenticationFailed("Token has expired")
-        except jwt.DecodeError:
+        except Exception:
+            logger.warning("%s token validation failed", token_type.capitalize())
             raise AuthenticationFailed("Invalid token")
-        except ValueError as e:
-            logger.error("Authentication error: %s", e)
-            raise AuthenticationFailed(str(e))
+
+        # 6) Lookup user by ID
+        user_id = payload.get("user_id")
+        user = (
+            User.objects.filter(user_id=user_id).first()
+            or User.objects.filter(pk=user_id).first()
+        )
+        if not user:
+            logger.info("User not found for provided token")
+            return None
+
+        logger.info("User authenticated via %s token", token_type)
+        return (user, None)
 
     def _get_token_from_request(self, request):
         """

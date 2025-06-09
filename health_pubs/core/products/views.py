@@ -35,6 +35,10 @@ from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
 from rest_framework.filters import OrderingFilter, SearchFilter
 from django_filters.rest_framework import DjangoFilterBackend
+from django.conf import settings
+from django.core.cache import cache
+from django.utils.decorators import method_decorator
+from django.views.decorators.cache import cache_page
 
 from core.utils.product_recommendation_system import get_recommended_products
 from core.vaccinations.models import Vaccination
@@ -103,30 +107,37 @@ VALID_SORT_FIELDS = [
 ]
 
 
-_DIGITS = list("123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_DIGITS = list("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 _BASE = len(_DIGITS)
+# default TTLs (in seconds)
+CACHE_TTL = getattr(settings, "CACHE_TTL")
 
 
 def generate_product_key(last_key: str | None) -> str:
     """
-    Increments a 'base-35' number whose digits run 1–9, A–Z.
-    If last_key is None, returns '1'. Otherwise rolls over
-    so that '9'→'A', 'Z'→'11', '1Z'→'21', etc.
-    """
-    if not last_key:
-        return _DIGITS[0]
+    Increments a base-36 “number” whose digits run 0–9 then A–Z.
+    If last_key is None, returns '1'. Otherwise rolls over so that:
 
-    # turn into list of integer positions
+      '0' → '1'
+      '9' → 'A'
+      'Z' → '10'
+      '10' → '11'
+      etc.
+    """
+    # very first key
+    if not last_key:
+        return "1"
+
+    # turn into list of integer positions (0..35)
     try:
         positions = [_DIGITS.index(ch) for ch in last_key]
-    except ValueError:
-        raise ValueError(f"Invalid last_key: {last_key!r}")
+    except ValueError as e:
+        raise ValueError(f"Invalid last_key: {last_key!r}") from e
 
     # add one, carrying through
-    i = len(positions) - 1
-    carry = 1
+    i, carry = len(positions) - 1, 1
     while i >= 0 and carry:
-        positions[i] += carry
+        positions[i] += 1
         if positions[i] >= _BASE:
             positions[i] = 0
             carry = 1
@@ -134,10 +145,11 @@ def generate_product_key(last_key: str | None) -> str:
             carry = 0
         i -= 1
 
-    # if we still have a carry, prepend a new '1' digit
+    # if we still have a carry, prepend '1' (i.e. index 1 in _DIGITS)
     if carry:
-        positions.insert(0, 0)
+        positions.insert(0, _DIGITS.index("1"))
 
+    # rebuild the string
     return "".join(_DIGITS[pos] for pos in positions)
 
 
@@ -987,36 +999,40 @@ class PresignedUrlMixin:
         return item
 
 
+@method_decorator(cache_page(CACHE_TTL), name="dispatch")
 class ProductDetailView(ErrorHandlingMixin, PresignedUrlMixin, viewsets.ViewSet):
     """
-    A view for returning product details.
-    Note: This example uses ViewSet for consistency, but you can also use a plain View.
+    GET /api/products/{product_code}/ → JSON with presigned URLs & metadata,
+    automatically cached per-URL+user for CACHE_TTL seconds.
     """
 
-    authentication_classes = [CustomTokenAuthentication, SessionAuthentication]
+    authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
     def retrieve(self, request, product_code=None, *args, **kwargs):
-        product_code = unquote(product_code)
-        logger.info("Fetching details for product with product_code: %s", product_code)
+        # product_code may be URL-encoded
+        code = unquote(product_code or "")
+        cache_key = f"product_detail:{request.user.id if request.user.is_authenticated else 'anon'}:{code}"
+        cached = cache.get(cache_key)
+        if cached:
+            return JsonResponse(cached, status=status.HTTP_200_OK)
 
-        product = Product.objects.filter(product_code=product_code).first()
+        logger.info("Retrieving product details for %s", code)
+        product = Product.objects.filter(product_code=code).first()
         if not product:
-            logger.warning(PRODUCT_NOT_FOUND_LOG_MSG, product_code)
+            logger.warning("Product not found: %s", code)
             return handle_error(
                 ErrorCode.PRODUCT_NOT_FOUND,
                 ErrorMessage.PRODUCT_NOT_FOUND,
                 status_code=status.HTTP_404_NOT_FOUND,
             )
 
-        serializer = ProductSerializer(product, context={"request": request})
-        response_data = serializer.data
+        data = ProductSerializer(product, context={"request": request}).data
+        self._process_presigned_urls(data)
+        cache.set(cache_key, data, CACHE_TTL)
 
-        # Process presigned URLs via the mixin.
-        self._process_presigned_urls(response_data)
-
-        logger.info("Returning product details for product_code: %s", product_code)
-        return JsonResponse(response_data, status=200)
+        logger.info("Returning details for product %s", code)
+        return JsonResponse(data, status=status.HTTP_200_OK)
 
 
 class ProductDetailDelete(ErrorHandlingMixin, View):
@@ -2091,20 +2107,23 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
 
 
 class ProductListMixin:
-    """Mixin to list / paginate / serialize Products.
-
-    By default it does _not_ include the DRF `request` in the serializer context,
-    so serializers that peek at `context['request'].user` won’t see it.
-    Child views that set `include_request_context = True`
-    will have `request` injected into the serializer context.
+    """
+    Handles sorting, pagination + S3 presigning—but now with per-request caching.
     """
 
     serializer_class = ProductSerializer
     include_request_context = False
+    cache_timeout = CACHE_TTL
+
+    def get_cache_key(self, request, prefix="products"):
+        user_part = (
+            f"user:{request.user.id}" if request.user.is_authenticated else "user:anon"
+        )
+        return f"{prefix}:{user_part}:{request.get_full_path()}"
 
     def get_sorted_queryset(self, queryset, request):
         sort_by = request.GET.get("sort_by")
-        if sort_by in VALID_SORT_FIELDS:
+        if sort_by and sort_by.lstrip("-") in VALID_SORT_FIELDS:
             return queryset.order_by(sort_by)
         return queryset
 
@@ -2114,27 +2133,38 @@ class ProductListMixin:
     def paginate_and_serialize(
         self, queryset, request, serializer_class=None, use_direct_update=False
     ):
-        serializer_class = serializer_class or self.serializer_class
+        cache_key = self.get_cache_key(request)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached, None
+
         paginator = CustomPagination()
-        paginated = paginator.paginate_queryset(queryset, request)
+        page = paginator.paginate_queryset(queryset, request)
+        ctx = self.get_serializer_context(request)
+        serializer = (serializer_class or self.serializer_class)(
+            page, many=True, context=ctx
+        )
 
-        context = self.get_serializer_context(request)
+        # 1) collect S3 URLs
+        all_urls = extract_s3_urls(serializer.data)
+        # 2) presign ( caches per-URL internally)
+        presigned = generate_presigned_urls(all_urls)
 
-        # 1) initial serialize → collect all S3 URLs
-        serializer = serializer_class(paginated, many=True, context=context)
-        all_download_urls = extract_s3_urls(serializer.data)
-        presigned_urls = generate_presigned_urls(all_download_urls)
-
-        # 2) apply presigned URLs, then re-serialize if needed
+        # 3) inject
         if use_direct_update:
-            _update_product_downloads_with_presigned_urls(paginated, presigned_urls)
-            serializer = serializer_class(paginated, many=True, context=context)
+            _update_product_downloads_with_presigned_urls(page, presigned)
+            serializer = (serializer_class or self.serializer_class)(
+                page, many=True, context=ctx
+            )
         else:
-            update_product_urls(serializer.data, presigned_urls)
+            update_product_urls(serializer.data, presigned)
 
-        return serializer.data, paginator
+        data = serializer.data
+        cache.set(cache_key, data, self.cache_timeout)
+        return data, paginator
 
 
+@method_decorator(cache_page(CACHE_TTL), name="dispatch")
 class ProductAdminListView(APIView, ProductListMixin):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
@@ -2165,6 +2195,7 @@ class ProductAdminListView(APIView, ProductListMixin):
             return handle_exceptions(e)
 
 
+@method_decorator(cache_page(CACHE_TTL), name="dispatch")
 class ProductUsersListView(APIView, ProductListMixin):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
@@ -2480,64 +2511,69 @@ class ProgramProductsView(ListAPIView):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
+    cache_timeout = CACHE_TTL
+
+    def get_cache_key(self, request, program_id):
+        user_part = (
+            f"user:{request.user.id}" if request.user.is_authenticated else "user:anon"
+        )
+        return f"prog_products:{program_id}:{user_part}:{request.get_full_path()}"
+
     def get_queryset(self):
         program = get_object_or_404(Program, pk=self.kwargs["program_id"])
-        # find all the diseases/vaccinations linked to that program
         diseases = Disease.objects.filter(programs=program)
         vaccinations = Vaccination.objects.filter(programs=program)
-
-        # base product QS
-        qs = Product.objects.filter(
-            Q(program_id=program.pk)
-            & (
-                Q(update_ref__diseases_ref__in=diseases)
-                | Q(update_ref__vaccination_ref__in=vaccinations)
+        return (
+            Product.objects.select_related("update_ref")
+            .prefetch_related(
+                "update_ref__diseases_ref",
+                "update_ref__vaccination_ref",
             )
-            & Q(is_latest=True)
-            & Q(status="live")
-        ).distinct()
-
-        # apply ordering
-        sort_by = self.request.GET.get("sort_by", "created_at")
-        if sort_by.lstrip("-") in VALID_SORT_FIELDS:
-            qs = qs.order_by(sort_by)
-        return qs
+            .filter(
+                Q(program_id=program.pk)
+                & (
+                    Q(update_ref__diseases_ref__in=diseases)
+                    | Q(update_ref__vaccination_ref__in=vaccinations)
+                )
+                & Q(is_latest=True)
+                & Q(status="live")
+            )
+            .distinct()
+        )
 
     def list(self, request, *args, **kwargs):
-        # DRF’s ListAPIView handles pagination for us
+        cache_key = self.get_cache_key(request, kwargs["program_id"])
+        cached = cache.get(cache_key)
+        if cached:
+            return Response(cached)
+
         page = self.paginate_queryset(self.get_queryset())
         if page is not None:
             serializer = self.get_serializer(page, many=True)
             data = serializer.data
 
-            # batch‐generate presigned S3 URLs
+            # presign with TTL & caching
             all_urls = extract_s3_urls(data)
             presigned = generate_presigned_urls(all_urls)
             update_product_urls(data, presigned)
 
-            response = self.get_paginated_response(data)
+            resp = self.get_paginated_response(data)
 
-            # now tack on your programme's meta lists
             program = get_object_or_404(Program, pk=kwargs["program_id"])
-            diseases = Disease.objects.filter(programs=program)
-            vaccinations = Vaccination.objects.filter(programs=program)
-
-            response.data["diseases"] = DiseaseSerializer(diseases, many=True).data
-            response.data["vaccinations"] = VaccinationSerializer(
-                vaccinations, many=True
+            resp.data["diseases"] = DiseaseSerializer(
+                Disease.objects.filter(programs=program), many=True
+            ).data
+            resp.data["vaccinations"] = VaccinationSerializer(
+                Vaccination.objects.filter(programs=program), many=True
             ).data
 
-            # logger.info(
-            #     "returning %d products for program %s",
-            #     response.data,
-            #     program.program_id,
-            # )  # for debugging
+            cache.set(cache_key, resp.data, self.cache_timeout)
+            return resp
 
-            return response
-
-        # fallback if no pagination
-        serializer = self.get_serializer(self.get_queryset(), many=True)
-        return Response(serializer.data)
+        # fallback (no pagination)
+        data = self.get_serializer(self.get_queryset(), many=True).data
+        cache.set(cache_key, data, self.cache_timeout)
+        return Response(data)
 
 
 class IncompleteProductsView(View):

@@ -57,6 +57,13 @@ CSRF_TRUSTED_ORIGINS = ["http://127.0.0.1:8085"]
 
 CSRF_COOKIE_SECURE = False
 
+if DEBUG:
+    CACHE_TTL = 0  # effectively disables caching
+else:
+    CACHE_TTL = 60 * 5  # 5 minutes in prod
+
+
+PRESIGNED_URL_TTL = 60 * 60  # 1 hour
 
 # Application definition
 

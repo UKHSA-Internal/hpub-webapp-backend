@@ -49,13 +49,14 @@ def send_notification(
         notifications_client = NotificationsAPIClient(api_key)
 
         # logging.info("items_table", items_table)
+        formatted_order_date = order_date.strftime("%d %B %Y")
 
         # Prepare the data payload for the notification
         data = {
             "personalisation": {
                 "first_name": first_name,
                 "confirmation_number": confirmation_number,
-                "order_date": order_date,
+                "order_date": formatted_order_date,
                 "items_table": items_table,
                 "total_items": total_items,
                 "name": shipping_address["name"],

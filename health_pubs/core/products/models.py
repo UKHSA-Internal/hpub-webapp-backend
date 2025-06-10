@@ -292,45 +292,41 @@ class Product(Page):
     def __str__(self):
         return self.product_title
 
-    def _get_core_code(self, code, required_length=3):
+    def _get_core_code(self, code: str, required_length: int = 3) -> str:
         """
-        Extracts the core part of a product code.
-
-        Args:
-            code (str): The product code.
-            required_length (int): Minimum length needed to extract the core.
-
-        Returns:
-            str: The core of the product code, or an empty string if not valid.
+        Extracts the first `required_length` characters of a product code,
+        or returns "" if it's not a valid string of at least that long.
         """
         if not isinstance(code, str):
             return ""
-        if len(code) < required_length:
-            return ""
-        return code[:required_length]
+        return code[:required_length] if len(code) >= required_length else ""
 
     def _get_common_prefix(self, other: str, min_length: int = 3) -> str:
         """
-        Longest common prefix between self.product_code and other,
-        provided it's at least `min_length` chars.
+        Returns the longest common prefix between this product's code
+        and `other`, but only if it's at least `min_length` chars.
         """
         a = self.product_code or ""
         b = other or ""
-        prefix = []
+        prefix_chars = []
         for ch1, ch2 in zip(a, b):
             if ch1 == ch2:
-                prefix.append(ch1)
+                prefix_chars.append(ch1)
             else:
                 break
-        prefix = "".join(prefix)
+        prefix = "".join(prefix_chars)
         return prefix if len(prefix) >= min_length else ""
 
     @property
-    def existing_languages(self):
+    def existing_languages(self) -> list[dict]:
         """
-        Find all other `live` & `is_latest` products in the same program,
-        prefer those sharing `product_key` if any exist, then filter by
-        having a common prefix >= 3 chars.
+        Find all other live & is_latest products in the same program,
+        prefer those sharing product_key if any exist, then filter by
+        matching code-core (first 3 characters).
+
+        For legacy (migrated) products (version_number == 1), we apply
+        the old alternative_type/product_type suffixing. For any product
+        with version_number > 1 (new site), we leave the language_name alone.
         """
         # 1) base URL
         try:
@@ -339,68 +335,73 @@ class Product(Page):
             logger.error("Config error: %s", e)
             return []
 
-        # 2) our code
+        # 2) our code & core
         my_code = getattr(self, "product_code", None)
         if not isinstance(my_code, str):
             logger.error("Missing product_code on %r", self)
             return []
+        our_core = self._get_core_code(my_code)
+        if not our_core:
+            return []
 
         # 3) fetch siblings
         base_qs = Product.objects.filter(
-            program_id=self.program_id,
-            is_latest=True,
-            status="live",
+            program_id=self.program_id, is_latest=True, status="live"
         ).exclude(pk=self.pk)
 
-        # if any share this product_key, narrow to them
+        # narrow by product_key if any match
         if self.product_key:
             keyed = base_qs.filter(product_key=self.product_key)
             qs = keyed if keyed.exists() else base_qs
         else:
             qs = base_qs
 
-        # 4) build list by prefix match
-        langs = []
-        for p in qs.values(
+        # 4) collect matches
+        vals = qs.values(
             "language_name",
             "product_title",
             "product_code",
             "iso_language_code",
+            "version_number",
             "update_ref__alternative_type",
             "update_ref__product_type",
-        ):
-            cand = p["product_code"]
-            prefix = self._get_common_prefix(cand)
-            if not prefix:
+        )
+
+        langs = []
+        for p in vals:
+            code = p["product_code"]
+            if self._get_core_code(code) != our_core:
                 continue
 
-            title = p["product_title"] or ""
+            title = p.get("product_title") or ""
             if not title:
-                logger.warning("No title for %r", cand)
+                logger.warning("No title for %r", code)
                 continue
 
-            # Conditionally format the language name
-            language_name = p["language_name"]
-            alternative_type = p.get("update_ref__alternative_type")
-            product_type = p.get("update_ref__product_type")
+            lang_name = p.get("language_name", "")
+            version = p.get("version_number", 0)
+            alt = p.get("update_ref__alternative_type")
+            ptype = p.get("update_ref__product_type")
 
-            if alternative_type:
-                if alternative_type == "not-accessible" and product_type:
-                    language_name = f"{language_name}: {product_type}"
-                elif alternative_type != "not-accessible":
-                    language_name = f"{language_name}: {alternative_type}"
+            # legacy suffixing only on migrated (version 1) products
+            if version == 1 and alt:
+                if alt == "not-accessible" and ptype:
+                    lang_name = f"{lang_name}: {ptype}"
+                elif alt != "not-accessible":
+                    lang_name = f"{lang_name}: {alt}"
 
             slug = slugify(title)
-            url = f"{domain}/{slug}/{cand}"
+            url = f"{domain}/{slug}/{code}"
+
             langs.append(
                 {
-                    "language_name": language_name,
+                    "language_name": lang_name,
                     "product_url": url,
                     "iso_language_code": p["iso_language_code"],
                 }
             )
-        logger.debug("Existing languages: %s", langs)
 
+        logger.debug("Existing languages: %s", langs)
         return langs
 
 

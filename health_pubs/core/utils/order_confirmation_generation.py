@@ -44,7 +44,7 @@ def generate_order_confirmation(order_instance):
         "address_line_3": title_case(address.address_line3) or "-",
         "city": title_case(address.city) or "-",
         "postcode": address.postcode or "-",
-        "country": "Uk",
+        "country": "United Kingdom",
         "telephone": user.mobile_number or "-",
     }
 

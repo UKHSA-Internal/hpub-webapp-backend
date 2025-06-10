@@ -292,71 +292,89 @@ class Product(Page):
     def __str__(self):
         return self.product_title
 
-    def _get_core_code(self, code: str, required_length: int = 3) -> str:
+    @staticmethod
+    def _get_core_code(code: str, required_length: int = 3) -> str:
         """
-        Extracts the first `required_length` characters of a product code,
-        or returns "" if it's not a valid string of at least that long.
+        Extract the first `required_length` chars of `code` if valid, else empty.
         """
-        if not isinstance(code, str):
+        if not isinstance(code, str) or len(code) < required_length:
             return ""
-        return code[:required_length] if len(code) >= required_length else ""
+        return code[:required_length]
 
-    def _get_common_prefix(self, other: str, min_length: int = 3) -> str:
+    @staticmethod
+    def _get_common_prefix(a: str, b: str, min_length: int = 3) -> str:
         """
-        Returns the longest common prefix between this product's code
-        and `other`, but only if it's at least `min_length` chars.
+        Longest common prefix between `a` and `b` if at least `min_length`.
         """
-        a = self.product_code or ""
-        b = other or ""
-        prefix_chars = []
-        for ch1, ch2 in zip(a, b):
-            if ch1 == ch2:
-                prefix_chars.append(ch1)
-            else:
-                break
-        prefix = "".join(prefix_chars)
+        a, b = a or "", b or ""
+        matched = takewhile(lambda pair: pair[0] == pair[1], zip(a, b))
+        prefix = "".join(ch for ch, _ in matched)
         return prefix if len(prefix) >= min_length else ""
+
+    def _format_language(self, data: dict, domain: str, core: str) -> dict | None:
+        """
+        Build a language dict if its core matches, else None.
+        """
+        code = data.get("product_code")
+        if self._get_core_code(code) != core:
+            return None
+
+        title = data.get("product_title") or ""
+        if not title:
+            logger.warning("No title for %r", code)
+            return None
+
+        lang_name = data.get("language_name", "")
+        version = data.get("version_number", 0)
+        alt = data.get("update_ref__alternative_type")
+        ptype = data.get("update_ref__product_type")
+
+        # Legacy suffixing for migrated products
+        if version == 1 and alt:
+            suffix = ptype if alt == "not-accessible" and ptype else alt
+            if suffix:
+                lang_name = f"{lang_name}: {suffix}"
+
+        slug = slugify(title)
+        return {
+            "language_name": lang_name,
+            "product_url": f"{domain}/{slug}/{code}",
+            "iso_language_code": data.get("iso_language_code"),
+        }
 
     @property
     def existing_languages(self) -> list[dict]:
         """
-        Find all other live & is_latest products in the same program,
-        prefer those sharing product_key if any exist, then filter by
-        matching code-core (first 3 characters).
-
-        For legacy (migrated) products (version_number == 1), we apply
-        the old alternative_type/product_type suffixing. For any product
-        with version_number > 1 (new site), we leave the language_name alone.
+        Retrieve other live & latest products in this program,
+        preferring matching product_key, then core code.
+        Applies legacy suffixing only for version 1 products.
         """
-        # 1) base URL
+        # 1) Base domain
         try:
             domain = Config().get_hpub_base_api_url().rstrip("/")
         except Exception as e:
             logger.error("Config error: %s", e)
             return []
 
-        # 2) our code & core
-        my_code = getattr(self, "product_code", None)
-        if not isinstance(my_code, str):
+        # 2) Core of our code
+        code = getattr(self, "product_code", None)
+        if not isinstance(code, str):
             logger.error("Missing product_code on %r", self)
             return []
-        our_core = self._get_core_code(my_code)
-        if not our_core:
+        core = self._get_core_code(code)
+        if not core:
             return []
 
-        # 3) fetch siblings
-        base_qs = Product.objects.filter(
+        # 3) Build queryset
+        qs = Product.objects.filter(
             program_id=self.program_id, is_latest=True, status="live"
         ).exclude(pk=self.pk)
 
-        # narrow by product_key if any match
         if self.product_key:
-            keyed = base_qs.filter(product_key=self.product_key)
-            qs = keyed if keyed.exists() else base_qs
-        else:
-            qs = base_qs
+            keyed = qs.filter(product_key=self.product_key)
+            qs = keyed if keyed.exists() else qs
 
-        # 4) collect matches
+        # 4) Fetch and format
         vals = qs.values(
             "language_name",
             "product_title",
@@ -367,42 +385,10 @@ class Product(Page):
             "update_ref__product_type",
         )
 
-        langs = []
-        for p in vals:
-            code = p["product_code"]
-            if self._get_core_code(code) != our_core:
-                continue
-
-            title = p.get("product_title") or ""
-            if not title:
-                logger.warning("No title for %r", code)
-                continue
-
-            lang_name = p.get("language_name", "")
-            version = p.get("version_number", 0)
-            alt = p.get("update_ref__alternative_type")
-            ptype = p.get("update_ref__product_type")
-
-            # legacy suffixing only on migrated (version 1) products
-            if version == 1 and alt:
-                if alt == "not-accessible" and ptype:
-                    lang_name = f"{lang_name}: {ptype}"
-                elif alt != "not-accessible":
-                    lang_name = f"{lang_name}: {alt}"
-
-            slug = slugify(title)
-            url = f"{domain}/{slug}/{code}"
-
-            langs.append(
-                {
-                    "language_name": lang_name,
-                    "product_url": url,
-                    "iso_language_code": p["iso_language_code"],
-                }
-            )
-
-        logger.debug("Existing languages: %s", langs)
-        return langs
+        langs = filter(None, (self._format_language(p, domain, core) for p in vals))
+        result = list(langs)
+        logger.debug("Existing languages: %s", result)
+        return result
 
 
 #

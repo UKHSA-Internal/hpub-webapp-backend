@@ -253,11 +253,11 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 WAGTAIL_SITE_NAME = "HPub Backend Service"
 
 if DEBUG:
-    WAGTAILADMIN_BASE_URL = "http://localhost:8085"
+    WAGTAILADMIN_BASE_URL = HPUB_FRONT_END_URL
 else:
     # Assuming HPUB_FRONT_END_URL is the base URL for your production environment
     # and it should be HTTPS in production.
-    WAGTAILADMIN_BASE_URL = HPUB_FRONT_END_URL.replace("http://", "https://")
+    WAGTAILADMIN_BASE_URL = HPUB_FRONT_END_URL.replace("http://", "https://")  # NOSONAR
 
 
 AUTHENTICATION_BACKENDS = (

@@ -464,8 +464,7 @@ class UserLoginView(APIView):
         logger.info("User found: %s", user)
 
         # Update the last_login field upon successful login.
-        user.update_last_login()
-        user.save(update_fields=["last_login"])
+        User.objects.filter(pk=user.pk).update(last_login=timezone.now())
         logger.info("Updated last_login for user: %s", user.user_id)
 
         # Retrieve role

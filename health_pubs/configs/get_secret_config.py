@@ -283,7 +283,7 @@ class Config:
     @staticmethod
     def _secure(origin: str) -> str:
         """Force HTTPS on any HTTP URL, leave HTTPS ones alone."""
-        return origin.replace("http://", "https://")
+        return origin.replace("http://", "https://")  # NOSONAR
 
     @staticmethod
     def get_django_debug_value():

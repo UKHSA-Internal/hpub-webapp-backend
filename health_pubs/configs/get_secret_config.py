@@ -281,6 +281,11 @@ class Config:
         return Config.get_value("DB_NAME", is_secret=False)
 
     @staticmethod
+    def _secure(origin: str) -> str:
+        """Force HTTPS on any HTTP URL, leave HTTPS ones alone."""
+        return origin.replace("http://", "https://")
+
+    @staticmethod
     def get_django_debug_value():
         return Config.get_value("DJANGO_DEBUG", is_secret=False)
 
@@ -296,49 +301,36 @@ class Config:
         return [host.strip() for host in hosts.split(",")]
 
     @staticmethod
-    def get_csrf_trusted_origins():
+    def get_csrf_trusted_origins() -> list[str]:
         """
-        Extracts the CSRF_TRUSTED_ORIGINS setting from an environment variable.
-        Expected format: a comma-separated string
+        Read CSRF_TRUSTED_ORIGINS (comma-sep).
+        In prod/test/UAT, force each to HTTPS.
         """
-        origins_str = Config.get_value("CSRF_TRUSTED_ORIGINS", is_secret=False)
-        if not origins_str:
-            return []
-        # Ensure that production origins use https
+        raw = Config._get_value("CSRF_TRUSTED_ORIGINS", is_secret=False)
+        debug = Config.get_django_debug_value()
         origins = []
-        for origin in origins_str.split(","):
-            origin = origin.strip()
-            if not Config.get_django_debug_value() and origin.startswith("http://"):
-                origins.append(origin.replace("http://", "https://"))
-            else:
-                origins.append(origin)
+        for o in raw.split(","):
+            o = o.strip()
+            origins.append(o if debug else Config._secure(o))
         return origins
 
     @staticmethod
-    def get_cors_allowed_origins():
+    def get_cors_allowed_origins() -> list[str]:
         """
-        Dynamically sets CORS_ALLOWED_ORIGINS based on DEBUG status.
-        If DEBUG is True, includes localhost/127.0.0.1 origins.
-        If DEBUG is False, only includes HPUB_FRONT_END_URL (ensuring HTTPS).
+        If DEBUG: allow localhost dev origins + HPUB_FRONT_END_URL (unmodified).
+        Else: only HPUB_FRONT_END_URL, forced to HTTPS.
         """
-        hpub_frontend_url = Config.get_hpub_base_api_url()
-        allowed_origins = []
+        hpub = Config.get_hpub_base_api_url()
+        debug = Config.get_django_debug_value()
 
-        if Config.get_django_debug_value():
-            # In debug mode, include common local development origins
-            allowed_origins.extend(DEV_ORIGINS)
-            # Add HPUB_FRONT_END_URL as it is (expected http for dev)
-            if hpub_frontend_url:
-                allowed_origins.append(hpub_frontend_url)
+        if debug:
+            allowed = list(DEV_ORIGINS)
+            if hpub:
+                allowed.append(hpub)
         else:
-            # In non-debug (prod/test/UAT) mode, only include HPUB_FRONT_END_URL
-            # and ensure it's HTTPS.
-            if hpub_frontend_url:
-                if hpub_frontend_url.startswith("http://"):
-                    allowed_origins.append(
-                        hpub_frontend_url.replace("http://", "https://")
-                    )
-                else:
-                    allowed_origins.append(hpub_frontend_url)
+            allowed = []
+            if hpub:
+                allowed.append(Config._secure(hpub))
 
-        return list(set(allowed_origins))  # Use set to remove potential duplicates
+        # de-duplicate and return
+        return list(dict.fromkeys(allowed))

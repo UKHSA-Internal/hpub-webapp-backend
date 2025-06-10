@@ -286,8 +286,12 @@ class Config:
         return origin.replace("http://", "https://")  # NOSONAR
 
     @staticmethod
-    def get_django_debug_value():
-        return Config.get_value("DJANGO_DEBUG", is_secret=False)
+    def get_django_debug_value() -> bool:
+        """
+        Returns True if DJANGO_DEBUG is set to a truthy string ("1", "true", "yes").
+        """
+        raw = Config.get_value("DJANGO_DEBUG", is_secret=False)
+        return raw.lower() in ("1", "true", "yes")
 
     @staticmethod
     def get_django_allowed_hosts():

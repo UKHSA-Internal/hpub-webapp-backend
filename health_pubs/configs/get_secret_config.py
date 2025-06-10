@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import sys
-from typing import Optional
+from typing import Optional, List
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.utils.config_loader import load_environment
@@ -89,6 +89,78 @@ class Config:
         # for debugging purposes
         logger.debug(f"Environment variable {key} retrieved successfully.")
         return value
+
+    @staticmethod
+    def _secure(origin: str) -> str:
+        """Force HTTPS on any HTTP URL, leave HTTPS ones alone."""
+        return origin.replace("http://", "https://")  # NOSONAR
+
+    @staticmethod
+    def get_django_debug_value() -> bool:
+        """
+        Returns True if DJANGO_DEBUG is set to a truthy string ("1", "true", "yes").
+        """
+        raw = Config.get_value("DJANGO_DEBUG", is_secret=False)
+        return raw.lower() in ("1", "true", "yes")
+
+    @staticmethod
+    def get_django_allowed_hosts() -> List[str]:
+        """
+        Returns ALLOWED_HOSTS from env (comma-separated), or [] if unset.
+        """
+        try:
+            raw = Config.get_value("DJANGO_ALLOWED_HOSTS", is_secret=False)
+        except EnvironmentError:
+            return []
+        return [h.strip() for h in raw.split(",") if h.strip()]
+
+    @staticmethod
+    def get_csrf_trusted_origins() -> List[str]:
+        """
+        Returns CSRF_TRUSTED_ORIGINS (comma-separated), forcing HTTPS if not DEBUG.
+        """
+        try:
+            raw = Config.get_value("CSRF_TRUSTED_ORIGINS", is_secret=False)
+        except EnvironmentError:
+            return []
+        debug = Config.get_django_debug_value()
+        origins: List[str] = []
+        for o in raw.split(","):
+            o = o.strip()
+            if not o:
+                continue
+            origins.append(o if debug else Config._secure(o))
+        return origins
+
+    @staticmethod
+    def get_cors_allowed_origins() -> List[str]:
+        """
+        If DEBUG: allow DEV_ORIGINS + HPUB_FRONTEND_URL as-is.
+        Else: only HPUB_FRONTEND_URL, forced to HTTPS.
+        """
+        debug = Config.get_django_debug_value()
+        try:
+            hpub = Config.get_value("HPUB_FRONTEND_URL", is_secret=False)
+        except EnvironmentError:
+            hpub = None
+
+        if debug:
+            allowed = list(DEV_ORIGINS)
+            if hpub:  # still guard just in case
+                allowed.append(hpub)
+        else:
+            allowed = []
+            if hpub:
+                allowed.append(Config._secure(hpub))
+
+        # dedupe preserving order
+        seen = set()
+        result: List[str] = []
+        for url in allowed:
+            if url and url not in seen:
+                seen.add(url)
+                result.append(url)
+        return result
 
     @staticmethod
     def get_aps_api_key():
@@ -280,61 +352,5 @@ class Config:
     def get_db_name():
         return Config.get_value("DB_NAME", is_secret=False)
 
-    @staticmethod
-    def _secure(origin: str) -> str:
-        """Force HTTPS on any HTTP URL, leave HTTPS ones alone."""
-        return origin.replace("http://", "https://")  # NOSONAR
 
-    @staticmethod
-    def get_django_debug_value() -> bool:
-        """
-        Returns True if DJANGO_DEBUG is set to a truthy string ("1", "true", "yes").
-        """
-        raw = Config.get_value("DJANGO_DEBUG", is_secret=False)
-        return raw.lower() in ("1", "true", "yes")
-
-    @staticmethod
-    def get_django_allowed_hosts():
-        """
-        Extracts the ALLOWED_HOSTS setting from an environment variable.
-        Expected format: a comma-separated string
-        """
-        hosts = Config.get_value("DJANGO_ALLOWED_HOSTS", is_secret=False)
-        if not hosts:
-            return []
-        return [host.strip() for host in hosts.split(",")]
-
-    @staticmethod
-    def get_csrf_trusted_origins() -> list[str]:
-        """
-        Read CSRF_TRUSTED_ORIGINS (comma-sep).
-        In prod/test/UAT, force each to HTTPS.
-        """
-        raw = Config._get_value("CSRF_TRUSTED_ORIGINS", is_secret=False)
-        debug = Config.get_django_debug_value()
-        origins = []
-        for o in raw.split(","):
-            o = o.strip()
-            origins.append(o if debug else Config._secure(o))
-        return origins
-
-    @staticmethod
-    def get_cors_allowed_origins() -> list[str]:
-        """
-        If DEBUG: allow localhost dev origins + HPUB_FRONT_END_URL (unmodified).
-        Else: only HPUB_FRONT_END_URL, forced to HTTPS.
-        """
-        hpub = Config.get_hpub_base_api_url()
-        debug = Config.get_django_debug_value()
-
-        if debug:
-            allowed = list(DEV_ORIGINS)
-            if hpub:
-                allowed.append(hpub)
-        else:
-            allowed = []
-            if hpub:
-                allowed.append(Config._secure(hpub))
-
-        # de-duplicate and return
-        return list(dict.fromkeys(allowed))
+#

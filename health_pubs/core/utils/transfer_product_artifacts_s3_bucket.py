@@ -88,6 +88,7 @@ EXCEL_TO_DB = {
     "transcript_file_name": "transcript_url",
     "web_download_file_name": "web_download_url",
     "print_download_file_name": "print_download_url",
+    "video_urls": "video_url",
 }
 
 OBJECT_KEYS = {"main_download_url", "video_url"}
@@ -244,7 +245,7 @@ def insert_db(cur, update_ref_id, db_field, metadata):
             update_ref_id,
             extras.Json(downloads),
             extras.Json(downloads.get("main_download_url", {})),
-            extras.Json({}),  # video_url
+            extras.Json(downloads.get("video_url", "")),
             extras.Json(downloads.get("print_download_url", [])),
             extras.Json(downloads.get("web_download_url", [])),
             extras.Json(downloads.get("transcript_url", [])),

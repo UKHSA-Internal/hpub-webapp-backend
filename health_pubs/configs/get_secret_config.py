@@ -303,8 +303,10 @@ class Config:
         origins = []
         for origin in origins_str.split(","):
             origin = origin.strip()
-            if not Config.get_django_debug_value() and origin.startswith("http://"):
-                origins.append(origin.replace("http://", "https://"))
+            if not Config.get_django_debug_value() and origin.startswith(
+                "http://"
+            ):  # NOSONAR
+                origins.append(origin.replace("http://", "https://"))  # NOSONAR
             else:
                 origins.append(origin)
         return origins
@@ -323,9 +325,9 @@ class Config:
             # In debug mode, include common local development origins
             allowed_origins.extend(
                 [
-                    "http://localhost:3000",
-                    "http://localhost:5173",
-                    "http://127.0.0.1:5173",
+                    "http://localhost:3000",  # NOSONAR: dev only, safe
+                    "http://localhost:5173",  # NOSONAR: dev only, safe
+                    "http://127.0.0.1:5173",  # NOSONAR: dev only, safe
                 ]
             )
             # Add HPUB_FRONT_END_URL as it is (expected http for dev)
@@ -335,9 +337,9 @@ class Config:
             # In non-debug (prod/test/UAT) mode, only include HPUB_FRONT_END_URL
             # and ensure it's HTTPS.
             if hpub_frontend_url:
-                if hpub_frontend_url.startswith("http://"):
+                if hpub_frontend_url.startswith("http://"):  # NOSONAR
                     allowed_origins.append(
-                        hpub_frontend_url.replace("http://", "https://")
+                        hpub_frontend_url.replace("http://", "https://")  # NOSONAR
                     )
                 else:
                     allowed_origins.append(hpub_frontend_url)

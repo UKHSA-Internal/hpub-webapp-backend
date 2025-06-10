@@ -278,3 +278,68 @@ class Config:
     @staticmethod
     def get_django_debug_value():
         return Config.get_value("DJANGO_DEBUG", is_secret=False)
+
+    @staticmethod
+    def get_django_allowed_hosts():
+        """
+        Extracts the ALLOWED_HOSTS setting from an environment variable.
+        Expected format: a comma-separated string
+        """
+        hosts = Config.get_value("DJANGO_ALLOWED_HOSTS", is_secret=False)
+        if not hosts:
+            return []
+        return [host.strip() for host in hosts.split(",")]
+
+    @staticmethod
+    def get_csrf_trusted_origins():
+        """
+        Extracts the CSRF_TRUSTED_ORIGINS setting from an environment variable.
+        Expected format: a comma-separated string
+        """
+        origins_str = Config.get_value("CSRF_TRUSTED_ORIGINS", is_secret=False)
+        if not origins_str:
+            return []
+        # Ensure that production origins use https
+        origins = []
+        for origin in origins_str.split(","):
+            origin = origin.strip()
+            if not Config.get_django_debug_value() and origin.startswith("http://"):
+                origins.append(origin.replace("http://", "https://"))
+            else:
+                origins.append(origin)
+        return origins
+
+    @staticmethod
+    def get_cors_allowed_origins():
+        """
+        Dynamically sets CORS_ALLOWED_ORIGINS based on DEBUG status.
+        If DEBUG is True, includes localhost/127.0.0.1 origins.
+        If DEBUG is False, only includes HPUB_FRONT_END_URL (ensuring HTTPS).
+        """
+        hpub_frontend_url = Config.get_hpub_base_api_url()
+        allowed_origins = []
+
+        if Config.get_django_debug_value():
+            # In debug mode, include common local development origins
+            allowed_origins.extend(
+                [
+                    "http://localhost:3000",
+                    "http://localhost:5173",
+                    "http://127.0.0.1:5173",
+                ]
+            )
+            # Add HPUB_FRONT_END_URL as it is (expected http for dev)
+            if hpub_frontend_url:
+                allowed_origins.append(hpub_frontend_url)
+        else:
+            # In non-debug (prod/test/UAT) mode, only include HPUB_FRONT_END_URL
+            # and ensure it's HTTPS.
+            if hpub_frontend_url:
+                if hpub_frontend_url.startswith("http://"):
+                    allowed_origins.append(
+                        hpub_frontend_url.replace("http://", "https://")
+                    )
+                else:
+                    allowed_origins.append(hpub_frontend_url)
+
+        return list(set(allowed_origins))  # Use set to remove potential duplicates

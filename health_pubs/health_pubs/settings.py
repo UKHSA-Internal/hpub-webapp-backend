@@ -36,14 +36,9 @@ PRIVATE_KEY = private_key
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config.get_django_debug_value()
-ALLOWED_HOSTS = ["localhost", "127.0.0.1", "testserver", "0.0.0.0", "*"]
+ALLOWED_HOSTS = config.get_django_allowed_hosts()
 
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    HPUB_FRONT_END_URL,
-]
+CORS_ALLOWED_ORIGINS = config.get_cors_allowed_origins()
 
 CORS_ALLOW_CREDENTIALS = True
 
@@ -53,9 +48,18 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
 ]
 
 
-CSRF_TRUSTED_ORIGINS = ["http://127.0.0.1:8085"]
+CSRF_TRUSTED_ORIGINS = config.get_csrf_trusted_origins()
 
-CSRF_COOKIE_SECURE = False
+
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+SECURE_SSL_REDIRECT = not DEBUG
+SECURE_BROWSER_XSS_FILTER = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_HSTS_SECONDS = 31536000 if not DEBUG else 0
+SECURE_HSTS_INCLUDE_SUBDOMAINS = not DEBUG
+SECURE_HSTS_PRELOAD = not DEBUG
+
 
 if DEBUG:
     CACHE_TTL = 0  # effectively disables caching
@@ -248,7 +252,12 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 WAGTAIL_SITE_NAME = "HPub Backend Service"
 
-WAGTAILADMIN_BASE_URL = "http://localhost:8085"
+if DEBUG:
+    WAGTAILADMIN_BASE_URL = "http://localhost:8085"
+else:
+    # Assuming HPUB_FRONT_END_URL is the base URL for your production environment
+    # and it should be HTTPS in production.
+    WAGTAILADMIN_BASE_URL = HPUB_FRONT_END_URL.replace("http://", "https://")
 
 
 AUTHENTICATION_BACKENDS = (

@@ -362,7 +362,12 @@ class Product(Page):
         # 4) build list by prefix match
         langs = []
         for p in qs.values(
-            "language_name", "product_title", "product_code", "iso_language_code"
+            "language_name",
+            "product_title",
+            "product_code",
+            "iso_language_code",
+            "update_ref__alternative_type",
+            "update_ref__product_type",
         ):
             cand = p["product_code"]
             prefix = self._get_common_prefix(cand)
@@ -374,11 +379,22 @@ class Product(Page):
                 logger.warning("No title for %r", cand)
                 continue
 
+            # Conditionally format the language name
+            language_name = p["language_name"]
+            alternative_type = p.get("update_ref__alternative_type")
+            product_type = p.get("update_ref__product_type")
+
+            if alternative_type:
+                if alternative_type == "not-accessible" and product_type:
+                    language_name = f"{language_name}: {product_type}"
+                elif alternative_type != "not-accessible":
+                    language_name = f"{language_name}: {alternative_type}"
+
             slug = slugify(title)
             url = f"{domain}/{slug}/{cand}"
             langs.append(
                 {
-                    "language_name": p["language_name"],
+                    "language_name": language_name,
                     "product_url": url,
                     "iso_language_code": p["iso_language_code"],
                 }

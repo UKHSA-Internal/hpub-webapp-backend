@@ -16,6 +16,11 @@ load_environment()
 logger = logging.getLogger(__name__)
 
 RSA_KEYS_SECRET_ID_ERROR_MSG = "RSA_KEYS_SECRET_ID is not set in the environment."
+DEV_ORIGINS = [
+    "http://localhost:3000",  # NOSONAR: safe in local dev only
+    "http://localhost:5173",  # NOSONAR: safe in local dev only
+    "http://127.0.0.1:5173",  # NOSONAR: safe in local dev only
+]
 
 
 class Config:
@@ -303,10 +308,8 @@ class Config:
         origins = []
         for origin in origins_str.split(","):
             origin = origin.strip()
-            if not Config.get_django_debug_value() and origin.startswith(
-                "http://"
-            ):  # NOSONAR
-                origins.append(origin.replace("http://", "https://"))  # NOSONAR
+            if not Config.get_django_debug_value() and origin.startswith("http://"):
+                origins.append(origin.replace("http://", "https://"))
             else:
                 origins.append(origin)
         return origins
@@ -323,13 +326,7 @@ class Config:
 
         if Config.get_django_debug_value():
             # In debug mode, include common local development origins
-            allowed_origins.extend(
-                [
-                    "http://localhost:3000",  # NOSONAR: dev only, safe
-                    "http://localhost:5173",  # NOSONAR: dev only, safe
-                    "http://127.0.0.1:5173",  # NOSONAR: dev only, safe
-                ]
-            )
+            allowed_origins.extend(DEV_ORIGINS)
             # Add HPUB_FRONT_END_URL as it is (expected http for dev)
             if hpub_frontend_url:
                 allowed_origins.append(hpub_frontend_url)
@@ -337,9 +334,9 @@ class Config:
             # In non-debug (prod/test/UAT) mode, only include HPUB_FRONT_END_URL
             # and ensure it's HTTPS.
             if hpub_frontend_url:
-                if hpub_frontend_url.startswith("http://"):  # NOSONAR
+                if hpub_frontend_url.startswith("http://"):
                     allowed_origins.append(
-                        hpub_frontend_url.replace("http://", "https://")  # NOSONAR
+                        hpub_frontend_url.replace("http://", "https://")
                     )
                 else:
                     allowed_origins.append(hpub_frontend_url)

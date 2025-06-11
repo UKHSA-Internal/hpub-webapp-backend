@@ -16,3 +16,4 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "health_pubs.settings")
 
 application = get_wsgi_application()
 application = HealthCheckHostBypassWSGIHandler()
+application.load_middleware()

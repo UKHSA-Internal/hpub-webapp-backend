@@ -15,4 +15,4 @@ from core.middleware.healthcheck_host_bypass import HealthCheckHostBypassWSGIHan
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "health_pubs.settings")
 
 application = get_wsgi_application()
-application = HealthCheckHostBypassWSGIHandler().get_response
+application = HealthCheckHostBypassWSGIHandler()

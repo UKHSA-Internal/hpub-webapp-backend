@@ -9,9 +9,8 @@ https://docs.djangoproject.com/en/5.0/howto/deployment/wsgi/
 
 import os
 
-from core.middleware.healthcheck_host_bypass import HealthCheckHostBypassWSGIHandler
+from django.core.wsgi import get_wsgi_application
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "health_pubs.settings")
 
-application = HealthCheckHostBypassWSGIHandler()
-application.load_middleware()
+application = get_wsgi_application()

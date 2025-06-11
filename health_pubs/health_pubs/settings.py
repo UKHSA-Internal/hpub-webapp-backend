@@ -126,6 +126,7 @@ INSTALLED_APPS = [
 
 
 MIDDLEWARE = [
+    "core.middleware.healthcheck_host_bypass.HealthCheckHostBypassMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",

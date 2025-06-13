@@ -2021,7 +2021,6 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
 
     def mark_previous_versions_archived(self, existing_product, language_id):
         if existing_product:
-
             qs = Product.objects.filter(
                 product_key=existing_product.product_key,
                 language_id=language_id,

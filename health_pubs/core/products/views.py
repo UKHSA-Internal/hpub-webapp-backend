@@ -74,6 +74,10 @@ from rest_framework.status import (
 from rest_framework.views import APIView
 from wagtail.models import Page
 
+from .enums import (
+    required_event_fields_archived,
+)
+from .signals import send_product_event
 from .models import Product, ProductUpdate
 from .serializers import (
     ProductSearchSerializer,
@@ -82,6 +86,11 @@ from .serializers import (
 )
 from rest_framework.generics import ListAPIView
 from django.core.serializers.json import DjangoJSONEncoder
+
+from configs.get_secret_config import Config
+
+
+config = Config()
 
 logger = logging.getLogger(__name__)
 
@@ -2012,11 +2021,28 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
 
     def mark_previous_versions_archived(self, existing_product, language_id):
         if existing_product:
-            Product.objects.filter(
+            qs = Product.objects.filter(
                 product_key=existing_product.product_key,
                 language_id=language_id,
                 is_latest=True,
-            ).update(is_latest=False, status="archived", updated_at=timezone.now())
+            )
+            ids = list(qs.values_list("pk", flat=True))
+
+            # 1 SQL query
+            qs.update(is_latest=False, status="archived", updated_at=timezone.now())
+
+            # then N lightweight loops to send events
+            for pk in ids:
+                prev = Product(
+                    pk=pk
+                )  # avoid extra SELECT if you only need PK/status/etc
+                prev.status = "archived"
+                send_product_event(
+                    prev,
+                    "archived",
+                    config.get_hpub_event_bridge_detail_type_product_archive(),
+                    required_event_fields_archived,
+                )
             logger.info(
                 "Previous versions archived for product_key: %s",
                 existing_product.product_key,

@@ -73,6 +73,7 @@ class AddressViewSet(viewsets.ModelViewSet):
             "address_line2": data.get("address_line2", "").strip(),
             "address_line3": data.get("address_line3", "").strip(),
             "city": data["city"].strip(),
+            "county": data.get("county", "").strip(),
             "postcode": data["postcode"].strip().upper(),
             "country": data["country"].strip(),
         }
@@ -114,6 +115,7 @@ class AddressViewSet(viewsets.ModelViewSet):
             address_line2__iexact=normalized["address_line2"],
             address_line3__iexact=normalized["address_line3"],
             city__iexact=normalized["city"],
+            county__iexact=normalized["county"],
             postcode__iexact=normalized["postcode"],
             country__iexact=normalized["country"],
             user_ref=user_ref,

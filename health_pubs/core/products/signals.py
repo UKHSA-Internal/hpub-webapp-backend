@@ -2,12 +2,15 @@ import json
 import logging
 import boto3
 from botocore.exceptions import NoRegionError, NoCredentialsError
-from core.utils.check_product_required_fields_aps_decorator import (
-    check_required_event_fields,
-)
+from functools import wraps
+
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
+from core.utils.check_product_required_fields_aps_decorator import (
+    check_required_event_fields,
+)
+from configs.get_secret_config import Config
 from .enums import (
     client,
     invoicing_client,
@@ -18,24 +21,19 @@ from .enums import (
     required_event_fields_withdrawn,
 )
 from .models import Product
-from configs.get_secret_config import Config
-from functools import wraps
-
 
 config = Config()
-
 logger = logging.getLogger(__name__)
 MISSING_STATUS_WARNING = "Missing or invalid status for product %s"
 
-# Check AWS access and initialize EventBridge client
+# Initialize AWS EventBridge client (or simulate if unavailable)
 try:
     eventbridge = boto3.client("events")
     aws_access = True
 except (NoRegionError, NoCredentialsError) as e:
-    logger.warning(f"AWS access is unavailable: {e}")
+    logger.warning("AWS access is unavailable: %s", e)
     aws_access = False
 
-# Define status mapping to ensure correct capitalization
 STATUS_MAPPING = {
     "live": "Live",
     "archived": "Archived",
@@ -45,17 +43,14 @@ STATUS_MAPPING = {
 
 
 def skip_if_suppressed(fn):
-    """
-    Decorator to short‑circuit any Product event handler
-    when instance.suppress_event is True.
-    """
+    """Skip handler if instance.suppress_event is True."""
 
     @wraps(fn)
     def wrapper(sender, instance, **kwargs):
         if getattr(instance, "suppress_event", False):
             logger.info(
-                f"Event suppressed for product {instance.product_code} "
-                f"(suppress_event=True)"
+                "Event suppressed for product %s (suppress_event=True)",
+                instance.product_code,
             )
             return
         return fn(sender, instance, **kwargs)
@@ -65,21 +60,40 @@ def skip_if_suppressed(fn):
 
 def prepare_product_data(product_instance, required_fields_enum, status):
     """
-    Prepares the product data in a format to send to EventBridge,
-    keeping the correct keys and including the required fields.
+    Build the event payload for EventBridge, returning only the
+    fields required for this status and avoiding NoneType errors.
     """
-    normalised_status = STATUS_MAPPING.get(status, status)
-    update_instance = product_instance.update_ref
-    logger.info(f"update_instance: {update_instance}")
-    # -------------------- Draft ------------------------------------- #
+    normalised = STATUS_MAPPING.get(status, status)
+
+    # ARCHIVED / WITHDRAWN: minimal payloads
+    if status in ("archived", "withdrawn"):
+        return {
+            "publicationId": str(product_instance.product_code),
+            "status": normalised,
+        }
+
+    # Need update_ref for draft/live
+    update = getattr(product_instance, "update_ref", None)
+    if not update and status != "draft":
+        logger.error(
+            "No update_ref for product %s when preparing %s payload",
+            product_instance.product_code,
+            status,
+        )
+        return {
+            "publicationId": str(product_instance.product_code),
+            "status": normalised,
+        }
+
+    # DRAFT: full draft payload
     if status == "draft":
         return {
             "publicationId": str(product_instance.product_code),
             "title": product_instance.product_title,
-            "status": normalised_status,
+            "status": normalised,
             "maxOrder": [],
-            "uom": update_instance.unit_of_measure,
-            "runToZero": update_instance.run_to_zero,
+            "uom": getattr(update, "unit_of_measure", ""),
+            "runToZero": getattr(update, "run_to_zero", False),
             "costCentre": "",
             "localCode": "",
             "client": client.client_name.value,
@@ -91,36 +105,28 @@ def prepare_product_data(product_instance, required_fields_enum, status):
             "stockReferral": [],
         }
 
-    # Map the product data to the expected keys
-    product_data = {
+    # LIVE (and any other non‐draft) statuses
+    full = {
         "publicationId": str(product_instance.product_code),
         "title": product_instance.product_title,
-        "status": normalised_status,
+        "status": normalised,
         "maxOrder": [
-            {
-                "companyKeys": order_limit.full_external_keys,
-                "quantity": order_limit.order_limit,
-            }
-            for order_limit in product_instance.order_limits.all()
+            {"companyKeys": ol.full_external_keys, "quantity": ol.order_limit}
+            for ol in product_instance.order_limits.all()
         ],
-        "uom": update_instance.unit_of_measure,
-        "runToZero": update_instance.run_to_zero,
-        "costCentre": update_instance.cost_centre,
-        "localCode": update_instance.local_code,
+        "uom": getattr(update, "unit_of_measure", ""),
+        "runToZero": getattr(update, "run_to_zero", False),
+        "costCentre": getattr(update, "cost_centre", ""),
+        "localCode": getattr(update, "local_code", ""),
         "client": client.client_name.value,
         "invoicingClient": invoicing_client.invoice_client.value,
         "productGroup": product_group.product_group_name.value,
-        "minimumStockLevel": update_instance.minimum_stock_level,
+        "minimumStockLevel": getattr(update, "minimum_stock_level", 0),
         "relatedArticle": product_instance.file_url,
-        "stockOwner": [
-            update_instance.stock_owner_email_address,
-        ],
-        "stockReferral": [
-            update_instance.order_referral_email_address,
-        ],
+        "stockOwner": [getattr(update, "stock_owner_email_address", "")],
+        "stockReferral": [getattr(update, "order_referral_email_address", "")],
     }
 
-    # Mapping from required_fields_enum keys to product_data keys
     field_mapping = {
         "product_code": "publicationId",
         "product_title": "title",
@@ -139,74 +145,74 @@ def prepare_product_data(product_instance, required_fields_enum, status):
         "order_referral_email_address": "stockReferral",
     }
 
-    # Filter product_data to only include the required fields
-    filtered_product_data = {
-        field_mapping[field.value]: product_data[field_mapping[field.value]]
-        for field in required_fields_enum
-        if field.value in field_mapping and field_mapping[field.value] in product_data
+    filtered = {
+        field_mapping[f.value]: full[field_mapping[f.value]]
+        for f in required_fields_enum
+        if f.value in field_mapping and field_mapping[f.value] in full
     }
-    filtered_product_data["client"] = client.client_name.value
-    filtered_product_data["invoicingClient"] = invoicing_client.invoice_client.value
-    filtered_product_data["productGroup"] = product_group.product_group_name.value
 
-    return filtered_product_data
+    # Always ensure these metadata fields
+    filtered.update(
+        {
+            "client": client.client_name.value,
+            "invoicingClient": invoicing_client.invoice_client.value,
+            "productGroup": product_group.product_group_name.value,
+        }
+    )
+
+    return filtered
 
 
 def send_product_event(product_instance, event_type, detail_type, required_fields_enum):
-    """
-    Send the product event to EventBridge.
-    """
+    """Assemble and send (or simulate) an EventBridge event."""
     try:
-        # Prepare event detail
-        product_data = prepare_product_data(
-            product_instance, required_fields_enum, event_type
-        )
-        event_detail = {"event_type": event_type, "product_data": product_data}
-        logger.info("Product Data: %s", product_data)
+        data = prepare_product_data(product_instance, required_fields_enum, event_type)
+        payload = {"event_type": event_type, "product_data": data}
+        logger.info("Prepared %s payload: %s", event_type, data)
 
         if aws_access:
-            # Send event to EventBridge
-            response = eventbridge.put_events(
+            resp = eventbridge.put_events(
                 Entries=[
                     {
-                        "Source": str(config.get_hpub_event_bridge_source()),
-                        "DetailType": str(detail_type),
-                        "Detail": json.dumps(event_detail),
-                        "EventBusName": str(config.get_hpub_event_bridge_bus_name()),
+                        "Source": config.get_hpub_event_bridge_source(),
+                        "DetailType": detail_type,
+                        "Detail": json.dumps(payload),
+                        "EventBusName": config.get_hpub_event_bridge_bus_name(),
                     }
                 ]
             )
-            # Log response from EventBridge
             logger.info(
-                f"Product {product_instance.product_code} event sent to EventBridge: {response}"
+                "Sent %s event for %s: %s",
+                event_type,
+                product_instance.product_code,
+                resp,
             )
         else:
-            # Simulate a successful EventBridge response for testing
             logger.info(
-                f"Simulated EventBridge event for Product {product_instance.product_code}: {json.dumps(event_detail)}"
+                "Simulated %s event for %s: %s",
+                event_type,
+                product_instance.product_code,
+                payload,
             )
 
-    except Exception as e:
+    except Exception as exc:
         logger.error(
-            f"Error sending product {product_instance.product_code} event to EventBridge: {e}"
+            "Error sending %s event for %s: %s",
+            event_type,
+            product_instance.product_code,
+            exc,
         )
 
 
-# Signals for different product statuses
+# -- signals --
 
 
 @receiver(post_save, sender=Product)
 @skip_if_suppressed
-@check_required_event_fields([field.value for field in required_event_fields_draft])
+@check_required_event_fields([f.value for f in required_event_fields_draft])
 def send_product_draft_event(sender, instance, **kwargs):
-    """
-    Signal to send a draft product event if the status is 'draft'.
-    """
-    status = instance.status.lower()
-    logger.info("Checking status for draft event: %s", status)
-    if not isinstance(status, str) or not status.strip():
-        logger.warning(MISSING_STATUS_WARNING, instance.product_code)
-        return
+    status = (instance.status or "").lower()
+    logger.info("Draft hook: status=%r", status)
     if status == "draft":
         send_product_event(
             instance,
@@ -214,20 +220,16 @@ def send_product_draft_event(sender, instance, **kwargs):
             config.get_hpub_event_bridge_detail_type_product_draft(),
             required_event_fields_draft,
         )
+    else:
+        logger.warning(MISSING_STATUS_WARNING, instance.product_code)
 
 
 @receiver(post_save, sender=Product)
 @skip_if_suppressed
-@check_required_event_fields([field.value for field in required_event_fields_live])
+@check_required_event_fields([f.value for f in required_event_fields_live])
 def send_product_live_event(sender, instance, **kwargs):
-    """
-    Signal to send a live product event if the status is 'live'.
-    """
-    status = instance.status.lower()
-    logger.info("Checking status for live event: %s", status)
-    if not isinstance(status, str) or not status.strip():
-        logger.warning(MISSING_STATUS_WARNING, instance.product_code)
-        return
+    status = (instance.status or "").lower()
+    logger.info("Live hook: status=%r", status)
     if status == "live":
         send_product_event(
             instance,
@@ -235,20 +237,16 @@ def send_product_live_event(sender, instance, **kwargs):
             config.get_hpub_event_bridge_detail_type_product_live(),
             required_event_fields_live,
         )
+    else:
+        logger.warning(MISSING_STATUS_WARNING, instance.product_code)
 
 
 @receiver(post_save, sender=Product)
 @skip_if_suppressed
-@check_required_event_fields([field.value for field in required_event_fields_archived])
+@check_required_event_fields([f.value for f in required_event_fields_archived])
 def send_product_archived_event(sender, instance, **kwargs):
-    """
-    Signal to send an archived product event if the status is 'archived'.
-    """
-    status = instance.status.lower()
-    logger.info("Checking status for archived event: %s", status)
-    if not isinstance(status, str) or not status.strip():
-        logger.warning(MISSING_STATUS_WARNING, instance.product_code)
-        return
+    status = (instance.status or "").lower()
+    logger.info("Archived hook: status=%r", status)
     if status == "archived":
         send_product_event(
             instance,
@@ -256,20 +254,16 @@ def send_product_archived_event(sender, instance, **kwargs):
             config.get_hpub_event_bridge_detail_type_product_archive(),
             required_event_fields_archived,
         )
+    else:
+        logger.warning(MISSING_STATUS_WARNING, instance.product_code)
 
 
 @receiver(post_save, sender=Product)
 @skip_if_suppressed
-@check_required_event_fields([field.value for field in required_event_fields_withdrawn])
+@check_required_event_fields([f.value for f in required_event_fields_withdrawn])
 def send_product_withdrawn_event(sender, instance, **kwargs):
-    """
-    Signal to send a withdrawn product event if the status is 'withdrawn'.
-    """
-    status = instance.status.lower()
-    logger.info("Checking status for withdrawn event: %s", status)
-    if not isinstance(status, str) or not status.strip():
-        logger.warning(MISSING_STATUS_WARNING, instance.product_code)
-        return
+    status = (instance.status or "").lower()
+    logger.info("Withdrawn hook: status=%r", status)
     if status == "withdrawn":
         send_product_event(
             instance,
@@ -277,3 +271,5 @@ def send_product_withdrawn_event(sender, instance, **kwargs):
             config.get_hpub_event_bridge_detail_type_product_withdrawn(),
             required_event_fields_withdrawn,
         )
+    else:
+        logger.warning(MISSING_STATUS_WARNING, instance.product_code)

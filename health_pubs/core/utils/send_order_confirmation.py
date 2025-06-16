@@ -1,7 +1,7 @@
 import logging
 import os
 import sys
-
+from datetime import datetime, date
 import requests
 from configs.get_secret_config import Config
 from notifications_python_client.notifications import NotificationsAPIClient
@@ -48,8 +48,27 @@ def send_notification(
         # Create an instance of the NotificationsAPIClient
         notifications_client = NotificationsAPIClient(api_key)
 
+        # Parse order_date if it's a string
+        if isinstance(order_date, str):
+            try:
+                # Assuming ISO 8601 format, e.g. "2025-06-14" or with time
+                dt = datetime.fromisoformat(order_date)
+            except ValueError:
+                logger.warning(
+                    "order_date string not ISO‐formatted, trying common formats",
+                    exc_info=True,
+                )
+                # Fallback: try common date-only format
+                dt = datetime.strptime(order_date, "%Y-%m-%d")
+        elif isinstance(order_date, date):
+            # Convert date to datetime for strftime
+            dt = datetime.combine(order_date, datetime.min.time())
+        else:
+            # Already a datetime
+            dt = order_date
+
         # logging.info("items_table", items_table)
-        formatted_order_date = order_date.strftime("%d %B %Y")
+        formatted_order_date = dt.strftime("%d %B %Y")
 
         # Prepare the data payload for the notification
         data = {

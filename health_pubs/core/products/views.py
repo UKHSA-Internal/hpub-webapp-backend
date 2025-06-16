@@ -74,10 +74,6 @@ from rest_framework.status import (
 from rest_framework.views import APIView
 from wagtail.models import Page
 
-from .enums import (
-    required_event_fields_archived,
-)
-from .signals import send_product_event
 from .models import Product, ProductUpdate
 from .serializers import (
     ProductSearchSerializer,
@@ -2020,35 +2016,30 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return product_key, version_number
 
     def mark_previous_versions_archived(self, existing_product, language_id):
-        if existing_product:
-            qs = Product.objects.filter(
+        if not existing_product:
+            logger.info("No existing product found; no versions archived.")
+            return
+
+        # 1) Grab the instances to archive
+        to_archive = list(
+            Product.objects.filter(
                 product_key=existing_product.product_key,
                 language_id=language_id,
                 is_latest=True,
             )
-            ids = list(qs.values_list("pk", flat=True))
+        )
 
-            # 1 SQL query
-            qs.update(is_latest=False, status="archived", updated_at=timezone.now())
+        # 2) For each one, flip flags and .save() so your @post_save fires
+        for prod in to_archive:
+            prod.is_latest = False
+            prod.status = "archived"
+            prod.updated_at = timezone.now()
+            prod.save()  # ← triggers your send_product_archived_event decorator
 
-            # then N lightweight loops to send events
-            for pk in ids:
-                prev = Product(
-                    pk=pk
-                )  # avoid extra SELECT if you only need PK/status/etc
-                prev.status = "archived"
-                send_product_event(
-                    prev,
-                    "archived",
-                    config.get_hpub_event_bridge_detail_type_product_archive(),
-                    required_event_fields_archived,
-                )
-            logger.info(
-                "Previous versions archived for product_key: %s",
-                existing_product.product_key,
-            )
-        else:
-            logger.info("No existing product found; no versions archived.")
+        logger.info(
+            "Previous versions archived for product_key: %s",
+            existing_product.product_key,
+        )
 
     def generate_unique_product_code(
         self, program_id, product_key, iso_language_code, version_number

@@ -26,7 +26,7 @@ def generate_order_confirmation(order_instance):
 
     # Build the ordered products list in a table-like format
     items_table = "\n".join(
-        f"{idx}. {item.product_ref.title}(Quantity - {item.quantity})"
+        f"{idx}. {item.product_ref.title} (Quantity - {item.quantity})"
         for idx, item in enumerate(items, start=1)
     )
 

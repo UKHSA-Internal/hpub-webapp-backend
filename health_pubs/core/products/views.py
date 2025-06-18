@@ -7,6 +7,9 @@ from typing import Optional, Union
 from urllib.parse import unquote
 from django.utils import timezone
 from datetime import timedelta
+import time
+from django.db import IntegrityError
+from psycopg2 import errors as pg_errors
 
 import pandas as pd
 from core.audiences.models import Audience
@@ -539,6 +542,10 @@ class ProductUtilsMixin:
     def clean_row_data(self, row):
         row["run_to_zero"] = self._clean_run_to_zero(row.get("run_to_zero"))
         row = self._clean_invalid_strings(row)
+        # normalize the available_until_choice field
+        row["available_until_choice"] = self._clean_available_until_choice(
+            row.get("available_until_choice")
+        )
         for key in ("local_code", "cost_centre"):  # remove numeric fallback
             val = row.get(key)
             if isinstance(val, (int, float)) or (
@@ -558,6 +565,15 @@ class ProductUtilsMixin:
         ]:
             row[key] = self._clean_numeric_field(row.get(key))
         return row
+
+    def _clean_available_until_choice(self, val):
+        """
+        Map the human-readable Excel choice "No end date" to the backend key "no_end_date".
+        Leave any other value untouched.
+        """
+        if isinstance(val, str) and val.strip().lower() == "no end date":
+            return "no_end_date"
+        return val
 
     def _clean_numeric_field(self, value):
         if not pd.notna(value):
@@ -720,29 +736,61 @@ class ProductUtilsMixin:
         )
 
     def create_order_limits(self, product, row):
+        """
+        Create OrderLimitPage entries for any orgs explicitly passed in the sheet,
+        then fill in the remaining categories with our defaults.
+        """
+        DEFAULT_LIMITS = {
+            "Private": 5,
+            "Private Company": 5,
+            "Private Health": 5,
+            "Education": 100,
+            "Government": 100,
+            "Local Government": 500,
+            "Social Care": 500,
+            "Stake Holder": 100,
+            "Voluntary Service": 100,
+            "NHS": 500,
+        }
+
         saved = []
-        raw = row.get("organization_names")
-        limit = row.get("order_limit_value")
-        if not raw or pd.isna(limit):
-            return saved
-        for name in str(raw).split(","):
-            nm = name.strip()
-            if not nm:
-                continue
+
+        # Parse any explicitly supplied limits from the sheet
+        supplied = {}
+        raw_names = row.get("organization_names")
+        sheet_limit = row.get("order_limit_value")
+        if raw_names and pd.notna(sheet_limit):
+            for name in str(raw_names).split(","):
+                nm = name.strip()
+                if nm:
+                    supplied[nm] = int(sheet_limit)
+
+        # Helper to create one OrderLimitPage
+        def _make_limit(nm, lim_val):
             org = Organization.objects.filter(name=nm).first()
             if not org:
                 logger.warning(f"Org '{nm}' not found, skipping limit")
-                continue
+                return
             ol = OrderLimitPage(
                 title=f"Order limit for {nm}",
                 slug=f"ol-{org.id}-{uuid.uuid4().hex[:6]}",
                 order_limit_id=str(uuid.uuid4()),
-                order_limit=int(limit),
+                order_limit=lim_val,
                 product_ref=product,
                 organization_ref=org,
             )
             self.safe_add_child(product, ol)
             saved.append(nm)
+
+        # 1) Create pages for any limits explicitly supplied
+        for nm, lim in supplied.items():
+            _make_limit(nm, lim)
+
+        # 2) Fill in the rest from our DEFAULT_LIMITS
+        for nm, default_lim in DEFAULT_LIMITS.items():
+            if nm not in supplied:
+                _make_limit(nm, default_lim)
+
         return saved
 
 
@@ -1791,32 +1839,62 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
             update_data["minimum_stock_level"] = 0
         return update_data
 
+    def _is_path_collision(self, exc):
+        cause = getattr(exc, "__cause__", None)
+        return (
+            isinstance(cause, pg_errors.UniqueViolation)
+            and getattr(cause.diag, "constraint_name", "")
+            == "wagtailcore_page_path_key"
+        )
+
     def get_or_create_product_update(
         self, product: Product, update_data: dict
     ) -> ProductUpdate:
-        product_update = product.update_ref
-        logger.info(
-            "Checking for existing ProductUpdate instance: %s",
-            product_update,
-        )
+        """
+        Attempts up to 3 times to lock the parent, then create or update the ProductUpdate.
+        Retries on path-key collisions.
+        """
+        for attempt in range(3):
+            try:
+                with transaction.atomic():
+                    parent_page = product.get_parent()
+                    # lock the parent so no two processes allocate the same child path
+                    Page.objects.select_for_update().get(pk=parent_page.pk)
 
-        if not product_update:
-            logger.info("Creating new ProductUpdate instance.")
-            parent_page = product.get_parent()
-            product_update = ProductUpdate(**update_data)
-            parent_page.add_child(instance=product_update)
-            product_update.save_revision().publish()
-            Product.objects.filter(pk=product.pk).update(update_ref=product_update)
-            product.refresh_from_db()
-            product_update = product.update_ref
-        else:
-            logger.info("Updating existing ProductUpdate instance.")
-            for key, value in update_data.items():
-                setattr(product_update, key, value)
-                logger.debug("Set %s = %s on ProductUpdate", key, value)
-            product_update.save()
+                    if product.update_ref:
+                        # existing → just update fields
+                        product_update = product.update_ref
+                        for key, val in update_data.items():
+                            setattr(product_update, key, val)
+                        product_update.save()
+                    else:
+                        # new → create under locked parent
+                        product_update = ProductUpdate(**update_data)
+                        parent_page.add_child(instance=product_update)
+                        product_update.save_revision().publish()
+                        # link it back onto the product
+                        Product.objects.filter(pk=product.pk).update(
+                            update_ref=product_update
+                        )
+                        product.refresh_from_db()
+                        product_update = product.update_ref
 
-        return product_update
+                    return product_update
+
+            except IntegrityError as exc:
+                if self._is_path_collision(exc) and attempt < 2:
+                    # exponential backoff
+                    time.sleep(0.1 * (2**attempt))
+                    continue
+                # non-collision or maxed-out → bubble up
+                raise
+
+        # fallback: if someone else created it meantime, fetch it
+        existing = Product.objects.get(pk=product.pk).update_ref
+        if existing:
+            return existing
+
+        raise RuntimeError("Could not create or find ProductUpdate after retries")
 
     def update_order_limits(self, product: Product, order_limits: list):
         OrderLimitPage.objects.filter(product_ref=product).delete()
@@ -2083,44 +2161,66 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
                 )
         return None
 
+    def _is_path_collision(self, exc):
+        cause = getattr(exc, "__cause__", None)
+        return (
+            isinstance(cause, pg_errors.UniqueViolation)
+            and getattr(cause.diag, "constraint_name", "")
+            == "wagtailcore_page_path_key"
+        )
+
     def create_product_instance(
         self, data, program, parent_page, user_instance, request
     ):
-        serializer = ProductSerializer(data=data, context={"request": request})
-        if serializer.is_valid():
+        """
+        Attempts up to 3 times to lock the parent and then add the new Product.
+        Retries on path-key collisions.
+        """
+        for attempt in range(3):
             try:
-                product_instance = Product(
-                    title=data["title"],
-                    slug=data["slug"],
-                    product_id=data["product_id"],
-                    product_title=data["title"],
-                    language_id=data["language_id"],
-                    language_name=data["language_name"],
-                    file_url=data["file_url"],
-                    is_latest=True,
-                    product_key=data["product_key"],
-                    iso_language_code=data["iso_language_code"],
-                    product_code=data["product_code"],
-                    version_number=data["version_number"],
-                    user_ref=user_instance,
-                    program_id=program,
-                    program_name=data["program_name"],
-                    tag=data["tag"],
-                    publish_date=data.get("publish_date"),
-                    suppress_event=False,
+                with transaction.atomic():
+                    # lock the ‘products’ parent page
+                    Page.objects.select_for_update().get(pk=parent_page.pk)
+
+                    # build the Product instance
+                    product_instance = Product(
+                        title=data["title"],
+                        slug=data["slug"],
+                        product_id=data["product_id"],
+                        product_title=data["title"],
+                        language_id=data["language_id"],
+                        language_name=data["language_name"],
+                        file_url=data["file_url"],
+                        is_latest=True,
+                        product_key=data["product_key"],
+                        iso_language_code=data["iso_language_code"],
+                        product_code=data["product_code"],
+                        version_number=data["version_number"],
+                        user_ref=user_instance,
+                        program_id=program,
+                        program_name=data["program_name"],
+                        tag=data["tag"],
+                        publish_date=data.get("publish_date"),
+                        suppress_event=False,
+                    )
+
+                    # add_child allocates path/depth, then saves
+                    parent_page.add_child(instance=product_instance)
+                    product_instance.save()
+                    product_instance.refresh_from_db()
+                    return product_instance
+
+            except IntegrityError as exc:
+                if self._is_path_collision(exc) and attempt < 2:
+                    time.sleep(0.1 * (2**attempt))
+                    continue
+                # any other error or max attempts → log and give up
+                logger.exception(
+                    "Error creating product instance on attempt %d", attempt
                 )
-                parent_page.add_child(instance=product_instance)
-                logger.info("Product instance created successfully.")
-                return product_instance
-            except Exception as ex:
-                logger.error("Error creating product instance: %s", str(ex))
                 return None
-        else:
-            logger.error("Serializer errors: %s", serializer.errors)
-            handle_error(
-                ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
-            )
-            return None
+
+        return None
 
 
 class ProductListMixin:

@@ -138,8 +138,12 @@ MIDDLEWARE = [
     "allauth.account.middleware.AccountMiddleware",
 ]
 
-
+ELASTICSEARCH_HOSTS = [
+    {"host": "localhost", "port": 9200, "scheme": "http"},
+]
 REST_FRAMEWORK = {
+    "PAGE_SIZE": 20,
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "core.utils.custom_token_authentication.CustomTokenAuthentication",
         # "rest_framework.authentication.SessionAuthentication",

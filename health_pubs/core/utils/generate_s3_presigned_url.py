@@ -8,6 +8,9 @@ from botocore.exceptions import ClientError, NoCredentialsError, PartialCredenti
 from django.core.cache import cache
 from django.conf import settings
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(
@@ -90,55 +93,66 @@ def generate_presigned_urls(
     urls: List[str],
     expiration: int = DEFAULT_PRESIGNED_URL_TTL,
     force_download: bool = True,
+    max_workers: int = 5,
 ) -> Dict[str, str]:
     """
-    For each S3 URL in `urls`, return a presigned download URL.
-    Caches each presigned URL under a key derived from a hash of the original URL.
+    Fast batch presigning using:
+      1) cache.get_many() to load existing URLs
+      2) ThreadPoolExecutor to sign missing URLs in parallel
+      3) cache.set_many() to store new entries
     """
-    presigned_map: Dict[str, str] = {}
+    # 1) Compute cache keys for all URLs
+    key_map = {
+        url: _cache_key_for(url, expiration, inline=not force_download) for url in urls
+    }
+    all_cache_keys = list(key_map.values())
 
-    for original_url in urls:
-        cache_key = _cache_key_for(original_url, expiration, inline=not force_download)
-        cached = cache.get(cache_key)
-        if cached:
-            presigned_map[original_url] = cached
-            continue
+    # 2) Bulk‐fetch from cache
+    existing = cache.get_many(all_cache_keys)
 
+    # 3) Build initial presigned map from cache hits
+    presigned: Dict[str, str] = {
+        url: existing[key_map[url]] for url in urls if key_map[url] in existing
+    }
+
+    # 4) Identify URLs still needing signing
+    to_sign = [url for url in urls if url not in presigned]
+
+    # Helper to sign a single URL
+    def _sign_one(original_url: str) -> Tuple[str, Optional[str]]:
         bucket, key = _parse_s3_url(original_url)
         if not bucket or not key:
-            # skip invalid URLs
-            continue
+            return original_url, None
 
         params = {"Bucket": bucket, "Key": key}
         if force_download:
-            lower_key = key.lower()
-            for ext in _FORCE_DOWNLOAD_EXTENSIONS:
-                if lower_key.endswith(ext):
-                    filename = key.rsplit("/", 1)[-1]
-                    params[
-                        "ResponseContentDisposition"
-                    ] = f'attachment; filename="{filename}"'
-                    break
+            filename = key.rsplit("/", 1)[-1].lower()
+            if any(filename.endswith(ext) for ext in _FORCE_DOWNLOAD_EXTENSIONS):
+                params[
+                    "ResponseContentDisposition"
+                ] = f'attachment; filename="{filename}"'
 
-        try:
-            signed_url = s3_client.generate_presigned_url(
-                ClientMethod="get_object",
-                Params=params,
-                ExpiresIn=expiration,
-            )
-            presigned_map[original_url] = signed_url
-            cache.set(cache_key, signed_url, timeout=expiration)
-        except (NoCredentialsError, PartialCredentialsError) as cred_err:
-            logger.error("Credentials error for %s: %s", original_url, cred_err)
-        except ClientError as client_err:
-            code = client_err.response.get("Error", {}).get("Code", "")
-            logger.error(
-                "S3 ClientError (%s) for %s: %s", code, original_url, client_err
-            )
-        except Exception as e:
-            logger.error("Unexpected error for %s: %s", original_url, e)
+        signed_url = s3_client.generate_presigned_url(
+            ClientMethod="get_object", Params=params, ExpiresIn=expiration
+        )
+        return original_url, signed_url
 
-    return presigned_map
+    # 5) Parallel signing of missing URLs
+    new_cache_entries: Dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_sign_one, url): url for url in to_sign}
+        for future in as_completed(futures):
+            orig_url, signed = future.result()
+            if signed:
+                presigned[orig_url] = signed
+                cache_key = key_map[orig_url]
+                new_cache_entries[cache_key] = signed
+
+    # 6) Bulk‐store new presigned URLs
+    if new_cache_entries:
+        cache.set_many(new_cache_entries, timeout=expiration)
+
+    return presigned
 
 
 def generate_inline_presigned_urls(

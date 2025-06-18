@@ -539,6 +539,10 @@ class ProductUtilsMixin:
     def clean_row_data(self, row):
         row["run_to_zero"] = self._clean_run_to_zero(row.get("run_to_zero"))
         row = self._clean_invalid_strings(row)
+        # normalize the available_until_choice field
+        row["available_until_choice"] = self._clean_available_until_choice(
+            row.get("available_until_choice")
+        )
         for key in ("local_code", "cost_centre"):  # remove numeric fallback
             val = row.get(key)
             if isinstance(val, (int, float)) or (
@@ -558,6 +562,15 @@ class ProductUtilsMixin:
         ]:
             row[key] = self._clean_numeric_field(row.get(key))
         return row
+
+    def _clean_available_until_choice(self, val):
+        """
+        Map the human-readable Excel choice "No end date" to the backend key "no_end_date".
+        Leave any other value untouched.
+        """
+        if isinstance(val, str) and val.strip().lower() == "no end date":
+            return "no_end_date"
+        return val
 
     def _clean_numeric_field(self, value):
         if not pd.notna(value):

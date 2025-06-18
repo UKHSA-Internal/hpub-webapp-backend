@@ -733,29 +733,61 @@ class ProductUtilsMixin:
         )
 
     def create_order_limits(self, product, row):
+        """
+        Create OrderLimitPage entries for any orgs explicitly passed in the sheet,
+        then fill in the remaining categories with our defaults.
+        """
+        DEFAULT_LIMITS = {
+            "Private": 5,
+            "Private Company": 5,
+            "Private Health": 5,
+            "Education": 100,
+            "Government": 100,
+            "Local Government": 500,
+            "Social Care": 500,
+            "Stake Holder": 100,
+            "Voluntary Service": 100,
+            "NHS": 500,
+        }
+
         saved = []
-        raw = row.get("organization_names")
-        limit = row.get("order_limit_value")
-        if not raw or pd.isna(limit):
-            return saved
-        for name in str(raw).split(","):
-            nm = name.strip()
-            if not nm:
-                continue
+
+        # Parse any explicitly supplied limits from the sheet
+        supplied = {}
+        raw_names = row.get("organization_names")
+        sheet_limit = row.get("order_limit_value")
+        if raw_names and pd.notna(sheet_limit):
+            for name in str(raw_names).split(","):
+                nm = name.strip()
+                if nm:
+                    supplied[nm] = int(sheet_limit)
+
+        # Helper to create one OrderLimitPage
+        def _make_limit(nm, lim_val):
             org = Organization.objects.filter(name=nm).first()
             if not org:
                 logger.warning(f"Org '{nm}' not found, skipping limit")
-                continue
+                return
             ol = OrderLimitPage(
                 title=f"Order limit for {nm}",
                 slug=f"ol-{org.id}-{uuid.uuid4().hex[:6]}",
                 order_limit_id=str(uuid.uuid4()),
-                order_limit=int(limit),
+                order_limit=lim_val,
                 product_ref=product,
                 organization_ref=org,
             )
             self.safe_add_child(product, ol)
             saved.append(nm)
+
+        # 1) Create pages for any limits explicitly supplied
+        for nm, lim in supplied.items():
+            _make_limit(nm, lim)
+
+        # 2) Fill in the rest from our DEFAULT_LIMITS
+        for nm, default_lim in DEFAULT_LIMITS.items():
+            if nm not in supplied:
+                _make_limit(nm, default_lim)
+
         return saved
 
 

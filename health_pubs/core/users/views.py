@@ -511,6 +511,50 @@ class UserLoginView(APIView):
         return response
 
 
+class AuthStatusView(APIView):
+    """
+    Returns the current authentication status and user metadata.
+    """
+
+    authentication_classes = [CustomTokenAuthentication, SessionAuthentication]
+    permission_classes = [AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return Response(
+                {
+                    "isAuthenticated": False,
+                    "userRole": "guest",
+                    "organizationName": None,
+                    "setupComplete": False,
+                }
+            )
+
+        # Determine the user's role
+        role = "user"
+        if hasattr(user, "role_ref") and user.role_ref:
+            role = user.role_ref.name
+
+        # Determine the organization name
+        org_name = None
+        if hasattr(user, "organization_ref") and user.organization_ref:
+            org_name = user.organization_ref.name
+
+        # Define setupComplete however makes sense in your domain;
+        # e.g. true if they have an organization, or a flag on the user model.
+        setup_complete = bool(org_name)
+
+        return Response(
+            {
+                "isAuthenticated": True,
+                "userRole": role,
+                "organizationName": org_name,
+                "setupComplete": setup_complete,
+            }
+        )
+
+
 class UpdateUserView(APIView):
     permission_classes = [AllowAny]
 

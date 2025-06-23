@@ -1,4 +1,3 @@
-from datetime import timedelta
 import uuid
 
 import jwt
@@ -56,7 +55,7 @@ def generate_short_term_token(user_id, email, role_name):
         "role": role_name,
         "type": "access",
         "jti": str(uuid.uuid4()),
-        "exp": timezone.now() + timedelta(minutes=30),
+        "exp": timezone.now() + settings.ACCESS_TOKEN_LIFETIME,
         "iat": timezone.now(),
     }
     return jwt.encode(payload, settings.PRIVATE_KEY, algorithm="RS256")
@@ -70,7 +69,7 @@ def generate_long_term_token(user_id, email, role_name):
         "role": role_name,
         "type": "refresh",
         "jti": str(uuid.uuid4()),
-        "exp": timezone.now() + timedelta(days=1),
+        "exp": timezone.now() + settings.REFRESH_TOKEN_LIFETIME,
         "iat": timezone.now(),
     }
     return jwt.encode(payload, settings.PRIVATE_KEY, algorithm="RS256")

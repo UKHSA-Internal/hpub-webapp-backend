@@ -2702,7 +2702,7 @@ class IncompleteProductsView(View):
         # Query products that are in Draft status and have a publish_date within the next 7 days
         products = Product.objects.filter(
             status="draft",
-            publish_date__gte=current_date,
+            publish_date__gt=current_date,
             publish_date__lte=target_date,
         )
         logger.info(

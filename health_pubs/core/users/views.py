@@ -420,8 +420,8 @@ class UserSignUpView(APIView):
             key="long_term_token",
             value=long_term_token,
             httponly=True,
-            secure=(not settings.DEBUG),
-            samesite="Lax",  # or "Strict"/"None" based on frontend-backend setup
+            secure=not settings.DEBUG,
+            samesite="None",  # or "Strict"/"None" based on frontend-backend setup
             max_age=86400,  # 1 day
         )
         return response
@@ -503,12 +503,56 @@ class UserLoginView(APIView):
             key="long_term_token",
             value=long_term_token,
             httponly=True,
-            secure=(not settings.DEBUG),  # Only send over HTTPS.
-            samesite="Lax",  # Adjust as needed ("Strict" or "None")
+            secure=not settings.DEBUG,  # Only send over HTTPS.
+            samesite="None",  # Adjust as needed ("Strict" or "None")
             max_age=86400,  # Lifetime in seconds (here, 1 day)
         )
 
         return response
+
+
+class AuthStatusView(APIView):
+    """
+    Returns the current authentication status and user metadata.
+    """
+
+    authentication_classes = [CustomTokenAuthentication, SessionAuthentication]
+    permission_classes = [AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return Response(
+                {
+                    "isAuthenticated": False,
+                    "userRole": "guest",
+                    "organizationName": None,
+                    "setupComplete": False,
+                }
+            )
+
+        # Determine the user's role
+        role = "user"
+        if hasattr(user, "role_ref") and user.role_ref:
+            role = user.role_ref.name
+
+        # Determine the organization name
+        org_name = None
+        if hasattr(user, "organization_ref") and user.organization_ref:
+            org_name = user.organization_ref.name
+
+        # Define setupComplete however makes sense in your domain;
+        # e.g. true if they have an organization, or a flag on the user model.
+        setup_complete = bool(org_name)
+
+        return Response(
+            {
+                "isAuthenticated": True,
+                "userRole": role,
+                "organizationName": org_name,
+                "setupComplete": setup_complete,
+            }
+        )
 
 
 class UpdateUserView(APIView):
@@ -637,8 +681,8 @@ class TokenRefresh(APIView):
             key="long_term_token",
             value=refresh_token,  # Use the new refresh token if applicable
             httponly=True,
-            secure=(not settings.DEBUG),  # Set to True if using HTTPS
-            samesite="Lax",  # Adjust samesite if necessary (or use "Lax" or "Strict")
+            secure=not settings.DEBUG,  # Set to True if using HTTPS
+            samesite="None",  # Adjust samesite if necessary (or use "Lax" or "Strict")
             max_age=86400,  # 1 day (or adjust as needed)
         )
 

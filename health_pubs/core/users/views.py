@@ -420,8 +420,8 @@ class UserSignUpView(APIView):
             key="long_term_token",
             value=long_term_token,
             httponly=True,
-            secure=(not settings.DEBUG),
-            samesite="Lax",  # or "Strict"/"None" based on frontend-backend setup
+            secure=not settings.DEBUG,
+            samesite="None",  # or "Strict"/"None" based on frontend-backend setup
             max_age=86400,  # 1 day
         )
         return response
@@ -503,8 +503,8 @@ class UserLoginView(APIView):
             key="long_term_token",
             value=long_term_token,
             httponly=True,
-            secure=(not settings.DEBUG),  # Only send over HTTPS.
-            samesite="Lax",  # Adjust as needed ("Strict" or "None")
+            secure=not settings.DEBUG,  # Only send over HTTPS.
+            samesite="None",  # Adjust as needed ("Strict" or "None")
             max_age=86400,  # Lifetime in seconds (here, 1 day)
         )
 
@@ -681,8 +681,8 @@ class TokenRefresh(APIView):
             key="long_term_token",
             value=refresh_token,  # Use the new refresh token if applicable
             httponly=True,
-            secure=(not settings.DEBUG),  # Set to True if using HTTPS
-            samesite="Lax",  # Adjust samesite if necessary (or use "Lax" or "Strict")
+            secure=not settings.DEBUG,  # Set to True if using HTTPS
+            samesite="None",  # Adjust samesite if necessary (or use "Lax" or "Strict")
             max_age=86400,  # 1 day (or adjust as needed)
         )
 

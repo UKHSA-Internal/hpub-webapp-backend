@@ -1,3 +1,5 @@
+# core/utils/custom_token_authentication.py
+
 import logging
 import jwt
 
@@ -15,51 +17,43 @@ logger = logging.getLogger(__name__)
 
 class CustomTokenAuthentication(BaseAuthentication):
     """
-    Custom token authentication that supports multiple token types.
+    Supports:
+      1) Azure B2C tokens (with an 'iss' claim)
+      2) Custom 'access' and 'refresh' tokens (with a 'type' claim)
 
-    The class first attempts to retrieve the token from the Authorization header.
-    If no header token is found, it looks for a token in a cookie (for example, "long_term_token").
-    The token is decoded without verifying its signature to inspect claims.
-    Depending on the presence of an "iss" claim or the custom "type" claim, the token is validated
-    with the appropriate helper.
+    Looks first in Authorization header, then in 'long_term_token' cookie.
     """
 
-    def __init__(self):
-        self._authentication_attempted = False
-
     def authenticate(self, request):
-        # 1) Ensure single attempt
-        if self._authentication_attempted:
-            logger.debug("Authentication already attempted")
+        # Prevent double-attempt
+        if getattr(self, "_attempted", False):
+            logger.debug("Already attempted authentication")
             return None
-        self._authentication_attempted = True
+        self._attempted = True
 
-        logger.debug("Starting token authentication")
-
-        # 2) Retrieve token
-        token = self._get_token_from_request(request)
+        token = self._get_token(request)
         if not token:
-            logger.info("No token provided")
+            logger.info("No token provided; skipping")
             return None
 
-        # 3) Decode unverified to inspect type/issuer
+        # Peek inside without verifying signature
         try:
             unverified = jwt.decode(
                 token, options={"verify_signature": False, "verify_aud": False}
             )
         except jwt.ExpiredSignatureError:
             logger.warning("Token expired")
-            raise AuthenticationFailed("Token has expired")
+            raise AuthenticationFailed("Token expired")
         except jwt.DecodeError:
-            logger.warning("Token decode error")
-            raise AuthenticationFailed("Invalid token format")
+            logger.warning("Malformed token")
+            raise AuthenticationFailed("Invalid token")
         except Exception:
-            logger.error("Unexpected error decoding token")
+            logger.exception("Unexpected decode error")
             return None
 
-        # 4) Azure B2C token
+        # Azure B2C flow
         if "iss" in unverified:
-            logger.debug("Azure B2C token detected")
+            logger.debug("Detected Azure B2C token")
             from core.users.views import (
                 validate_azure_b2c_token,
             )  # avoid circular import
@@ -68,64 +62,52 @@ class CustomTokenAuthentication(BaseAuthentication):
                 payload = validate_azure_b2c_token(token)
             except Exception:
                 logger.warning("Azure B2C validation failed")
-                raise AuthenticationFailed("Invalid Azure B2C token")
+                raise AuthenticationFailed("Invalid Azure token")
 
-            email = payload.get("email_address")
-            user = User.objects.filter(email=email).first()
+            email = payload.get("email_address") or payload.get("email")
+            user = User.objects.filter(email__iexact=email).first()
             if not user:
-                logger.info("Azure B2C user not found")
+                logger.info("Azure B2C user not found: %s", email)
                 return None
 
-            logger.info("Azure B2C user authenticated")
+            logger.info("Authenticated Azure B2C user %s", email)
             return (user, None)
 
-        # 5) Custom access / refresh tokens
+        # Custom tokens
         token_type = unverified.get("type")
         if token_type not in ("access", "refresh"):
-            logger.info("Unsupported token type")
+            logger.info("Unknown token type: %s", token_type)
             return None
 
         try:
             if token_type == "access":
-                payload = validate_token(token, token_type=token_type)
-            else:  # refresh
-                payload = validate_token_refresh(token, token_type=token_type)
+                payload = validate_token(token, token_type="access")
+            else:
+                payload = validate_token_refresh(token, token_type="refresh")
         except jwt.ExpiredSignatureError:
-            logger.warning("%s token expired", token_type.capitalize())
-            raise AuthenticationFailed("Token has expired")
+            logger.warning("%s token expired", token_type)
+            raise AuthenticationFailed("Token expired")
         except Exception:
-            logger.warning("%s token validation failed", token_type.capitalize())
+            logger.warning("%s token invalid", token_type)
             raise AuthenticationFailed("Invalid token")
 
-        # 6) Lookup user by ID
         user_id = payload.get("user_id")
         user = (
             User.objects.filter(user_id=user_id).first()
             or User.objects.filter(pk=user_id).first()
         )
         if not user:
-            logger.info("User not found for provided token")
+            logger.info("No user for token user_id=%s", user_id)
             return None
 
-        logger.info("User authenticated via %s token", token_type)
+        logger.info("Authenticated user %s via %s token", user.email, token_type)
         return (user, None)
 
-    def _get_token_from_request(self, request):
-        """
-        Attempts to retrieve a token from the Authorization header first,
-        and falls back to the "long_term_token" cookie.
-        """
-        auth_header = request.headers.get("Authorization")
-        if auth_header:
-            parts = auth_header.split(" ")
-            if len(parts) == 2:
-                logger.info("Token found in Authorization header.")
-                return parts[1]
-            else:
-                logger.error("Authorization header is improperly formatted.")
-
-        # Fallback: try to retrieve token from cookies.
-        token = request.COOKIES.get("long_term_token")
-        if token:
-            logger.info("Token found in cookies.")
-        return token
+    def _get_token(self, request):
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            return auth.split()[1]
+        cookie = request.COOKIES.get("long_term_token")
+        if cookie:
+            logger.debug("Using long_term_token from cookie")
+        return cookie

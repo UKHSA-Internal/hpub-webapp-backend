@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from datetime import timedelta
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -24,8 +25,8 @@ private_key = config.get_rsa_private_key()
 HPUB_FRONT_END_URL = config.get_hpub_base_api_url()
 AWS_REGION = "eu-west-2"
 AWS_BUCKET_NAME = config.get_hpub_s3_bucket_name()
-
-
+ACCESS_TOKEN_LIFETIME = timedelta(minutes=30)
+REFRESH_TOKEN_LIFETIME = timedelta(days=1)
 # Quick-start development settings - unsuitable for production
 
 SECRET_KEY = DJANGO_SECRET

@@ -95,9 +95,18 @@ class OrderViewSet(viewsets.ModelViewSet):
                 # skip unknown codes
                 continue
 
-            limit_page = OrderLimitPage.objects.filter(product_ref=product).first()
+            user_full_key = user.establishment_ref.full_external_key
+            user_org = user.organization_ref
+
+            limit_page = OrderLimitPage.objects.filter(
+                product_ref=product, full_external_keys__contains=[user_full_key]
+            ).first()
+
+            # Fallback: match by organization if no establishment-level limit
             if not limit_page:
-                continue
+                limit_page = OrderLimitPage.objects.filter(
+                    product_ref=product, organization_ref=user_org
+                ).first()
 
             limit = limit_page.order_limit
 
@@ -338,7 +347,17 @@ class OrderViewSet(viewsets.ModelViewSet):
             code = item["product_code"]
             qty = item["quantity"]
             product = Product.objects.get(product_code=code)
-            limit_page = OrderLimitPage.objects.filter(product_ref=product).first()
+            user_full_key = user_instance.establishment_ref.full_external_key
+            user_org = user_instance.organization_ref
+
+            limit_page = OrderLimitPage.objects.filter(
+                product_ref=product, full_external_keys__contains=[user_full_key]
+            ).first()
+
+            if not limit_page:
+                limit_page = OrderLimitPage.objects.filter(
+                    product_ref=product, organization_ref=user_org
+                ).first()
 
             if not limit_page:
                 allowed_items.append(item)

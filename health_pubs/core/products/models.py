@@ -16,7 +16,6 @@ from core.users.models import User
 from core.vaccinations.models import Vaccination
 from core.where_to_use.models import WhereToUse
 from django.db import models
-from django.utils.text import slugify
 from wagtail.admin.panels import FieldPanel
 from wagtail.fields import RichTextField
 from wagtail.models import Page
@@ -336,12 +335,11 @@ class Product(Page):
             if suffix:
                 lang_name = f"{lang_name}: {suffix}"
 
-        slug = slugify(title)
-        slug_encoded = quote(slug)
-        code_encoded = quote(code)
+        title_enc = quote(title, safe="")
+        code_enc = quote(code, safe="")
         return {
             "language_name": lang_name,
-            "product_url": f"{domain}/{slug_encoded}/{code_encoded}",
+            "product_url": f"{domain}/{title_enc}/{code_enc}",
             "iso_language_code": data.get("iso_language_code"),
         }
 

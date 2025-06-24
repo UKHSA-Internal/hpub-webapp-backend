@@ -2,6 +2,7 @@ import os
 import sys
 import uuid
 from django.utils import timezone
+from urllib.parse import quote
 
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -336,9 +337,11 @@ class Product(Page):
                 lang_name = f"{lang_name}: {suffix}"
 
         slug = slugify(title)
+        slug_encoded = quote(slug)
+        code_encoded = quote(code)
         return {
             "language_name": lang_name,
-            "product_url": f"{domain}/{slug}/{code}",
+            "product_url": f"{domain}/{slug_encoded}/{code_encoded}",
             "iso_language_code": data.get("iso_language_code"),
         }
 

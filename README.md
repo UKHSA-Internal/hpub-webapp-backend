@@ -4,6 +4,41 @@
 
 This project is a Wagtail-Django-based backend application for managing various health publication components such as programs, products(publications), ordering publications, and more. The project uses Wagtail to provide APIs for interacting with these components.
 
+
+## Environments & Access
+
+The backend supports multiple environments:
+
+* **dev**
+* **test**
+* **uat**
+* **preprod**
+* **prod**
+
+### Accessing an Environment
+
+1. Log in to AWS and retrieve your temporary access token.
+2. Use this same token consistently for:
+
+   * Accessing the environment via CLI
+   * Running the backend locally
+   * Accessing the environment's database
+
+### Local Database Access via SSH
+
+To connect to the database locally:
+
+```sh
+# Clone infrastructure repository
+$ git clone <iac-repo-url>
+$ cd hpub-iac/docs/scripts
+
+# Run the database access script
+$ ./database_access.sh
+```
+
+> Note: You must have already exported your AWS credentials for the specific environment.
+
 ## Prerequisites
 
    Before running the project, ensure that you have the following:
@@ -11,6 +46,18 @@ This project is a Wagtail-Django-based backend application for managing various 
    1. Python (3.10+)
    2. PostgreSQL, Django
    3. Environment variables (.env.dev file)
+   2. Generate Environment File (.env)
+      Run the following make command to generate the .env file for the desired environment:
+
+      `make env ENV={environment}`
+
+      This will:
+
+      Fetch environment variables from the ECS task definition
+
+      Retrieve secrets from AWS Secrets Manager
+
+      Save everything into health_pubs/configs/.env
    4. pip (Python package manager)
    5. Docker (optional, for running the project in a container)
    6. Install PgAdmin to visualize the db using this Link `https://ftp.postgresql.org/pub/pgadmin/pgadmin4/v8.13/windows/pgadmin4-8.13-x64.exe`
@@ -257,34 +304,41 @@ Acts as the main container for the domain logic of the application. Each subdire
 
 
 # API Documentation
-This is a link to to the published backend api doc: https://documenter.getpostman.com/view/17965993/2sAYBd8Tjr
-
+This is a link to to the published backend api doc: https://documenter.getpostman.com/view/17965993/2sB2qZFhrF
 
 
 ## 🔹 Update User Role via Management Command
 After assigning a user to `Admin` status in Azure External Id do the following to update the role of that user in Database:
 
-### 📌 Description
-The `update_user_role` management command allows you to change a user's role from **User** (`role_ref_id=1`) to **Admin** (`role_ref_id=8`). This is useful when updating roles via the command line without manually editing the database.
-
----
-
-### ✅ **Setup & Installation**
-Ensure that your Django project is set up and that you have access to the virtual environment.
-
-cd into `hpub-webapp-backend\health_pubs`
-
-```sh
-# Activate virtual environment
-source venv/bin/activate  # Mac/Linux
-venv\Scripts\activate     # Windows
+   ### 📌 Description
+   The `update_user_role` management command allows you to change a user's role from **User** (`role_ref_id=1`) to **Admin** (`role_ref_id=8`). This is useful when updating roles via the command line without manually editing the database.
+   Please following the steps in the documentation in this link [text](https://github.com/UKHSA-Internal/hpub-aps/blob/main/event_triggers_lambdas/update_user_role/README.md) this process has been turned into a Lambda function in AWS to help for easy use.
 
 
+## Debugging & Troubleshooting
+1. Logs
 
-### 🚀 **Running the Command**
-To promote a user to Admin, use the following command:
-`python manage.py update_user_role TEST@ukhas.gov.uk`
-##### ✔ If successful, you should see:
-`Successfully updated TEST@ukhas.gov.uk to Admin.`
-##### ❌ If the user is not found, you will see:
-`User with email TEST@ukhas.gov.uk and role_ref_id='1' not found.`
+   - Local: console stdout/stderr
+
+   - EKS/ECS: CloudWatch /ecs/healthpub-backend
+
+2. Error Tracking
+
+   - Sentry DSN in .env → check Sentry dashboard
+
+3. Common Issues
+
+   - Failed migrations → drop and recreate the local DB, re-run migrations
+
+   - Docker build errors → clear cache: docker builder prune
+
+   - AWS permission denied → confirm your IAM role has ecs:*, ssm:GetParameter, ecr:*
+
+
+## Glossary & References
+- Wagtail: Django-based CMS
+- ECR: Elastic Container Registry
+- ECS: Elastic Container Service
+- SSM: AWS Systems Manager Parameter Store
+- IAM: AWS Identity and Access Management
+

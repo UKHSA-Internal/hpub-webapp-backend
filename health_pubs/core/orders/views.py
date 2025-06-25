@@ -512,7 +512,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             raise DRFValidationError({"address_ref": ErrorMessage.ADDRESS_NOT_FOUND})
 
     def _attempt_create(
-        self, data, items, order_user, limit_user, address, parent, request, admin
+        self, data, items, order_user, limit_user, address, parent, request, admin=False
     ):
         for attempt in range(3):
             try:
@@ -523,7 +523,8 @@ class OrderViewSet(viewsets.ModelViewSet):
                     )
                     self._create_order_items(items, order, locked, order_user)
                     self._update_product_quantities(items)
-                    self._notify_and_record(order, request)
+                    # Pass the admin flag into notification
+                    self._notify_and_record(order, request, admin)
                     return Response(
                         self.get_serializer(order).data, status=status.HTTP_201_CREATED
                     )
@@ -540,23 +541,41 @@ class OrderViewSet(viewsets.ModelViewSet):
                     )
                 raise DRFValidationError({"detail": ErrorMessage.ORDER_CREATION_ERROR})
 
-        # fallback (should never hit)
+        # fallback
         return handle_error(
             ErrorCode.INTERNAL_SERVER_ERROR,
             ErrorMessage.INTERNAL_SERVER_ERROR,
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
-    def _notify_and_record(self, order, request):
-        try:
-            logger.info(f"Sending order confirmation for {order}...")
+    def _notify_and_record(self, order, request, admin=False):
+        """
+        Sends the confirmation email—using the logged-in admin's name
+        if this was an admin-created order.
+        """
+        # The “recipient” is always the order.user_ref…
+        recipient = order.user_ref
 
-            confirmation = generate_order_confirmation(order)
-            user = order.user_ref
+        # …but the “sender_name” should be the admin (when admin=True),
+        # otherwise the user themselves.
+        if admin and hasattr(request, "user"):
+            sender_full_name = (
+                f"{request.user.first_name} {request.user.last_name}".strip()
+            )
+            sender_name = f"{request.user.first_name}".strip()
+        else:
+            sender_full_name = f"{recipient.first_name} {recipient.last_name}".strip()
+            sender_name = f"{recipient.first_name}".strip() or recipient.first_name
+
+        # Build the confirmation payload
+        confirmation = generate_order_confirmation(order)
+
+        try:
             send_notification(
                 "email",
-                user.email,
-                user.first_name,
+                recipient.email,
+                sender_name,
+                sender_full_name,
                 confirmation["confirmation_number"],
                 confirmation["order_date"],
                 confirmation["items_table"],
@@ -565,6 +584,8 @@ class OrderViewSet(viewsets.ModelViewSet):
             )
         except Exception as e:
             logger.warning(f"Email send failed for {order.order_id}: {e}")
+
+        # And still record any reorder events
         try:
             self.record_reorder_events(order, request)
         except Exception as e:

@@ -14,17 +14,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # set timezone, then clean up to keep image small.
 # Set timezone and install dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        cron \
-        ffmpeg \
-        libmagic1 \
-        tzdata \
-        curl \
-        build-essential \
-        zlib1g-dev \
-        liblzma-dev \
-        libicu-dev \
-        xz-utils \
-        ca-certificates \
+    build-essential \
+    ca-certificates \
+    cron \
+    curl \
+    ffmpeg \
+    libicu-dev \
+    liblzma-dev \
+    libmagic1 \
+    tzdata \
+    xz-utils \
+    zlib1g-dev \
     && ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime \
     && echo "$TZ" > /etc/timezone \
     && curl -LO https://download.gnome.org/sources/libxml2/2.12/libxml2-2.12.10.tar.xz \

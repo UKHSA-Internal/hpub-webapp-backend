@@ -129,7 +129,7 @@ jobs:
     strategy:
       max-parallel: 1
       matrix:
-        environment: ["dev", "test", "uat", "preprod"]
+        environment: ["dev", "test", "uat", "preprod", "prod"]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:
       contents: write
@@ -181,6 +181,8 @@ jobs:
           prefix=hpub
         elif [ "$environment" == "preprod" ]; then
           prefix=hpubpp
+        elif [ "$environment" == "prod" ]; then
+          prefix=hpub
         elif [ "$environment" == "uat" ]; then
           prefix=hpub-uat
         elif [ "$environment" == "test" ]; then
@@ -194,7 +196,7 @@ jobs:
         echo prefix=$prefix >> $GITHUB_OUTPUT
 
     - name: End-to-end tests
-      if: ${{ matrix.environment != 'prd' && matrix.environment != 'preprod' }}
+      if: ${{ matrix.environment != 'prod' && matrix.environment != 'preprod' }}
       env:
         BASE_URL: "https://${{ steps.url.outputs.prefix }}.test-and-trace.nhs.uk"
       run: |
@@ -202,6 +204,7 @@ jobs:
         echo npx playwright test
 
     - name: Post-Deployment Smoke Test
+      if: ${{ matrix.environment != 'prod' && matrix.environment != 'preprod' }}
       env:
         environment_prefix: ${{ steps.url.outputs.prefix }}
       shell: bash

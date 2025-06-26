@@ -1,5 +1,5 @@
 # Use an official Python runtime as a parent image
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -15,13 +15,31 @@ RUN apt-get update \
         ffmpeg \
         libmagic1 \
         tzdata \
+        curl \
+        build-essential \
+        zlib1g-dev \
+        liblzma-dev \
+        libicu-dev \
     && ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime \
-    && echo "$TZ" > /etc/timezone \
+    && echo "$TZ" > /etc/timezone
+
+# Build and install patched libxml2 (≥ 2.12.10)
+RUN curl -LO https://download.gnome.org/sources/libxml2/2.12/libxml2-2.12.10.tar.xz \
+    && tar xf libxml2-2.12.10.tar.xz \
+    && cd libxml2-2.12.10 \
+    && ./configure --prefix=/usr --with-python=no \
+    && make -j"$(nproc)" && make install \
+    && cd .. && rm -rf libxml2-2.12.10* \
+    && apt-get purge -y build-essential curl \
+    && apt-get autoremove -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
 WORKDIR /app
+
+# Add a non-root user
+RUN adduser -D appuser
 
 # Copy and install Python dependencies
 COPY health_pubs/requirements.txt /app/requirements.txt
@@ -29,6 +47,12 @@ RUN pip install --no-cache-dir -r requirements.txt --verbose
 
 # Copy application code
 COPY health_pubs /app/
+
+# Set permissions
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
 
 # Copy and make the entrypoint script executable
 COPY entrypoint.sh /app/entrypoint.sh

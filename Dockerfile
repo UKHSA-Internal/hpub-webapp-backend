@@ -1,7 +1,7 @@
 # Stage 1: Build libxml2
 # Use an official Python runtime as a parent image
 # Use Bitnami Python 3.12 image
-FROM bitnami/python:3.13.5
+FROM bitnami/python:3.12
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \

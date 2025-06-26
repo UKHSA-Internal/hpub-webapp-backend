@@ -1,8 +1,8 @@
 # Use an official Python runtime as a parent image
 FROM python:3.12-slim
 
-# Change ownership (optional)
-RUN chown -R appuser:appuser /app
+# Create non-root user
+RUN adduser --disabled-password --gecos "" appuser
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \

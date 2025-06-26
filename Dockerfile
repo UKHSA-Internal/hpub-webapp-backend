@@ -51,15 +51,16 @@ COPY health_pubs /app/
 # Change ownership (optional)
 RUN chown -R appuser:appuser /app
 
-# Run as non-root
-USER appuser
-
 # Copy and make the entrypoint script executable
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
+
+# Run as non-root
+USER appuser
 
 # Expose the application port
 EXPOSE 8000
 
 # Use the entrypoint to initialize cron jobs and launch Gunicorn
 ENTRYPOINT ["/app/entrypoint.sh"]
+

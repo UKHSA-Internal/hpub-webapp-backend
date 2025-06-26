@@ -3,9 +3,6 @@
 # Use Bitnami Python 3.12 image
 FROM bitnami/python:3.13.5
 
-# Create non-root user
-RUN adduser --disabled-password --gecos "" appuser
-
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -14,16 +11,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # Install system dependencies (cron, ffmpeg for video, libmagic for MIME detection, tzdata),
 # set timezone, then clean up to keep image small.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        cron \
-        ffmpeg \
-        libmagic1 \
-        tzdata \
-    && ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime \
-    && echo "$TZ" > /etc/timezone \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+# Install runtime packages
+USER root
+RUN install_packages \
+    cron \
+    ffmpeg \
+    libmagic1 \
+    tzdata \
+ && ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime \
+ && echo "$TZ" > /etc/timezone
 
 # Create app directory
 WORKDIR /app
@@ -42,12 +38,11 @@ RUN chown -R appuser:appuser /app
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-# Run as non-root
-USER appuser
-
-
 # Expose the application port
 EXPOSE 8000
+
+# Use non-root user
+USER 1001
 
 # Use the entrypoint to initialize cron jobs and launch Gunicorn
 ENTRYPOINT ["/app/entrypoint.sh"]

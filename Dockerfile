@@ -25,8 +25,6 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get update && apt-get install -y libxml2
-
 # Create app directory
 WORKDIR /app
 

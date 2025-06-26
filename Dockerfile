@@ -13,38 +13,47 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Install system dependencies (cron, ffmpeg for video, libmagic for MIME detection, tzdata),
 # set timezone, then clean up to keep image small.
 # Set timezone and install dependencies
+# Required system packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    ca-certificates \
-    cron \
-    curl \
-    ffmpeg \
-    libicu-dev \
-    liblzma-dev \
-    libmagic1 \
-    tzdata \
-    xz-utils \
-    zlib1g-dev \
+        build-essential \
+        ca-certificates \
+        cron \
+        curl \
+        ffmpeg \
+        libicu-dev \
+        liblzma-dev \
+        libmagic1 \
+        tzdata \
+        xz-utils \
+        zlib1g-dev \
     && ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime \
-    && echo "$TZ" > /etc/timezone \
-    && curl -LO https://download.gnome.org/sources/libxml2/2.12/libxml2-2.12.10.tar.xz \
-    && tar xf libxml2-2.12.10.tar.xz \
-    && cd libxml2-2.12.10 \
-    && ./configure --prefix=/usr --with-python=no \
-    && make -j"$(nproc)" \
-    && make install \
-    && cd .. \
-    && rm -rf libxml2-2.12.10* \
-    && apt-get purge -y \
+    && echo "$TZ" > /etc/timezone
+
+# Secure download and verify libxml2 (≥ 2.12.10)
+WORKDIR /tmp
+
+ENV LIBXML2_VER=2.12.10
+ENV LIBXML2_HASH=5cf8d6d6637b7a72d31fc275d27c734ea1f5732d6a2871f0cc05fa0b66a6ef0f
+
+RUN curl --fail --location --proto '=https' --tlsv1.2 \
+    -O https://download.gnome.org/sources/libxml2/2.12/libxml2-${LIBXML2_VER}.tar.xz && \
+    echo "${LIBXML2_HASH}  libxml2-${LIBXML2_VER}.tar.xz" | sha256sum -c - && \
+    tar xf libxml2-${LIBXML2_VER}.tar.xz && \
+    cd libxml2-${LIBXML2_VER} && \
+    ./configure --prefix=/usr --with-python=no && \
+    make -j"$(nproc)" && \
+    make install && \
+    cd / && rm -rf /tmp/libxml2*
+
+# Remove build dependencies
+RUN apt-get purge -y \
         build-essential \
         curl \
         liblzma-dev \
-        zlib1g-dev \
         libicu-dev \
         xz-utils \
-    && apt-get autoremove -y \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+        zlib1g-dev \
+    && apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
 WORKDIR /app

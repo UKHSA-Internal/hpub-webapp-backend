@@ -10,6 +10,7 @@ from datetime import timedelta
 import time
 from django.db import IntegrityError
 from psycopg2 import errors as pg_errors
+from collections import defaultdict
 
 import pandas as pd
 from core.audiences.models import Audience
@@ -1897,35 +1898,92 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         raise RuntimeError("Could not create or find ProductUpdate after retries")
 
     def update_order_limits(self, product: Product, order_limits: list):
-        OrderLimitPage.objects.filter(product_ref=product).delete()
-        org_cache = {}
-        parent_page = Page.objects.get(slug="products")
-        for limit in order_limits:
-            org_name = limit.get("organization_name")
+        """
+        Upserts OrderLimitPage records instead of wholesale delete & recreate.
+        Keeps existing pages when unchanged, updates when modified, creates when new,
+        and deletes only those no longer needed.
+
+        Result: far fewer Wagtail unpublish/delete/publish cycles → much faster.
+        """
+        try:
+            parent_page = Page.objects.get(slug="products")
+        except Page.DoesNotExist:
+            logger.error("Parent page with slug 'products' not found.")
+            return
+
+        # --- Existing pages grouped by org name ----------------------------------
+        existing_pages = (
+            OrderLimitPage.objects.child_of(parent_page)
+            .filter(product_ref=product)
+            .select_related("organization_ref")
+        )
+        by_org = {p.organization_ref.name: p for p in existing_pages}
+
+        # --- Prefetch org + establishment data -----------------------------------
+        org_names = [
+            lim["organization_name"]
+            for lim in order_limits
+            if lim.get("organization_name")
+        ]
+        org_qs = Organization.objects.filter(name__in=org_names)
+        org_cache = {org.name: org for org in org_qs}
+
+        est_qs = Establishment.objects.filter(organization_ref__in=org_qs).values(
+            "organization_ref_id", "full_external_key"
+        )
+        full_keys_map = defaultdict(list)
+        for est in est_qs:
+            full_keys_map[est["organization_ref_id"]].append(est["full_external_key"])
+
+        # --- Upsert loop ----------------------------------------------------------
+        seen_orgs = set()
+
+        for lim in order_limits:
+            org_name = lim.get("organization_name")
             if not org_name:
                 continue
-            order_limit_value = limit.get("order_limit_value", 0)
-            if org_name not in org_cache:
-                try:
-                    org_cache[org_name] = Organization.objects.get(name=org_name)
-                except Organization.DoesNotExist:
-                    logger.warning("Organization %s not found.", org_name)
-                    continue
-            organization = org_cache[org_name]
-            full_keys = list(
-                Establishment.objects.filter(organization_ref=organization).values_list(
-                    "full_external_key", flat=True
-                )
-            )
-            order_limit_page = OrderLimitPage(
+
+            org = org_cache.get(org_name)
+            if not org:
+                logger.warning("Organization '%s' not found. Skipping.", org_name)
+                continue
+
+            limit_val = lim.get("order_limit_value", 0)
+            full_keys = full_keys_map.get(org.id, [])
+            seen_orgs.add(org_name)
+
+            # ------------------------------------------------------------------
+            # Case A: existing page → update if changed
+            # ------------------------------------------------------------------
+            if org_name in by_org:
+                page = by_org[org_name]
+                if (
+                    page.order_limit != limit_val
+                    or page.full_external_keys != full_keys
+                ):
+                    page.order_limit = limit_val
+                    page.full_external_keys = full_keys
+                    page.save_revision().publish()
+                continue
+
+            # ------------------------------------------------------------------
+            # Case B: new page → create
+            # ------------------------------------------------------------------
+            new_page = OrderLimitPage(
                 title=f"Order Limit for {org_name}",
-                slug=slugify(f"{org_name}-order-limit-{datetime.datetime.now()}"),
-                order_limit=order_limit_value,
+                slug=slugify(f"{org_name}-order-limit-{uuid.uuid4()}"),
+                order_limit=limit_val,
                 product_ref=product,
-                organization_ref=organization,
+                organization_ref=org,
                 full_external_keys=full_keys,
             )
-            parent_page.add_child(instance=order_limit_page)
+            parent_page.add_child(instance=new_page)
+            new_page.save_revision().publish()
+
+        # --- Delete pages for orgs no longer supplied ----------------------------
+        for org_name, page in by_org.items():
+            if org_name not in seen_orgs:
+                page.delete()
 
     def update_foreign_keys(self, product_update: ProductUpdate, data: dict):
         mapping = [

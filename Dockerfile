@@ -1,5 +1,7 @@
+# Stage 1: Build libxml2
 # Use an official Python runtime as a parent image
-FROM python:3.12-slim
+# Use Bitnami Python 3.12 image
+FROM bitnami/python:3.12
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -9,16 +11,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # Install system dependencies (cron, ffmpeg for video, libmagic for MIME detection, tzdata),
 # set timezone, then clean up to keep image small.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        cron \
-        ffmpeg \
-        libmagic1 \
-        tzdata \
-    && ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime \
-    && echo "$TZ" > /etc/timezone \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+# Install runtime packages
+USER root
+RUN install_packages \
+    cron \
+    ffmpeg \
+    libmagic1 \
+    tzdata \
+ && ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime \
+ && echo "$TZ" > /etc/timezone
 
 # Create app directory
 WORKDIR /app
@@ -36,6 +37,9 @@ RUN chmod +x /app/entrypoint.sh
 
 # Expose the application port
 EXPOSE 8000
+
+# Use non-root user
+USER 1001
 
 # Use the entrypoint to initialize cron jobs and launch Gunicorn
 ENTRYPOINT ["/app/entrypoint.sh"]

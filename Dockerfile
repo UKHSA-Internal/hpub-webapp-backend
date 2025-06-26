@@ -1,6 +1,9 @@
 # Use an official Python runtime as a parent image
 FROM python:3.13-slim
 
+# Create non-root user
+RUN adduser --disabled-password --gecos "" appuser
+
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -38,9 +41,6 @@ RUN curl -LO https://download.gnome.org/sources/libxml2/2.12/libxml2-2.12.10.tar
 # Create app directory
 WORKDIR /app
 
-# Add a non-root user
-RUN adduser -D appuser
-
 # Copy and install Python dependencies
 COPY health_pubs/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt --verbose
@@ -48,10 +48,10 @@ RUN pip install --no-cache-dir -r requirements.txt --verbose
 # Copy application code
 COPY health_pubs /app/
 
-# Set permissions
+# Change ownership (optional)
 RUN chown -R appuser:appuser /app
 
-# Switch to non-root user
+# Run as non-root
 USER appuser
 
 # Copy and make the entrypoint script executable

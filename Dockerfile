@@ -1,8 +1,8 @@
 # Use an official Python runtime as a parent image
-FROM python:3.12-alpine
+FROM python:3.12-slim
 
 # Create non-root user
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN adduser --disabled-password --gecos "" appuser
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -13,23 +13,38 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Install system dependencies (cron, ffmpeg for video, libmagic for MIME detection, tzdata),
 # set timezone, then clean up to keep image small.
 # Set timezone and install dependencies
-# Install dependencies and set timezone
-RUN apk add --no-cache \
-        tzdata \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cron \
         ffmpeg \
-        file \
+        libmagic1 \
+        tzdata \
         curl \
-        build-base \
-        zlib-dev \
-        xz \
-        libxml2-dev \
-        libxslt-dev \
-        icu-dev \
-        bash \
-    && cp /usr/share/zoneinfo/$TZ /etc/localtime \
-    && echo "$TZ" > /etc/timezone
-
-RUN apk add --no-cache cmake protobuf-dev
+        build-essential \
+        zlib1g-dev \
+        liblzma-dev \
+        libicu-dev \
+        xz-utils \
+        ca-certificates \
+    && ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime \
+    && echo "$TZ" > /etc/timezone \
+    && curl -LO https://download.gnome.org/sources/libxml2/2.12/libxml2-2.12.10.tar.xz \
+    && tar xf libxml2-2.12.10.tar.xz \
+    && cd libxml2-2.12.10 \
+    && ./configure --prefix=/usr --with-python=no \
+    && make -j"$(nproc)" \
+    && make install \
+    && cd .. \
+    && rm -rf libxml2-2.12.10* \
+    && apt-get purge -y \
+        build-essential \
+        curl \
+        liblzma-dev \
+        zlib1g-dev \
+        libicu-dev \
+        xz-utils \
+    && apt-get autoremove -y \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
 WORKDIR /app

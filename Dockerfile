@@ -31,9 +31,6 @@ RUN pip install --no-cache-dir -r requirements.txt --verbose
 # Copy application code
 COPY health_pubs /app/
 
-# Change ownership (optional)
-RUN chown -R appuser:appuser /app
-
 # Copy and make the entrypoint script executable
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh

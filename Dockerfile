@@ -29,6 +29,8 @@ RUN apk add --no-cache \
     && cp /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo "$TZ" > /etc/timezone
 
+RUN apk add --no-cache cmake protobuf-dev
+
 # Create app directory
 WORKDIR /app
 

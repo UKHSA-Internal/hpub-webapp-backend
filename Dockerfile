@@ -1,6 +1,7 @@
 # Stage 1: Build libxml2
 # Use an official Python runtime as a parent image
-FROM python:3.12-bookworm
+# Use Bitnami Python 3.12 image
+FROM bitnami/python:3.13.5
 
 # Create non-root user
 RUN adduser --disabled-password --gecos "" appuser
@@ -23,7 +24,7 @@ RUN apt-get update \
     && echo "$TZ" > /etc/timezone \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-    
+
 RUN apt-get update && apt-get install -y libxml2
 
 # Create app directory

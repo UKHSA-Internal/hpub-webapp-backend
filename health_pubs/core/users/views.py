@@ -10,6 +10,7 @@ import datetime
 
 from core.organizations.models import Organization
 from core.users.permissions import IsAdminUser
+from core.utils.cookies import set_refresh_token_cookie
 import jwt
 import requests
 from configs.get_secret_config import Config
@@ -415,18 +416,7 @@ class UserSignUpView(APIView):
         if message:
             response_data["message"] = message
         response = Response(response_data, status=status_code)
-
-        response.set_cookie(
-            key="long_term_token",
-            value=long_term_token,
-            httponly=True,
-            secure=not settings.DEBUG,
-            samesite="None"
-            if settings.DEBUG
-            else "Lax",  # or "Strict"/"None" based on frontend-backend setup
-            max_age=86400,  # 1 day
-        )
-        return response
+        return set_refresh_token_cookie(response, long_term_token)
 
 
 class UserLoginView(APIView):
@@ -511,19 +501,7 @@ class UserLoginView(APIView):
         }
         response = Response(response_data, status=status.HTTP_200_OK)
 
-        # Set long-term token as HTTP-only, secure cookie.
-        response.set_cookie(
-            key="long_term_token",
-            value=long_term_token,
-            httponly=True,
-            secure=not settings.DEBUG,  # Only send over HTTPS.
-            samesite="None"
-            if settings.DEBUG
-            else "Lax",  # Adjust as needed ("Strict" or "None")
-            max_age=86400,  # Lifetime in seconds (here, 1 day)
-        )
-
-        return response
+        return set_refresh_token_cookie(response, long_term_token)
 
 
 class AuthStatusView(APIView):
@@ -692,18 +670,7 @@ class TokenRefresh(APIView):
             {"short_term_token": new_short_term_token}, status=status.HTTP_200_OK
         )
         # This call sets the "long_term_token" cookie with your current refresh token.
-        response.set_cookie(
-            key="long_term_token",
-            value=refresh_token,  # Use the new refresh token if applicable
-            httponly=True,
-            secure=not settings.DEBUG,  # Set to True if using HTTPS
-            samesite="None"
-            if settings.DEBUG
-            else "Lax",  # Adjust samesite if necessary (or use "Lax" or "Strict")
-            max_age=86400,  # 1 day (or adjust as needed)
-        )
-
-        return response
+        return set_refresh_token_cookie(response, refresh_token)
 
 
 class LogoutView(APIView):

@@ -21,19 +21,35 @@ PASS_LENGTH = 12  # temp password length
 
 
 # Helpers
-def gen_password(length=PASS_LENGTH):
-    """Return a random pwd with ≥1 upper, 1 lower, 1 digit, 1 symbol."""
+
+
+def gen_password(length=12):
+    """Return a random password with ≥1 upper, 1 lower, 1 digit, 1 symbol."""
+    # Generate one character from each category
     uppers = secrets.choice(string.ascii_uppercase)
     lowers = secrets.choice(string.ascii_lowercase)
     digits = secrets.choice(string.digits)
     syms = secrets.choice("!@#$%^&*-_+=")
+
+    # Fill the rest of the password length with random choices
     rest = "".join(
         secrets.choice(string.ascii_letters + string.digits + "!@#$%^&*-_+=")
         for _ in range(length - 4)
     )
+
+    # Combine the parts and shuffle securely
     pwd = [uppers, lowers, digits, syms] + list(rest)
-    secrets.SystemRandom().shuffle(pwd)
-    return "".join(pwd)
+
+    # Use secrets.SystemRandom().shuffle() securely by using random.sample for shuffling
+    shuffled_pwd = "".join(
+        secrets.SystemRandom().sample(pwd, len(pwd))
+    )  # Secure shuffle
+
+    return shuffled_pwd
+
+
+# Example usage
+print(gen_password())
 
 
 def sanitize_nickname(raw, used):

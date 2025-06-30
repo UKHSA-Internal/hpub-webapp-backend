@@ -1,3 +1,4 @@
+from venv import logger
 import pandas as pd
 import json
 import os
@@ -6,6 +7,9 @@ import sys
 import secrets
 import string
 from math import ceil
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 XLSX_FILE = "user.xlsx"  # your input Excel
@@ -26,7 +30,7 @@ def gen_password(length=PASS_LENGTH):
         secrets.choice(string.ascii_letters + string.digits + "!@#$%^&*-_+=")
         for _ in range(length - 4)
     )
-    pwd = list(uppers + lowers + digits + syms + rest)
+    pwd = [uppers, lowers, digits, syms] + list(rest)
     secrets.SystemRandom().shuffle(pwd)
     return "".join(pwd)
 
@@ -48,7 +52,7 @@ def sanitize_nickname(raw, used):
 # 0️⃣ Prep
 os.makedirs(OUT_DIR, exist_ok=True)
 if not os.path.exists(XLSX_FILE):
-    print(f"Error: {XLSX_FILE} not found.", file=sys.stderr)
+    logger.info(f"Error: {XLSX_FILE} not found.", file=sys.stderr)
     sys.exit(1)
 
 # 1️⃣ Load & dedupe on username+email to avoid UPN conflicts
@@ -77,7 +81,7 @@ required = {
 }
 missing = required - set(df.columns)
 if missing:
-    print(f"Error: Missing columns: {missing}", file=sys.stderr)
+    logger.info(f"Error: Missing columns: {missing}", file=sys.stderr)
     sys.exit(1)
 
 # 3️⃣ Build Graph user objects using sanitized UPNs and mailNicknames
@@ -141,6 +145,6 @@ for idx in range(num_batches):
     with open(out_file, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
-    print(f"Wrote {len(chunk)} users → {out_file}")
+    logger.info(f"Wrote {len(chunk)} users → {out_file}")
 
-print(f"\n✅ Done: {total} users split into {num_batches} batches.")
+logger.info(f"\n✅ Done: {total} users split into {num_batches} batches.")

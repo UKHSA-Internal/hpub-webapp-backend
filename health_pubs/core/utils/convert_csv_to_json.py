@@ -26,23 +26,27 @@ logger = logging.getLogger(__name__)
 # ────────────────────────────────────────────────────────────────────────────────
 
 
-def gen_password(length: int = PASS_LENGTH) -> str:
+def gen_password(length: int = 12) -> str:
     """Return a random password with ≥1 upper, 1 lower, 1 digit, 1 symbol."""
-    # 1 char from each required set
+    # 1. Pick one from each category
     uppers = secrets.choice(string.ascii_uppercase)
     lowers = secrets.choice(string.ascii_lowercase)
     digits = secrets.choice(string.digits)
     syms = secrets.choice("!@#$%^&*-_+=")
 
-    # fill the rest
+    # 2. Fill the remainder
     alphabet = string.ascii_letters + string.digits + "!@#$%^&*-_+="
     rest = [secrets.choice(alphabet) for _ in range(length - 4)]
 
-    # combine and securely shuffle
+    # 3. Combine
     pwd_chars = [uppers, lowers, digits, syms] + rest
-    # sample returns a new list in cryptographically secure random order
-    shuffled = secrets.SystemRandom().sample(pwd_chars, k=len(pwd_chars))
-    return "".join(shuffled)
+
+    # 4. Fisher–Yates shuffle with secrets.randbelow
+    for i in range(len(pwd_chars) - 1, 0, -1):
+        j = secrets.randbelow(i + 1)
+        pwd_chars[i], pwd_chars[j] = pwd_chars[j], pwd_chars[i]
+
+    return "".join(pwd_chars)
 
 
 def sanitize_nickname(raw: str, used: set) -> str:

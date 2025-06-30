@@ -10,6 +10,7 @@ import datetime
 
 from core.organizations.models import Organization
 from core.users.permissions import IsAdminUser
+from core.utils.cookies import set_refresh_token_cookie
 import jwt
 import requests
 from configs.get_secret_config import Config
@@ -415,16 +416,7 @@ class UserSignUpView(APIView):
         if message:
             response_data["message"] = message
         response = Response(response_data, status=status_code)
-
-        response.set_cookie(
-            key="long_term_token",
-            value=long_term_token,
-            httponly=True,
-            secure=not settings.DEBUG,
-            samesite="None",  # or "Strict"/"None" based on frontend-backend setup
-            max_age=86400,  # 1 day
-        )
-        return response
+        return set_refresh_token_cookie(response, long_term_token)
 
 
 class UserLoginView(APIView):
@@ -441,11 +433,22 @@ class UserLoginView(APIView):
         try:
             token = auth_header.split(" ")[1]
             decoded_token = validate_azure_b2c_token(token)
-            email = (
-                decoded_token.get("email_address")
-                if "email_address" in decoded_token
-                else None
-            )
+
+            # 2) Pull email/UPN from whichever claim is populated
+            email = None
+            if "emails" in decoded_token and isinstance(decoded_token["emails"], list):
+                email = decoded_token["emails"][0]
+            elif "email" in decoded_token:
+                email = decoded_token["email"]
+            elif "email_address" in decoded_token:
+                email = decoded_token["email_address"]
+            elif "preferred_username" in decoded_token:
+                email = decoded_token["preferred_username"]
+            elif "upn" in decoded_token:
+                email = decoded_token["upn"]
+            elif "unique_name" in decoded_token:
+                email = decoded_token["unique_name"]
+
         except (IndexError, ValueError) as e:
             return Response({"error": str(e)}, status=status.HTTP_401_UNAUTHORIZED)
 
@@ -498,17 +501,7 @@ class UserLoginView(APIView):
         }
         response = Response(response_data, status=status.HTTP_200_OK)
 
-        # Set long-term token as HTTP-only, secure cookie.
-        response.set_cookie(
-            key="long_term_token",
-            value=long_term_token,
-            httponly=True,
-            secure=not settings.DEBUG,  # Only send over HTTPS.
-            samesite="None",  # Adjust as needed ("Strict" or "None")
-            max_age=86400,  # Lifetime in seconds (here, 1 day)
-        )
-
-        return response
+        return set_refresh_token_cookie(response, long_term_token)
 
 
 class AuthStatusView(APIView):
@@ -677,16 +670,7 @@ class TokenRefresh(APIView):
             {"short_term_token": new_short_term_token}, status=status.HTTP_200_OK
         )
         # This call sets the "long_term_token" cookie with your current refresh token.
-        response.set_cookie(
-            key="long_term_token",
-            value=refresh_token,  # Use the new refresh token if applicable
-            httponly=True,
-            secure=not settings.DEBUG,  # Set to True if using HTTPS
-            samesite="None",  # Adjust samesite if necessary (or use "Lax" or "Strict")
-            max_age=86400,  # 1 day (or adjust as needed)
-        )
-
-        return response
+        return set_refresh_token_cookie(response, refresh_token)
 
 
 class LogoutView(APIView):

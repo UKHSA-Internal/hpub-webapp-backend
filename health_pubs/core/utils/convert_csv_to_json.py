@@ -15,6 +15,7 @@ BATCH_SIZE = 20  # max sub-requests per batch
 PASS_LENGTH = 12  # temp password length
 # ────────────────────────────────────────────────────────────────────────────────
 
+
 # Helpers
 def gen_password(length=PASS_LENGTH):
     """Return a random pwd with ≥1 upper, 1 lower, 1 digit, 1 symbol."""

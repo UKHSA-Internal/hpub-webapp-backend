@@ -1,18 +1,14 @@
 from django.conf import settings
 
-# How long the refresh token cookie lives, in seconds:
-REFRESH_TOKEN_MAX_AGE = settings.REFRESH_TOKEN_MAX_AGE
-
 
 def set_refresh_token_cookie(response, token):
     """
-    Attach a long-term (refresh) token cookie to the given HttpResponse,
-    choosing Secure/SameSite flags based on DEBUG.
+    Attach the refresh-token cookie with flags based on DEBUG:
+      - DEBUG=True (dev):  SameSite=None, Secure=False
+      - DEBUG=False (prod): SameSite=Lax,  Secure=True
     """
-    # In DEBUG (dev on HTTP) we cannot use Secure=True with SameSite=None,
-    # so we use Lax. In production we allow cross-site (None) but must be Secure.
     secure = not settings.DEBUG
-    samesite = "Lax" if settings.DEBUG else "None"
+    samesite = "None" if settings.DEBUG else "Lax"
 
     response.set_cookie(
         key="long_term_token",
@@ -20,6 +16,6 @@ def set_refresh_token_cookie(response, token):
         httponly=True,
         secure=secure,
         samesite=samesite,
-        max_age=REFRESH_TOKEN_MAX_AGE,
+        max_age=settings.REFRESH_TOKEN_MAX_AGE,
     )
     return response

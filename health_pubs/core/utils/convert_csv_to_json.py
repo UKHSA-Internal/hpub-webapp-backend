@@ -1,19 +1,21 @@
-import logging
-import os
-import re
-import sys
 import json
+import logging
+import pandas as pd
+import re
 import secrets
 import string
-import pandas as pd
 from math import ceil
+from pathlib import Path
+import sys
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
-XLSX_FILE = "user.xlsx"  # your input Excel
-OUT_DIR = "batches"  # where batch JSONs go
-TENANT = "hpb2ctest.onmicrosoft.com"  # your B2C tenant domain
-BATCH_SIZE = 20  # max sub-requests per batch
-PASS_LENGTH = 12  # temp password length
+CONFIG = {
+    "xlsx_file": Path("user.xlsx"),
+    "out_dir": Path("batches"),
+    "tenant": "hpb2ctest.onmicrosoft.com",
+    "batch_size": 20,
+    "pass_length": 12,
+}
 # ────────────────────────────────────────────────────────────────────────────────
 
 # ─── LOGGER SETUP ──────────────────────────────────────────────────────────────
@@ -26,55 +28,126 @@ logger = logging.getLogger(__name__)
 # ────────────────────────────────────────────────────────────────────────────────
 
 
-def gen_password(length: int = 12) -> str:
-    """Return a random password with ≥1 upper, 1 lower, 1 digit, 1 symbol."""
-    # 1. Pick one from each category
-    uppers = secrets.choice(string.ascii_uppercase)
-    lowers = secrets.choice(string.ascii_lowercase)
-    digits = secrets.choice(string.digits)
-    syms = secrets.choice("!@#$%^&*-_+=")
-
-    # 2. Fill the remainder
+def gen_password(length: int = CONFIG["pass_length"]) -> str:
+    """Generate a random password with ≥1 upper, 1 lower, 1 digit, and 1 symbol."""
+    choices = {
+        "upper": secrets.choice(string.ascii_uppercase),
+        "lower": secrets.choice(string.ascii_lowercase),
+        "digit": secrets.choice(string.digits),
+        "symbol": secrets.choice("!@#$%^&*-_+="),
+    }
+    # fill the rest
     alphabet = string.ascii_letters + string.digits + "!@#$%^&*-_+="
-    rest = [secrets.choice(alphabet) for _ in range(length - 4)]
+    rest = [secrets.choice(alphabet) for _ in range(length - len(choices))]
+    pwd = list(choices.values()) + rest
 
-    # 3. Combine
-    pwd_chars = [uppers, lowers, digits, syms] + rest
-
-    # 4. Fisher–Yates shuffle with secrets.randbelow
-    for i in range(len(pwd_chars) - 1, 0, -1):
+    # Fisher–Yates shuffle
+    for i in reversed(range(1, len(pwd))):
         j = secrets.randbelow(i + 1)
-        pwd_chars[i], pwd_chars[j] = pwd_chars[j], pwd_chars[i]
+        pwd[i], pwd[j] = pwd[j], pwd[i]
+    return "".join(pwd)
 
-    return "".join(pwd_chars)
 
-
-def sanitize_nickname(raw: str, used: set) -> str:
-    """Strip to alphanumeric, prefix 'u' if starts digit, ensure uniqueness."""
+def sanitize_nickname(raw: str, used: set[str]) -> str:
+    """
+    Strip non-alphanumerics, prefix with 'u' if needed, and ensure uniqueness.
+    """
     nick = re.sub(r"[^A-Za-z0-9]", "", raw.lower())
     if not nick or nick[0].isdigit():
         nick = "u" + nick
-    base, count = nick, 1
+
+    base = nick
+    suffix = 1
     while nick in used:
-        count += 1
-        nick = f"{base}{count}"
+        suffix += 1
+        nick = f"{base}{suffix}"
     used.add(nick)
     return nick
 
 
-def main():
-    # 0️⃣ Prep
-    os.makedirs(OUT_DIR, exist_ok=True)
-    if not os.path.exists(XLSX_FILE):
-        logger.error(f"{XLSX_FILE} not found.")
+def load_users(path: Path) -> pd.DataFrame:
+    df = pd.read_excel(path, engine="openpyxl")
+    deduped = df.drop_duplicates(subset=["username", "email"])
+    return deduped
+
+
+def validate_columns(df: pd.DataFrame, required: set[str]) -> None:
+    missing = required - set(df.columns)
+    if missing:
+        logger.error("Missing required columns: %s", missing)
         sys.exit(1)
 
-    # 1️⃣ Load & dedupe
-    df = pd.read_excel(XLSX_FILE, engine="openpyxl")
-    df = df.drop_duplicates(subset=["username", "email"])
 
-    # 2️⃣ Check required columns
-    required = {
+def build_graph_users(df: pd.DataFrame, tenant: str) -> list[dict]:
+    users, used_nicks = [], set()
+    for _, row in df.iterrows():
+        first = str(row["first_name"]).strip()
+        last = str(row["last_name"]).strip()
+        username = str(row["username"]).strip()
+        email = str(row["email"]).strip()
+
+        nick = sanitize_nickname(username, used_nicks)
+        pwd = gen_password()
+
+        users.append(
+            {
+                "accountEnabled": True,
+                "displayName": f"{first} {last}",
+                "mailNickname": nick,
+                "userPrincipalName": f"{nick}@{tenant}",
+                "givenName": first,
+                "surname": last,
+                "passwordProfile": {
+                    "forceChangePasswordNextSignIn": False,
+                    "password": pwd,
+                },
+                "identities": [
+                    {
+                        "signInType": "emailAddress",
+                        "issuer": tenant,
+                        "issuerAssignedId": email,
+                    }
+                ],
+            }
+        )
+    return users
+
+
+def write_batches(users: list[dict], out_dir: Path, batch_size: int) -> None:
+    out_dir.mkdir(exist_ok=True)
+    total = len(users)
+    batches = ceil(total / batch_size)
+
+    for idx in range(batches):
+        chunk = users[idx * batch_size : (idx + 1) * batch_size]
+        payload = {
+            "requests": [
+                {
+                    "id": str(i + 1),
+                    "method": "POST",
+                    "url": "/users",
+                    "headers": {"Content-Type": "application/json"},
+                    "body": user_obj,
+                }
+                for i, user_obj in enumerate(chunk)
+            ]
+        }
+        file_path = out_dir / f"batch_{idx+1}.json"
+        file_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        logger.info("Wrote %d users → %s", len(chunk), file_path)
+
+
+def main():
+    cfg = CONFIG
+
+    if not cfg["xlsx_file"].exists():
+        logger.error("Excel file %s not found.", cfg["xlsx_file"])
+        sys.exit(1)
+
+    df = load_users(cfg["xlsx_file"])
+    required_cols = {
         "user_id",
         "first_name",
         "last_name",
@@ -93,72 +166,16 @@ def main():
         "organization_id",
         "establishment_id",
     }
-    missing = required - set(df.columns)
-    if missing:
-        logger.error(f"Missing columns: {missing}")
-        sys.exit(1)
+    validate_columns(df, required_cols)
 
-    # 3️⃣ Build Graph user objects
-    graph_users = []
-    used_nicks = set()
+    graph_users = build_graph_users(df, cfg["tenant"])
+    write_batches(graph_users, cfg["out_dir"], cfg["batch_size"])
 
-    for _, row in df.iterrows():
-        first, last = str(row["first_name"]).strip(), str(row["last_name"]).strip()
-        raw_name, email = str(row["username"]).strip(), str(row["email"]).strip()
-
-        nick = sanitize_nickname(raw_name, used_nicks)
-        temp_pwd = gen_password()
-
-        graph_users.append(
-            {
-                "accountEnabled": True,
-                "displayName": f"{first} {last}",
-                "mailNickname": nick,
-                "userPrincipalName": f"{nick}@{TENANT}",
-                "givenName": first,
-                "surname": last,
-                "passwordProfile": {
-                    "forceChangePasswordNextSignIn": False,
-                    "password": temp_pwd,
-                },
-                "identities": [
-                    {
-                        "signInType": "emailAddress",
-                        "issuer": TENANT,
-                        "issuerAssignedId": email,
-                    }
-                ],
-            }
-        )
-
-    # 4️⃣ Chunk into batches & write JSON
-    total = len(graph_users)
-    num_batches = ceil(total / BATCH_SIZE)
-
-    for idx in range(num_batches):
-        start = idx * BATCH_SIZE
-        end = start + BATCH_SIZE
-        chunk = graph_users[start:end]
-
-        payload = {"requests": []}
-        for i, user_obj in enumerate(chunk, start=1):
-            payload["requests"].append(
-                {
-                    "id": str(i),
-                    "method": "POST",
-                    "url": "/users",
-                    "headers": {"Content-Type": "application/json"},
-                    "body": user_obj,
-                }
-            )
-
-        out_file = os.path.join(OUT_DIR, f"batch_{idx+1}.json")
-        with open(out_file, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, ensure_ascii=False)
-
-        logger.info(f"Wrote {len(chunk)} users → {out_file}")
-
-    logger.info(f"Done: {total} users split into {num_batches} batches.")
+    logger.info(
+        "Completed: %d users split into %d batches.",
+        len(graph_users),
+        ceil(len(graph_users) / cfg["batch_size"]),
+    )
 
 
 if __name__ == "__main__":

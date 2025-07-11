@@ -21,7 +21,9 @@ router = DefaultRouter()
 # 2) Register all of your ViewSets—order here doesn't matter now that the custom paths are first
 router.register(r"programs", ProgramListViewSet, basename="program")
 router.register(r"programs/create", ProgramCreateViewSet, basename="program-create")
-router.register(r"programs/name", ProgramNameCheckViewSet, basename="program-name-check")
+router.register(
+    r"programs/name", ProgramNameCheckViewSet, basename="program-name-check"
+)
 router.register(r"programs/update", ProgramUpdateViewSet, basename="program-update")
 router.register(r"programs/destroy", ProgramDestroyViewSet, basename="program-destroy")
 router.register(

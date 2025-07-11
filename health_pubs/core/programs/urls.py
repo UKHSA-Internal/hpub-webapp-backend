@@ -30,7 +30,6 @@ urlpatterns = [
     # these two will always be matched before any "/programs/<pk>/" catch-all
     path("programs/featured/", featured_programs, name="programs-featured"),
     path("programs/filtered-programmes/", filtered_programs, name="programs-filtered"),
-
     # now drop in the router’s automatically generated routes
     *router.urls,
 

@@ -43,42 +43,38 @@ LOCAL_CODES_CHOICES = [
 ]
 
 PRODUCT_TYPE_CHOICE = [
-    ("Audio", "Audio"),  # main download, transcript download, web_download
-    ("Transcript", "Transcript"),
-    ("Bulletins", "Bulletins"),  # main download, print download, web_download
-    ("Consent Form", "Consent Form"),
+    ("Alternative", "Alternative"),
+    ("Audio", "Audio"),
+    ("Briefing sheet", "Briefing sheet"),
+    ("Bulletins", "Bulletins"),
+    ("Consent forms", "Consent forms"),
+    ("Factsheets", "Factsheets"),
+    ("Flip Chart", "Flip Chart"),
+    ("Flyer", "Flyer"),
+    ("Fridge magnets", "Fridge magnets"),
+    ("GIFs", "GIFs"),
+    ("Guidance", "Guidance"),
     ("Images", "Images"),
+    ("Immunisation Schedule", "Immunisation Schedule"),
     ("Leaflets", "Leaflets"),
+    ("Memoire", "Memoire"),
     ("Postcards", "Postcards"),
     ("Posters", "Posters"),
-    ("Pull-up Banners", "Pull-up Banners"),
-    ("Stickers", "Stickers"),
-    ("Record Cards", "Record Cards"),
-    ("Z-Card", "Z-Card"),
-    ("Fridge Magnet", "Fridge Magnet"),
-    ("Flyer", "Flyer"),
-    ("Alternative", "Alternative"),
-    ("Memoire", "Memoire"),
-    ("Guidance", "Guidance"),
-    ("Video", "Video"),  # main download, web_download
-    ("GIF", "GIF"),
+    ("Pull-up banners", "Pull-up banners"),
+    ("Record cards", "Record cards"),
     ("Slides", "Slides"),
-    ("Factsheets", "Factsheets"),
-    ("Briefing sheet", "Briefing sheet"),
-    ("Flip Chart", "Flip Chart"),
-    ("Immunisation Schedule", "Immunisation Schedule"),
-    ("Booklet", "Booklet"),
-    ("Envelope Label", "Envelope Label"),
-    ("Pack Sleeve", "Pack Sleeve"),  # Added
-    ("Slide", "Slide"),  # Singular Slide explicitly added
+    ("Stickers", "Stickers"),
+    ("Video", "Video"),
+    ("Z-cards", "Z-cards"),
 ]
 
+
 ALTERNATIVE_TYPE_CHOICE = [
-    ("Video and Audio", "Video and Audio"),
+    ("Audio", "Audio"),
     ("Braille", "Braille"),
     ("Easy read", "Easy read"),
     ("British Sign Language (BSL)", "British Sign Language (BSL)"),
     ("Large print", "Large print"),
-    ("Simple Text", "Simple Text"),
+    ("Simple text", "Simple text"),
     ("not-accessible", "not-accessible"),
 ]

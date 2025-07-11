@@ -32,7 +32,6 @@ urlpatterns = [
     path("programs/filtered-programmes/", filtered_programs, name="programs-filtered"),
     # now drop in the router’s automatically generated routes
     *router.urls,
-
     # plus your bulk-upload endpoint
     path(
         "programs/bulk-upload/",

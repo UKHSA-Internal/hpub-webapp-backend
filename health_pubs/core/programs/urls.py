@@ -24,7 +24,9 @@ router.register(r"programs/create", ProgramCreateViewSet, basename="program-crea
 router.register(r"programs/name", ProgramNameCheckViewSet, basename="program-name-check")
 router.register(r"programs/update", ProgramUpdateViewSet, basename="program-update")
 router.register(r"programs/destroy", ProgramDestroyViewSet, basename="program-destroy")
-router.register(r"programs/bulk-delete", BulkProgramDeleteViewSet, basename="bulk-delete")
+router.register(
+    r"programs/bulk-delete", BulkProgramDeleteViewSet, basename="bulk-delete"
+)
 
 urlpatterns = [
     # these two will always be matched before any "/programs/<pk>/" catch-all

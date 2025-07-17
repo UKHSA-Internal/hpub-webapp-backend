@@ -2425,7 +2425,7 @@ class BaseProductSearchView(APIView, ProductListMixin):
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            # Validate input parameters
+            # 1) Validate input parameters
             product_code = request.GET.get("product_code")
             product_title = request.GET.get("product_title")
             if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
@@ -2433,7 +2433,7 @@ class BaseProductSearchView(APIView, ProductListMixin):
             if product_title and not isinstance(product_title, str):
                 return _handle_invalid_query_param()
 
-            # Build the query: start from a default that can be extended by subclasses
+            # 2) Build the base query
             query = self.get_default_query()
             if product_code:
                 query &= Q(product_code_no_dashes__icontains=product_code)
@@ -2447,15 +2447,33 @@ class BaseProductSearchView(APIView, ProductListMixin):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-            sorted_qs = self.get_sorted_queryset(products, request)
-            data, paginator = self.paginate_and_serialize(sorted_qs, request)
+            # 3) Apply sorting at the ORM level
+            sort_by = request.GET.get("sort_by")
+            allowed_sorts = {"product_title", "product_code_no_dashes"}
+            # allow descending if prefixed with '-'
+            if sort_by:
+                field = sort_by.lstrip("-")
+                if field in allowed_sorts:
+                    products = products.order_by(sort_by)
+
+            # 4) Paginate & serialize
+            data, paginator = self.paginate_and_serialize(products, request)
+
+            # 5) Build response payload
             response_data = _prepare_response_data(
                 products, data, product_code, product_title
             )
             response_data = self.postprocess_response_data(response_data, products)
+
+            # 6) If pagination was skipped (paginator is None), return full list
+            if paginator is None:
+                return Response(response_data, status=status.HTTP_200_OK)
+
+            # 7) Otherwise return a proper paginated response
             return paginator.get_paginated_response(
                 response_data, status_code=status.HTTP_200_OK
             )
+
         except DatabaseError:
             return _handle_database_error()
         except TimeoutError:

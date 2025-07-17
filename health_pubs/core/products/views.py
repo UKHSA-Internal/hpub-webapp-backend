@@ -2426,7 +2426,7 @@ class BaseProductSearchView(APIView, ProductListMixin):
     def get(self, request, *args, **kwargs) -> Response:
         try:
             # 1) Validate input parameters
-            product_code  = request.GET.get("product_code")
+            product_code = request.GET.get("product_code")
             product_title = request.GET.get("product_title")
             if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
                 return _handle_invalid_query_param()

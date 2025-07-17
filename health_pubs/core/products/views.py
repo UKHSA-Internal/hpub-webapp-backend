@@ -2489,7 +2489,6 @@ class BaseProductSearchView(APIView, ProductListMixin):
             )
 
 
-
 class ProductSearchAdminView(BaseProductSearchView):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]

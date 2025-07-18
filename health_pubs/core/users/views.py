@@ -229,7 +229,11 @@ class UserSignUpView(APIView):
 
         # Step 8: Generate tokens and return response.
         return self._return_user(
-            new_user_page, email, role_name, status_code=status.HTTP_201_CREATED, has_organization=has_organization
+            new_user_page,
+            email,
+            role_name,
+            status_code=status.HTTP_201_CREATED,
+            has_organization=has_organization,
         )
 
     def _handle_create_user_error(self, ex, email, role_name):

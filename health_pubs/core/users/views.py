@@ -205,6 +205,7 @@ class UserSignUpView(APIView):
         if isinstance(establishment_result, Response):
             return establishment_result
         establishment, organization_ref = establishment_result
+        has_organization = organization_ref is not None
 
         # Step 6: Retrieve or create the parent 'users' page.
         parent_page = self._get_or_create_parent_page()
@@ -228,7 +229,7 @@ class UserSignUpView(APIView):
 
         # Step 8: Generate tokens and return response.
         return self._return_user(
-            new_user_page, email, role_name, status_code=status.HTTP_201_CREATED
+            new_user_page, email, role_name, status_code=status.HTTP_201_CREATED, has_organization=has_organization
         )
 
     def _handle_create_user_error(self, ex, email, role_name):
@@ -251,6 +252,7 @@ class UserSignUpView(APIView):
                     role_name,
                     message=USER_EXISTS_MSG,
                     status_code=status.HTTP_200_OK,
+                    has_organization=has_organization,
                 )
 
         err_msg = (
@@ -389,7 +391,7 @@ class UserSignUpView(APIView):
         return new_user_page
 
     def _return_user(
-        self, user_page, email, role_name, message=None, status_code=status.HTTP_200_OK
+        self, user_page, email, role_name, message=None, status_code=status.HTTP_200_OK, has_organization=False,   
     ):
         """
         Helper method to generate tokens and return the user data.
@@ -412,6 +414,7 @@ class UserSignUpView(APIView):
         response_data = {
             "user": user_response_data,
             "short_term_token": short_term_token,
+            "has_organization": has_organization,
         }
         if message:
             response_data["message"] = message

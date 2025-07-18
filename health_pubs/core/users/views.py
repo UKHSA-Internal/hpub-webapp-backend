@@ -395,7 +395,13 @@ class UserSignUpView(APIView):
         return new_user_page
 
     def _return_user(
-        self, user_page, email, role_name, message=None, status_code=status.HTTP_200_OK, has_organization=False,   
+        self,
+        user_page,
+        email,
+        role_name,
+        message=None,
+        status_code=status.HTTP_200_OK,
+        has_organization=False,
     ):
         """
         Helper method to generate tokens and return the user data.

@@ -2332,7 +2332,9 @@ class ProductListMixin:
         # inject presigned URLs
         if use_direct_update:
             _update_product_downloads_with_presigned_urls(page, presigned)
-            serializer = (serializer_class or self.serializer_class)(page, many=True, context=ctx)
+            serializer = (serializer_class or self.serializer_class)(
+                page, many=True, context=ctx
+            )
         else:
             update_product_urls(serializer.data, presigned)
 

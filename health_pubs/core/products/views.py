@@ -2306,7 +2306,9 @@ class ProductListMixin:
     def get_serializer_context(self, request):
         return {"request": request} if self.include_request_context else {}
 
-    def paginate_and_serialize(self, queryset, request, serializer_class=None, use_direct_update=False):
+    def paginate_and_serialize(
+        self, queryset, request, serializer_class=None, use_direct_update=False
+    ):
         """
         Always returns a DRF Response, either freshly built or from cache.
         """

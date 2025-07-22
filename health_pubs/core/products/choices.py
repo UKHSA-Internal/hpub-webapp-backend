@@ -74,7 +74,7 @@ PRODUCT_TYPE_CHOICE = [
 ]
 
 ALTERNATIVE_TYPE_CHOICE = [
-    ("Audio", "Audio"),
+    ("Video and Audio", "Video and Audio"),
     ("Braille", "Braille"),
     ("Easy read", "Easy read"),
     ("British Sign Language (BSL)", "British Sign Language (BSL)"),

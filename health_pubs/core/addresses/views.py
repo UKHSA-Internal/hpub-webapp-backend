@@ -1,4 +1,5 @@
 import logging
+import uuid
 import os
 import sys
 import uuid
@@ -100,17 +101,24 @@ class AddressViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         data = request.data
 
-        # Handle user_ref
+        # Resolve user_ref
         user_ref = None
-        user_ref_id = data.get("user_ref")
-        if user_ref_id:
-            user_ref = get_object_or_404(User, user_id=user_ref_id)
+        if data.get("user_ref"):
+            user_ref = get_object_or_404(User, user_id=data["user_ref"])
 
-        # Normalize address fields
-        normalized = self._normalize_address_fields(data)
+        # Normalize fields
+        normalized = {
+            "address_line1": data["address_line1"].strip(),
+            "address_line2": data.get("address_line2", "").strip(),
+            "address_line3": data.get("address_line3", "").strip(),
+            "city": data["city"].strip(),
+            "county": data.get("county", "").strip(),
+            "postcode": data["postcode"].strip().upper(),
+            "country": data["country"].strip(),
+        }
 
-        # Use __iexact lookups to do a case-insensitive duplicate check
-        existing_address = Address.objects.filter(
+        # Dedupe check
+        existing = Address.objects.filter(
             address_line1__iexact=normalized["address_line1"],
             address_line2__iexact=normalized["address_line2"],
             address_line3__iexact=normalized["address_line3"],
@@ -120,81 +128,90 @@ class AddressViewSet(viewsets.ModelViewSet):
             country__iexact=normalized["country"],
             user_ref=user_ref,
         ).first()
-
-        if existing_address:
+        if existing:
             return Response(
                 {
                     "message": "Address already exists.",
-                    "address": AddressSerializer(existing_address).data,
+                    "address": AddressSerializer(existing).data,
                     "action": "confirm_existing_or_create_new",
                 },
                 status=status.HTTP_409_CONFLICT,
             )
 
-        # Generate slug and title
-        slug = self.get_unique_slug(slugify(normalized["address_line1"]))
-        title = normalized["address_line1"]
-
-        # Ensure parent page exists
+        # Get or create our “addresses” parent page
         parent_page = self._get_or_create_parent_page("addresses")
         if not parent_page:
             return Response(
-                {"error": "Parent page not found."},
-                status=status.HTTP_400_BAD_REQUEST,
+                {"error": "Parent page not found."}, status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Build the Address instance without saving
-        address_instance = self._build_address_instance(
-            normalized, title, slug, user_ref
+        # Build but don’t save yet
+        title = normalized["address_line1"]
+        base_slug = slugify(title)
+        slug = self.get_unique_slug(base_slug, parent_page)
+        address_instance = Address(
+            title=title,
+            slug=slug,
+            address_line1=normalized["address_line1"],
+            address_line2=normalized["address_line2"],
+            address_line3=normalized["address_line3"],
+            city=normalized["city"],
+            county=normalized["county"],
+            postcode=normalized["postcode"],
+            country=normalized["country"],
+            is_default=False,  # may override below
+            verified=False,
+            user_ref=user_ref,
         )
 
-        # Check if this is the user's first address
-        user_existing_addresses = Address.objects.filter(user_ref=user_ref)
-        if not user_existing_addresses.exists():
+        # First address → default
+        if not Address.objects.filter(user_ref=user_ref).exists():
             address_instance.is_default = True
 
-        # Verify the address using the external API BEFORE saving it
+        # External verification
         if not verify_address(address_instance):
             return Response(
                 {"error": "Address verification failed."},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        # Now that verification has passed, save the instance.
-        # If there are no children, manually set the path and depth
-        if parent_page.get_last_child() is None:
-            address_instance.path = f"{parent_page.path}0001"
-            address_instance.depth = parent_page.depth + 1
-            address_instance.save()
-        else:
-            # For subsequent children, add the instance as a child.
-            parent_page.add_child(instance=address_instance)
+        # ✨ **Always** use add_child() for both first and later children
+        parent_page.add_child(instance=address_instance)
 
         serializer = AddressSerializer(address_instance)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
-    def _get_or_create_parent_page(self, slug):
-        """Ensure the parent page exists; create if it does not."""
+    def get_unique_slug(self, base_slug: str, parent_page: Page) -> str:
+        """
+        Generate a slug unique among this page's children.
+        """
+        siblings = set(
+            parent_page.get_children()
+            .filter(slug__startswith=base_slug)
+            .values_list("slug", flat=True)
+        )
+        if base_slug not in siblings:
+            return base_slug
+
+        i = 1
+        while True:
+            candidate = f"{base_slug}-{i}"
+            if candidate not in siblings:
+                return candidate
+            i += 1
+
+    def _get_or_create_parent_page(self, slug: str) -> Page:
         try:
             return Page.objects.get(slug=slug)
         except Page.DoesNotExist:
-            root_page = Page.objects.first()
-            parent_page = Page(
+            root = Page.objects.first()
+            parent = Page(
                 title=slug.capitalize(),
                 slug=slug,
                 content_type=ContentType.objects.get_for_model(Page),
             )
-            root_page.add_child(instance=parent_page)
-            logger.info(f"Parent page '{slug}' created.")
-            return parent_page
-
-    def get_unique_slug(self, base_slug):
-        """Generate a unique slug for the Address."""
-        queryset = Address.objects.filter(slug__startswith=base_slug)
-        if not queryset.exists():
-            return base_slug
-        num = queryset.count() + 1
-        return f"{base_slug}-{num}"
+            root.add_child(instance=parent)
+            return parent
 
     @action(detail=False, methods=["post"], url_path="verify-address")
     def verify(self, request):

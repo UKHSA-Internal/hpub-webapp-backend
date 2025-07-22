@@ -2281,7 +2281,6 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return None
 
 
-
 class ProductListMixin:
     """
     Handles sorting, pagination + S3 presigning — now with per-request caching.

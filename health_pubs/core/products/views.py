@@ -2282,6 +2282,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
 
 
 
+
 class ProductListMixin:
     """
     Handles sorting, pagination + S3 presigning — now with per-request caching.
@@ -2339,7 +2340,7 @@ class ProductListMixin:
         # cache the full Response
         cache.set(cache_key, response, self.cache_timeout)
         return response
-
+        
 
 @method_decorator(cache_page(CACHE_TTL), name="dispatch")
 class ProductAdminListView(APIView, ProductListMixin):

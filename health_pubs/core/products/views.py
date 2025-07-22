@@ -2281,14 +2281,16 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return None
 
 
+
 class ProductListMixin:
     """
-    Handles sorting, pagination + S3 presigning—but now with per-request caching.
+    Handles sorting, pagination + S3 presigning — now with per-request caching.
     """
 
     serializer_class = ProductSerializer
     include_request_context = False
-    cache_timeout = CACHE_TTL
+    cache_timeout = 60 * 5  # e.g. 5 minutes
+    pagination_class = CustomPagination
 
     def get_cache_key(self, request, prefix="products"):
         user_part = (
@@ -2297,46 +2299,46 @@ class ProductListMixin:
         return f"{prefix}:{user_part}:{request.get_full_path()}"
 
     def get_sorted_queryset(self, queryset, request):
-        sort_by = request.GET.get("sort_by")
-        if sort_by and sort_by.lstrip("-") in VALID_SORT_FIELDS:
+        sort_by = request.GET.get("sort_by", "").lstrip()
+        if sort_by and sort_by in VALID_SORT_FIELDS:
             return queryset.order_by(sort_by)
         return queryset
 
     def get_serializer_context(self, request):
         return {"request": request} if self.include_request_context else {}
 
-    def paginate_and_serialize(
-        self, queryset, request, serializer_class=None, use_direct_update=False
-    ):
+    def paginate_and_serialize(self, queryset, request, serializer_class=None, use_direct_update=False):
+        """
+        Always returns a DRF Response, either freshly built or from cache.
+        """
         cache_key = self.get_cache_key(request)
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return cached, None
+        cached_response = cache.get(cache_key)
+        if cached_response:
+            return cached_response
 
-        paginator = CustomPagination()
-        page = paginator.paginate_queryset(queryset, request)
+        # paginate
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(queryset, request, view=self)
         ctx = self.get_serializer_context(request)
-        serializer = (serializer_class or self.serializer_class)(
-            page, many=True, context=ctx
-        )
+        serializer = (serializer_class or self.serializer_class)(page, many=True, context=ctx)
 
-        # 1) collect S3 URLs
+        # presign S3 URLs
         all_urls = extract_s3_urls(serializer.data)
-        # 2) presign ( caches per-URL internally)
         presigned = generate_presigned_urls(all_urls)
 
-        # 3) inject
+        # inject presigned URLs
         if use_direct_update:
             _update_product_downloads_with_presigned_urls(page, presigned)
-            serializer = (serializer_class or self.serializer_class)(
-                page, many=True, context=ctx
-            )
+            serializer = (serializer_class or self.serializer_class)(page, many=True, context=ctx)
         else:
             update_product_urls(serializer.data, presigned)
 
         data = serializer.data
-        cache.set(cache_key, data, self.cache_timeout)
-        return data, paginator
+        # build the paginated response
+        response = paginator.get_paginated_response(data)
+        # cache the full Response
+        cache.set(cache_key, response, self.cache_timeout)
+        return response
 
 
 @method_decorator(cache_page(CACHE_TTL), name="dispatch")
@@ -2536,24 +2538,64 @@ class ProductUsersSearchFilterAPIView(generics.ListAPIView):
     ordering = ["product_title", "-updated_at"]
 
 
-class ProductUsersFilterView(APIView, ProductListMixin):
+class ProductUsersFilterView(ProductListMixin, APIView):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
-    pagination_class = CustomPagination
 
-    def get(self, request, *args, **kwargs) -> Response:
+    def get(self, request, *args, **kwargs):
         try:
-            query = self.build_query(request)
-            products = Product.objects.filter(
-                query, is_latest=True, status="live"
-            ).distinct()
+            # 1) build the Django ORM Q-query
+            base_q = Q(is_latest=True, status="live")
+            filters = Q()
+            # example boolean flags
+            if request.GET.get("download_only", "").lower() == "true":
+                filters &= Q(tag="download_only")
+            elif request.GET.get("download_or_order", "").lower() == "true":
+                filters &= Q(tag="download_and_order")
+            elif request.GET.get("order_only", "").lower() == "true":
+                filters &= Q(tag="order_only")
+
+            # example multi-valued filters
+            for param, field in [
+                ("audiences", "update_ref__audience_ref__name"),
+                ("diseases", "update_ref__diseases_ref__name"),
+                ("vaccinations", "update_ref__vaccination_ref__name"),
+                ("program_names", "program_name"),
+                ("where_to_use", "update_ref__where_to_use_ref__name"),
+                ("alternative_type", "update_ref__alternative_type"),
+                ("product_type", "update_ref__product_type"),
+                ("languages", "language_name"),
+            ]:
+                values = request.GET.getlist(param)
+                if values:
+                    filters &= Q(**{f"{field}__in": values})
+
+            # recently_updated
+            if recently := request.GET.get("recently_updated"):
+                try:
+                    filters &= Q(updated_at__gte=recently)
+                except ValueError:
+                    return handle_error(
+                        ErrorCode.INVALID_PARAMETER,
+                        f"Invalid date for recently_updated: {recently}",
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                    )
+
+            queryset = Product.objects.filter(base_q & filters).distinct()
+
+            # sorting
             sort_by = request.GET.get("sort_by", "product_title")
-            if sort_by not in VALID_SORT_FIELDS:
+            if sort_by.lstrip("-") not in {f.lstrip("-") for f in VALID_SORT_FIELDS}:
                 sort_by = "product_title"
-            sorted_qs = products.order_by(sort_by)
-            data, paginator = self.paginate_and_serialize(sorted_qs, request)
-            data = filter_live_languages(data)
-            return paginator.get_paginated_response(data)
+            queryset = queryset.order_by(sort_by)
+
+            # paginate, presign URLs, and serialize
+            response = self.paginate_and_serialize(queryset, request)
+
+            # filter out non-live languages in the serialized payload
+            response.data["results"] = filter_live_languages(response.data.get("results", []))
+            return response
+
         except Exception:
             logger.exception(INTERNAL_ERROR_MSG)
             return handle_error(
@@ -2561,54 +2603,6 @@ class ProductUsersFilterView(APIView, ProductListMixin):
                 ErrorMessage.INTERNAL_SERVER_ERROR,
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-
-    def build_query(self, request):
-        query = Q()
-        recently_updated = request.GET.get("recently_updated")
-        download_or_order = request.GET.get("download_or_order")
-        download_only = request.GET.get("download_only")
-        order_only = request.GET.get("order_only")
-        audience_names = request.GET.getlist("audiences", [])
-        program_names = request.GET.getlist("program_names", [])
-        disease_names = request.GET.getlist("diseases", [])
-        vaccination_names = request.GET.getlist("vaccinations", [])
-        product_types = request.GET.getlist("product_type", [])
-        language_names = request.GET.getlist("languages", [])
-        alternative_type = request.GET.getlist("alternative_type", [])
-        where_to_use_names = request.GET.getlist("where_to_use", [])
-
-        if recently_updated:
-            query &= self.handle_recently_updated(recently_updated)
-        if download_only and download_only.lower() == "true":
-            query &= Q(tag__in=["download_only"])
-        elif download_or_order and download_or_order.lower() == "true":
-            query &= Q(tag__in=["download_and_order"])
-        elif order_only and order_only.lower() == "true":
-            query &= Q(tag__in=["order_only"])
-        if audience_names:
-            query &= Q(update_ref__audience_ref__name__in=audience_names)
-        if disease_names:
-            query &= Q(update_ref__diseases_ref__name__in=disease_names)
-        if vaccination_names:
-            query &= Q(update_ref__vaccination_ref__name__in=vaccination_names)
-        if program_names:
-            query &= Q(program_name__in=program_names)
-        if where_to_use_names:
-            query &= Q(update_ref__where_to_use_ref__name__in=where_to_use_names)
-        if alternative_type:
-            query &= Q(update_ref__alternative_type__in=alternative_type)
-        if product_types:
-            query &= Q(update_ref__product_type__in=product_types)
-        if language_names:
-            query &= Q(language_name__in=language_names)
-
-        return query
-
-    def handle_recently_updated(self, recently_updated):
-        try:
-            return Q(updated_at__gte=recently_updated)
-        except ValueError:
-            return _handle_invalid_query_param()
 
 
 class ProductUsersSearchFilterAPIView(generics.ListAPIView):

@@ -2281,8 +2281,6 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return None
 
 
-
-
 class ProductListMixin:
     """
     Handles sorting, pagination + S3 presigning — now with per-request caching.
@@ -2308,7 +2306,9 @@ class ProductListMixin:
     def get_serializer_context(self, request):
         return {"request": request} if self.include_request_context else {}
 
-    def paginate_and_serialize(self, queryset, request, serializer_class=None, use_direct_update=False):
+    def paginate_and_serialize(
+        self, queryset, request, serializer_class=None, use_direct_update=False
+    ):
         """
         Always returns a DRF Response, either freshly built or from cache.
         """
@@ -2321,7 +2321,9 @@ class ProductListMixin:
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(queryset, request, view=self)
         ctx = self.get_serializer_context(request)
-        serializer = (serializer_class or self.serializer_class)(page, many=True, context=ctx)
+        serializer = (serializer_class or self.serializer_class)(
+            page, many=True, context=ctx
+        )
 
         # presign S3 URLs
         all_urls = extract_s3_urls(serializer.data)
@@ -2330,7 +2332,9 @@ class ProductListMixin:
         # inject presigned URLs
         if use_direct_update:
             _update_product_downloads_with_presigned_urls(page, presigned)
-            serializer = (serializer_class or self.serializer_class)(page, many=True, context=ctx)
+            serializer = (serializer_class or self.serializer_class)(
+                page, many=True, context=ctx
+            )
         else:
             update_product_urls(serializer.data, presigned)
 
@@ -2594,7 +2598,9 @@ class ProductUsersFilterView(ProductListMixin, APIView):
             response = self.paginate_and_serialize(queryset, request)
 
             # filter out non-live languages in the serialized payload
-            response.data["results"] = filter_live_languages(response.data.get("results", []))
+            response.data["results"] = filter_live_languages(
+                response.data.get("results", [])
+            )
             return response
 
         except Exception:

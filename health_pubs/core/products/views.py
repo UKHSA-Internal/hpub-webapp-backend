@@ -2596,7 +2596,9 @@ class ProductUsersFilterView(ProductListMixin, APIView):
             response = self.paginate_and_serialize(queryset, request)
 
             # filter out non-live languages in the serialized payload
-            response.data["results"] = filter_live_languages(response.data.get("results", []))
+            response.data["results"] = filter_live_languages(
+                response.data.get("results", [])
+            )
             return response
 
         except Exception:

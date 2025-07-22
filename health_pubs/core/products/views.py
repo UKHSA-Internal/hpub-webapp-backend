@@ -2281,14 +2281,16 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return None
 
 
+
 class ProductListMixin:
     """
-    Handles sorting, pagination + S3 presigning — now with per-request caching.
+    Handles sorting, pagination + S3 presigning — now with per-request caching
+    of only the raw data dict.
     """
 
     serializer_class = ProductSerializer
     include_request_context = False
-    cache_timeout = 60 * 5  # e.g. 5 minutes
+    cache_timeout = CACHE_TTL
     pagination_class = CustomPagination
 
     def get_cache_key(self, request, prefix="products"):
@@ -2297,39 +2299,40 @@ class ProductListMixin:
         )
         return f"{prefix}:{user_part}:{request.get_full_path()}"
 
-    def get_sorted_queryset(self, queryset, request):
-        sort_by = request.GET.get("sort_by", "").lstrip()
-        if sort_by and sort_by in VALID_SORT_FIELDS:
-            return queryset.order_by(sort_by)
-        return queryset
-
     def get_serializer_context(self, request):
         return {"request": request} if self.include_request_context else {}
 
     def paginate_and_serialize(
-        self, queryset, request, serializer_class=None, use_direct_update=False
-    ):
+        self,
+        queryset,
+        request,
+        serializer_class=None,
+        use_direct_update=False,
+    ) -> Response:
         """
-        Always returns a DRF Response, either freshly built or from cache.
+        1. Check cache for raw .data dict.
+        2. On hit, return a NEW Response(cached_data).
+        3. Otherwise paginate, serialize, presign URLs, cache response.data, return it.
         """
         cache_key = self.get_cache_key(request)
-        cached_response = cache.get(cache_key)
-        if cached_response:
-            return cached_response
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
 
-        # paginate
+        # 1) Paginate
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(queryset, request, view=self)
+
+        # 2) Serialize
         ctx = self.get_serializer_context(request)
         serializer = (serializer_class or self.serializer_class)(
             page, many=True, context=ctx
         )
 
-        # presign S3 URLs
+        # 3) Presign S3 URLs
         all_urls = extract_s3_urls(serializer.data)
         presigned = generate_presigned_urls(all_urls)
 
-        # inject presigned URLs
         if use_direct_update:
             _update_product_downloads_with_presigned_urls(page, presigned)
             serializer = (serializer_class or self.serializer_class)(
@@ -2338,70 +2341,79 @@ class ProductListMixin:
         else:
             update_product_urls(serializer.data, presigned)
 
-        data = serializer.data
-        # build the paginated response
-        response = paginator.get_paginated_response(data)
-        # cache the full Response
-        cache.set(cache_key, response, self.cache_timeout)
+        # 4) Build paginated Response
+        response = paginator.get_paginated_response(serializer.data)
+
+        # 5) Cache only the raw dict
+        cache.set(cache_key, response.data, self.cache_timeout)
+
         return response
 
 
 @method_decorator(cache_page(CACHE_TTL), name="dispatch")
-class ProductAdminListView(APIView, ProductListMixin):
+class ProductAdminListView(ProductListMixin, APIView):
     authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
-
-    # 👉 Turn on request-injection so the serializer’s to_representation()
-    # will see `request.user` and _not_ strip out your email fields.
+    permission_classes = [IsAdminUser]
     include_request_context = True
 
     def get(self, request, *args, **kwargs):
-        logger.info("ProductAdminListView GET called")
         try:
-            products = Product.objects.all()
-            if not products.exists():
-                logger.warning(ErrorMessage.PRODUCT_NOT_FOUND.value)
+            qs = Product.objects.all()
+            if not qs.exists():
                 return handle_error(
                     ErrorCode.PRODUCT_NOT_FOUND,
                     ErrorMessage.PRODUCT_NOT_FOUND,
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
 
-            sorted_qs = self.get_sorted_queryset(products, request)
-            data, paginator = self.paginate_and_serialize(sorted_qs, request)
-            logger.info("Returning %d products", len(data))
-            return paginator.get_paginated_response(
-                data, status_code=status.HTTP_200_OK
-            )
+            # Apply sorting
+            sort_by = request.GET.get("sort_by", "product_title")
+            if sort_by.lstrip("-") not in {f.lstrip("-") for f in VALID_SORT_FIELDS}:
+                sort_by = "product_title"
+            qs = qs.order_by(sort_by)
+
+            # Paginate → Response
+            response = self.paginate_and_serialize(qs, request, use_direct_update=True)
+            return response
+
         except Exception as e:
             return handle_exceptions(e)
 
 
 @method_decorator(cache_page(CACHE_TTL), name="dispatch")
-class ProductUsersListView(APIView, ProductListMixin):
+class ProductUsersListView(ProductListMixin, APIView):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
     def get(self, request, *args, **kwargs):
-        logger.info("ProductUsersListView GET method called")
         try:
-            products = Product.objects.filter(status="live").distinct()
-            if not products.exists():
-                logger.warning("No published products found.")
+            qs = Product.objects.filter(status="live", is_latest=True).distinct()
+            if not qs.exists():
                 return handle_error(
                     ErrorCode.PRODUCT_NOT_FOUND,
                     ErrorMessage.PRODUCT_NOT_FOUND,
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
-            sorted_qs = self.get_sorted_queryset(products, request)
-            data, paginator = self.paginate_and_serialize(sorted_qs, request)
-            data = filter_live_languages(data)
-            logger.info("Returning paginated response with %d products", len(data))
-            return paginator.get_paginated_response(
-                data, status_code=status.HTTP_200_OK
+
+            # Sorting
+            sort_by = request.GET.get("sort_by", "product_title")
+            if sort_by.lstrip("-") not in {f.lstrip("-") for f in VALID_SORT_FIELDS}:
+                sort_by = "product_title"
+            qs = qs.order_by(sort_by)
+
+            # Paginate → Response
+            response = self.paginate_and_serialize(qs, request)
+
+            # Post‑process: drop any non-live languages
+            response.data["results"] = filter_live_languages(response.data["results"])
+            return response
+
+        except Exception:
+            return handle_error(
+                ErrorCode.INTERNAL_SERVER_ERROR,
+                ErrorMessage.INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-        except Exception as e:
-            return handle_exceptions(e)
 
 
 class ProductSearchListMixin(ProductListMixin):
@@ -2549,19 +2561,22 @@ class ProductUsersFilterView(ProductListMixin, APIView):
 
     def get(self, request, *args, **kwargs):
         try:
-            # 1) build the Django ORM Q-query
             base_q = Q(is_latest=True, status="live")
             filters = Q()
-            # example boolean flags
-            if request.GET.get("download_only", "").lower() == "true":
+
+            # boolean flags
+            dl = request.GET.get("download_only", "").lower()
+            do = request.GET.get("download_or_order", "").lower()
+            oo = request.GET.get("order_only", "").lower()
+            if dl == "true":
                 filters &= Q(tag="download_only")
-            elif request.GET.get("download_or_order", "").lower() == "true":
+            elif do == "true":
                 filters &= Q(tag="download_and_order")
-            elif request.GET.get("order_only", "").lower() == "true":
+            elif oo == "true":
                 filters &= Q(tag="order_only")
 
-            # example multi-valued filters
-            for param, field in [
+            # multi‑value lookups
+            for param, lookup in [
                 ("audiences", "update_ref__audience_ref__name"),
                 ("diseases", "update_ref__diseases_ref__name"),
                 ("vaccinations", "update_ref__vaccination_ref__name"),
@@ -2571,9 +2586,9 @@ class ProductUsersFilterView(ProductListMixin, APIView):
                 ("product_type", "update_ref__product_type"),
                 ("languages", "language_name"),
             ]:
-                values = request.GET.getlist(param)
-                if values:
-                    filters &= Q(**{f"{field}__in": values})
+                vals = request.GET.getlist(param)
+                if vals:
+                    filters &= Q(**{f"{lookup}__in": vals})
 
             # recently_updated
             if recently := request.GET.get("recently_updated"):
@@ -2586,25 +2601,22 @@ class ProductUsersFilterView(ProductListMixin, APIView):
                         status_code=status.HTTP_400_BAD_REQUEST,
                     )
 
-            queryset = Product.objects.filter(base_q & filters).distinct()
+            qs = Product.objects.filter(base_q & filters).distinct()
 
             # sorting
             sort_by = request.GET.get("sort_by", "product_title")
             if sort_by.lstrip("-") not in {f.lstrip("-") for f in VALID_SORT_FIELDS}:
                 sort_by = "product_title"
-            queryset = queryset.order_by(sort_by)
+            qs = qs.order_by(sort_by)
 
-            # paginate, presign URLs, and serialize
-            response = self.paginate_and_serialize(queryset, request)
+            # Paginate → Response
+            response = self.paginate_and_serialize(qs, request)
 
-            # filter out non-live languages in the serialized payload
-            response.data["results"] = filter_live_languages(
-                response.data.get("results", [])
-            )
+            # filter out non-live languages
+            response.data["results"] = filter_live_languages(response.data["results"])
             return response
 
         except Exception:
-            logger.exception(INTERNAL_ERROR_MSG)
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,

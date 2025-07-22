@@ -2321,7 +2321,9 @@ class ProductListMixin:
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(queryset, request, view=self)
         ctx = self.get_serializer_context(request)
-        serializer = (serializer_class or self.serializer_class)(page, many=True, context=ctx)
+        serializer = (serializer_class or self.serializer_class)(
+            page, many=True, context=ctx
+        )
 
         # presign S3 URLs
         all_urls = extract_s3_urls(serializer.data)

@@ -26,11 +26,13 @@ from rest_framework.views import APIView
 logger = logging.getLogger(__name__)
 
 
-class ProgramCreateViewSet(viewsets.ModelViewSet):
+class ProgramCreateViewSet(viewsets.ViewSet):
     authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
-    queryset = Program.objects.all()
+    permission_classes = [IsAuthenticated]
     serializer_class = ProgramSerializer
+
+    def get_serializer(self, *args, **kwargs):
+        return self.serializer_class(*args, **kwargs)
 
     def create(self, request, *args, **kwargs):
         data = request.data
@@ -47,24 +49,20 @@ class ProgramCreateViewSet(viewsets.ModelViewSet):
         created_programs = []
         errors = []
 
-        for data in data_list:
-            program_name = data.get("programme_name", "")
+        for entry in data_list:
+            program_name = entry.get("programme_name", "")
             if not program_name:
-                errors.append({"error": "Program Name is required", "data": data})
+                errors.append({"error": "Program Name is required", "data": entry})
                 continue
 
             slug = slugify(program_name)
             unique_slug = self.get_unique_slug(slug)
-            data["title"] = program_name
-            data["slug"] = unique_slug
+            entry["title"] = program_name
+            entry["slug"] = unique_slug
 
-            program_id = data.get("program_id")
-            if not program_id:
-                program_id = self.get_next_program_id()
-            data["program_id"] = program_id
-
-            is_featured = data.get("is_featured", False)
-            data["is_featured"] = is_featured
+            program_id = entry.get("program_id") or self.get_next_program_id()
+            entry["program_id"] = program_id
+            entry["is_featured"] = entry.get("is_featured", False)
 
             try:
                 parent_page = Page.objects.get(slug="programs")
@@ -77,60 +75,52 @@ class ProgramCreateViewSet(viewsets.ModelViewSet):
                 )
                 root_page.add_child(instance=parent_page)
 
-            serializer = self.get_serializer(data=data)
+            serializer = self.get_serializer(data=entry)
             if serializer.is_valid():
                 try:
                     program_instance = Program(
-                        title=data["title"],
-                        slug=data["slug"],
-                        programme_name=data["programme_name"],
-                        program_term=data.get("program_term"),
-                        is_temporary=data.get("is_temporary"),
-                        program_id=data["program_id"],
-                        is_featured=data["is_featured"],
-                        external_key=data.get("external_key", ""),
+                        title=entry["title"],
+                        slug=entry["slug"],
+                        programme_name=entry["programme_name"],
+                        program_term=entry.get("program_term"),
+                        is_temporary=entry.get("is_temporary"),
+                        program_id=entry["program_id"],
+                        is_featured=entry["is_featured"],
+                        external_key=entry.get("external_key", ""),
                     )
                     parent_page.add_child(instance=program_instance)
                     program_instance.save()
-                    created_programs.append(ProgramSerializer(program_instance).data)
+                    created_programs.append(
+                        self.serializer_class(program_instance).data
+                    )
                 except IntegrityError:
                     errors.append(
                         {
-                            "error": f"Program with name '{data['programme_name']}' already exists",
-                            "data": data,
+                            "error": f"Program with name '{entry['programme_name']}' already exists",
+                            "data": entry,
                         }
                     )
             else:
-                errors.append({"error": serializer.errors, "data": data})
+                errors.append({"error": serializer.errors, "data": entry})
 
         if created_programs:
             return Response(
                 {"created_programs": created_programs, "errors": errors},
-                status=(
-                    status.HTTP_201_CREATED
-                    if not errors
-                    else status.HTTP_207_MULTI_STATUS
-                ),
+                status=status.HTTP_201_CREATED
+                if not errors
+                else status.HTTP_207_MULTI_STATUS,
             )
-        else:
-            return Response({"errors": errors}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"errors": errors}, status=status.HTTP_400_BAD_REQUEST)
 
     def get_unique_slug(self, base_slug):
         queryset = Program.objects.filter(slug__startswith=base_slug)
         if not queryset.exists():
             return base_slug
-
-        num = queryset.count() + 1
-        return f"{base_slug}-{num}"
+        return f"{base_slug}-{queryset.count() + 1}"
 
     def get_next_program_id(self):
-        last_program = Program.objects.aggregate(max_id=Max("program_id"))["max_id"]
-        if not last_program:
-            return "1"
-
-        last_id = int(last_program, 36)
-        next_id = last_id + 1
-        return self.base36encode(next_id)
+        last_id = Program.objects.aggregate(max_id=Max("program_id"))["max_id"]
+        return self.base36encode(int(last_id, 36) + 1) if last_id else "1"
 
     def base36encode(self, number):
         alphabet = string.digits + string.ascii_uppercase

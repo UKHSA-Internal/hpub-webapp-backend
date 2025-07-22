@@ -6,7 +6,6 @@ import uuid
 from typing import Optional, Union
 from urllib.parse import unquote
 from django.utils import timezone
-from datetime import timedelta
 import time
 from django.db import IntegrityError
 from psycopg2 import errors as pg_errors
@@ -36,7 +35,6 @@ from core.utils.generate_s3_presigned_url import (
 from .filters import ProductFilter
 from rest_framework import generics
 from rest_framework.views import APIView
-from rest_framework.generics import ListAPIView
 from rest_framework.filters import OrderingFilter, SearchFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from django.conf import settings
@@ -84,7 +82,6 @@ from .serializers import (
     ProductSerializer,
     ProductUpdateSerializer,
 )
-from rest_framework.generics import ListAPIView
 from django.core.serializers.json import DjangoJSONEncoder
 
 from configs.get_secret_config import Config
@@ -2283,19 +2280,20 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
 
 class ProductListMixin:
     """
-    Handles sorting, pagination + S3 presigning — now with per-request caching.
+    Handles sorting, pagination + S3 presigning, with per-request caching of raw data.
     """
 
     serializer_class = ProductSerializer
     include_request_context = False
-    cache_timeout = 60 * 5  # e.g. 5 minutes
+    cache_timeout = CACHE_TTL
     pagination_class = CustomPagination
 
     def get_cache_key(self, request, prefix="products"):
-        user_part = (
-            f"user:{request.user.id}" if request.user.is_authenticated else "user:anon"
-        )
-        return f"{prefix}:{user_part}:{request.get_full_path()}"
+        user_id = request.user.id if request.user.is_authenticated else "anon"
+        return f"{prefix}:user:{user_id}:{request.get_full_path()}"
+
+    def get_serializer_context(self, request):
+        return {"request": request} if self.include_request_context else {}
 
     def get_sorted_queryset(self, queryset, request):
         sort_by = request.GET.get("sort_by", "").lstrip()
@@ -2303,33 +2301,39 @@ class ProductListMixin:
             return queryset.order_by(sort_by)
         return queryset
 
-    def get_serializer_context(self, request):
-        return {"request": request} if self.include_request_context else {}
-
     def paginate_and_serialize(
-        self, queryset, request, serializer_class=None, use_direct_update=False
+        self,
+        queryset,
+        request,
+        serializer_class=None,
+        use_direct_update=False,
     ):
         """
-        Always returns a DRF Response, either freshly built or from cache.
+        Returns (data_list, paginator).
+        1) Try cache (raw data list).
+        2) Always instantiate & run paginator.paginate_queryset(...) so paginator state is correct.
+        3) On cache hit: return (cached_list, paginator).
+        4) On miss: serialize & presign, cache raw list, return (new_list, paginator).
         """
         cache_key = self.get_cache_key(request)
-        cached_response = cache.get(cache_key)
-        if cached_response:
-            return cached_response
+        cached = cache.get(cache_key)
 
-        # paginate
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(queryset, request, view=self)
+
+        if cached is not None:
+            return cached, paginator
+
         ctx = self.get_serializer_context(request)
         serializer = (serializer_class or self.serializer_class)(
             page, many=True, context=ctx
         )
 
-        # presign S3 URLs
-        all_urls = extract_s3_urls(serializer.data)
-        presigned = generate_presigned_urls(all_urls)
+        # 1) Gather & presign S3 URLs
+        urls = extract_s3_urls(serializer.data)
+        presigned = generate_presigned_urls(urls)
 
-        # inject presigned URLs
+        # 2) Inject presigned URLs
         if use_direct_update:
             _update_product_downloads_with_presigned_urls(page, presigned)
             serializer = (serializer_class or self.serializer_class)(
@@ -2339,20 +2343,14 @@ class ProductListMixin:
             update_product_urls(serializer.data, presigned)
 
         data = serializer.data
-        # build the paginated response
-        response = paginator.get_paginated_response(data)
-        # cache the full Response
-        cache.set(cache_key, response, self.cache_timeout)
-        return response
+        cache.set(cache_key, data, self.cache_timeout)
+        return data, paginator
 
 
 @method_decorator(cache_page(CACHE_TTL), name="dispatch")
-class ProductAdminListView(APIView, ProductListMixin):
+class ProductAdminListView(ProductListMixin, APIView):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
-
-    # 👉 Turn on request-injection so the serializer’s to_representation()
-    # will see `request.user` and _not_ strip out your email fields.
     include_request_context = True
 
     def get(self, request, *args, **kwargs):
@@ -2368,46 +2366,58 @@ class ProductAdminListView(APIView, ProductListMixin):
                 )
 
             sorted_qs = self.get_sorted_queryset(products, request)
-            data, paginator = self.paginate_and_serialize(sorted_qs, request)
+            data, paginator = self.paginate_and_serialize(
+                sorted_qs,
+                request,
+                use_direct_update=True,
+            )
             logger.info("Returning %d products", len(data))
             return paginator.get_paginated_response(
                 data, status_code=status.HTTP_200_OK
             )
+
         except Exception as e:
             return handle_exceptions(e)
 
 
 @method_decorator(cache_page(CACHE_TTL), name="dispatch")
-class ProductUsersListView(APIView, ProductListMixin):
+class ProductUsersListView(ProductListMixin, APIView):
+    """
+    GET /api/v1/products/users/all/
+      ?page=1
+      &sort_by=-created_at
+    """
+
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
     def get(self, request, *args, **kwargs):
-        logger.info("ProductUsersListView GET method called")
         try:
-            products = Product.objects.filter(status="live").distinct()
-            if not products.exists():
-                logger.warning("No published products found.")
+            qs = Product.objects.filter(is_latest=True, status="live").distinct()
+            if not qs.exists():
                 return handle_error(
                     ErrorCode.PRODUCT_NOT_FOUND,
                     ErrorMessage.PRODUCT_NOT_FOUND,
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
-            sorted_qs = self.get_sorted_queryset(products, request)
+
+            sorted_qs = self.get_sorted_queryset(qs, request)
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
+
             data = filter_live_languages(data)
-            logger.info("Returning paginated response with %d products", len(data))
-            return paginator.get_paginated_response(
-                data, status_code=status.HTTP_200_OK
+            return paginator.get_paginated_response(data)
+
+        except Exception:
+            return handle_error(
+                ErrorCode.INTERNAL_SERVER_ERROR,
+                ErrorMessage.INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-        except Exception as e:
-            return handle_exceptions(e)
 
 
 class ProductSearchListMixin(ProductListMixin):
     """
-    A specialized mixin for search endpoints. Inherits the functionality of
-    ProductListMixin but overrides the serializer_class to use ProductSearchSerializer.
+    A specialized mixin for search endpoints. Uses ProductSearchSerializer.
     """
 
     serializer_class = ProductSearchSerializer
@@ -2417,22 +2427,14 @@ class BaseProductSearchView(APIView, ProductListMixin):
     pagination_class = CustomPagination
 
     def get_default_query(self) -> Q:
-        """
-        Returns the default query for the search.
-        Override in subclasses if necessary.
-        """
         return Q()
 
     def postprocess_response_data(self, response_data: dict, products) -> dict:
-        """
-        Hook to postprocess the response data before returning.
-        Override in subclasses to add extra keys.
-        """
         return response_data
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            # 1) Validate input parameters
+            # 1) Validate inputs
             product_code = request.GET.get("product_code")
             product_title = request.GET.get("product_title")
             if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
@@ -2440,7 +2442,7 @@ class BaseProductSearchView(APIView, ProductListMixin):
             if product_title and not isinstance(product_title, str):
                 return _handle_invalid_query_param()
 
-            # 2) Build the base query
+            # 2) Build base query
             query = self.get_default_query()
             if product_code:
                 query &= Q(product_code_no_dashes__icontains=product_code)
@@ -2454,29 +2456,24 @@ class BaseProductSearchView(APIView, ProductListMixin):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-            # 3) Apply sorting at the ORM level
+            # 3) ORM sorting
             sort_by = request.GET.get("sort_by")
-            allowed_sorts = {"product_title", "product_code_no_dashes"}
-            # allow descending if prefixed with '-'
-            if sort_by:
-                field = sort_by.lstrip("-")
-                if field in allowed_sorts:
-                    products = products.order_by(sort_by)
+            allowed = {"product_title", "product_code_no_dashes"}
+            if sort_by and sort_by.lstrip("-") in allowed:
+                products = products.order_by(sort_by)
 
             # 4) Paginate & serialize
             data, paginator = self.paginate_and_serialize(products, request)
 
-            # 5) Build response payload
+            # 5) Build & postprocess payload
             response_data = _prepare_response_data(
                 products, data, product_code, product_title
             )
             response_data = self.postprocess_response_data(response_data, products)
 
-            # 6) If pagination was skipped (paginator is None), return full list
+            # 6/7) Return same shape as before
             if paginator is None:
                 return Response(response_data, status=status.HTTP_200_OK)
-
-            # 7) Otherwise return a proper paginated response
             return paginator.get_paginated_response(
                 response_data, status_code=status.HTTP_200_OK
             )
@@ -2501,11 +2498,9 @@ class ProductSearchAdminView(BaseProductSearchView):
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get_default_query(self) -> Q:
-        # Admin view doesn't restrict by latest/live status.
         return Q()
 
     def postprocess_response_data(self, response_data: dict, products) -> dict:
-        # Append recommended products for the admin view.
         response_data["recommended_products"] = get_recommended_products(products)
         return response_data
 
@@ -2515,19 +2510,12 @@ class ProductSearchUserView(BaseProductSearchView):
     permission_classes = [AllowAny]
 
     def get_default_query(self) -> Q:
-        # User view only shows live, latest products.
         return Q(is_latest=True, status="live")
 
 
 class ProductUsersSearchFilterAPIView(generics.ListAPIView):
     """
     GET /api/v1/products/user/search/filter/
-      ?q=foo
-      &audiences=A,B
-      &languages=en,fr
-      &download_mode=download_only
-      &recently_updated=2025-01-01T00:00:00Z
-      &ordering=-updated_at
     """
 
     authentication_classes = [SessionAuthentication]
@@ -2549,19 +2537,22 @@ class ProductUsersFilterView(ProductListMixin, APIView):
 
     def get(self, request, *args, **kwargs):
         try:
-            # 1) build the Django ORM Q-query
             base_q = Q(is_latest=True, status="live")
             filters = Q()
-            # example boolean flags
-            if request.GET.get("download_only", "").lower() == "true":
+
+            # boolean flags
+            dl = request.GET.get("download_only", "").lower()
+            do = request.GET.get("download_or_order", "").lower()
+            oo = request.GET.get("order_only", "").lower()
+            if dl == "true":
                 filters &= Q(tag="download_only")
-            elif request.GET.get("download_or_order", "").lower() == "true":
+            elif do == "true":
                 filters &= Q(tag="download_and_order")
-            elif request.GET.get("order_only", "").lower() == "true":
+            elif oo == "true":
                 filters &= Q(tag="order_only")
 
-            # example multi-valued filters
-            for param, field in [
+            # multi‑value filters
+            for param, lookup in [
                 ("audiences", "update_ref__audience_ref__name"),
                 ("diseases", "update_ref__diseases_ref__name"),
                 ("vaccinations", "update_ref__vaccination_ref__name"),
@@ -2571,37 +2562,27 @@ class ProductUsersFilterView(ProductListMixin, APIView):
                 ("product_type", "update_ref__product_type"),
                 ("languages", "language_name"),
             ]:
-                values = request.GET.getlist(param)
-                if values:
-                    filters &= Q(**{f"{field}__in": values})
+                vals = request.GET.getlist(param)
+                if vals:
+                    filters &= Q(**{f"{lookup}__in": vals})
 
             # recently_updated
-            if recently := request.GET.get("recently_updated"):
+            if recent := request.GET.get("recently_updated"):
                 try:
-                    filters &= Q(updated_at__gte=recently)
+                    filters &= Q(updated_at__gte=recent)
                 except ValueError:
                     return handle_error(
                         ErrorCode.INVALID_PARAMETER,
-                        f"Invalid date for recently_updated: {recently}",
+                        f"Invalid date for recently_updated: {recent}",
                         status_code=status.HTTP_400_BAD_REQUEST,
                     )
 
             queryset = Product.objects.filter(base_q & filters).distinct()
+            sorted_qs = self.get_sorted_queryset(queryset, request)
 
-            # sorting
-            sort_by = request.GET.get("sort_by", "product_title")
-            if sort_by.lstrip("-") not in {f.lstrip("-") for f in VALID_SORT_FIELDS}:
-                sort_by = "product_title"
-            queryset = queryset.order_by(sort_by)
-
-            # paginate, presign URLs, and serialize
-            response = self.paginate_and_serialize(queryset, request)
-
-            # filter out non-live languages in the serialized payload
-            response.data["results"] = filter_live_languages(
-                response.data.get("results", [])
-            )
-            return response
+            data, paginator = self.paginate_and_serialize(sorted_qs, request)
+            data = filter_live_languages(data)
+            return paginator.get_paginated_response(data)
 
         except Exception:
             logger.exception(INTERNAL_ERROR_MSG)
@@ -2612,37 +2593,12 @@ class ProductUsersFilterView(ProductListMixin, APIView):
             )
 
 
-class ProductUsersSearchFilterAPIView(generics.ListAPIView):
-    """
-    GET /api/v1/products/user/search/filter/
-      ?q=foo
-      &audiences=A,B
-      &languages=en,fr
-      &download_mode=download_only
-      &recently_updated=2025-01-01T00:00:00Z
-      &ordering=-updated_at
-    """
-
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
-    serializer_class = ProductSearchSerializer
-    pagination_class = CustomPagination
-    queryset = Product.objects.filter(status="live", is_latest=True)
-
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_class = ProductFilter
-    search_fields = ["product_title", "product_code_no_dashes"]
-    ordering_fields = VALID_SORT_FIELDS
-    ordering = ["product_title", "-updated_at"]
-
-
-class ProductAdminFilterView(APIView, ProductListMixin):
+class ProductAdminFilterView(ProductListMixin, APIView):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
-    pagination_class = CustomPagination
 
     def _build_filter_query(self, request):
-        filter_mapping = {
+        mapping = {
             "diseases": "update_ref__diseases_ref__name__in",
             "vaccinations": "update_ref__vaccination_ref__name__in",
             "audiences": "update_ref__audience_ref__name__in",
@@ -2653,29 +2609,26 @@ class ProductAdminFilterView(APIView, ProductListMixin):
             "access_type": "tag__in",
             "status": "status__in",
         }
-        query = Q()
-        # Process other filters using getlist
-        for param, lookup in filter_mapping.items():
-            values = request.GET.getlist(param, [])
-            if values:
-                query &= Q(**{lookup: values})
+        q = Q()
+        for param, lookup in mapping.items():
+            vals = request.GET.getlist(param, [])
+            if vals:
+                q &= Q(**{lookup: vals})
 
-        # Updated product_code handling for multiple values
-        product_codes = request.GET.getlist("product_code")
-        if product_codes:
-            code_query = Q()
-            for code in product_codes:
-                code_query |= Q(product_code_no_dashes__icontains=code)
-            query &= code_query
+        codes = request.GET.getlist("product_code")
+        if codes:
+            code_q = Q()
+            for c in codes:
+                code_q |= Q(product_code_no_dashes__icontains=c)
+            q &= code_q
 
-        return query
+        return q
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            query = self._build_filter_query(request)
-            products = Product.objects.filter(query).distinct()
-
-            sorted_qs = self.get_sorted_queryset(products, request)
+            base_q = self._build_filter_query(request)
+            qs = Product.objects.filter(base_q).distinct()
+            sorted_qs = self.get_sorted_queryset(qs, request)
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
             return paginator.get_paginated_response(data)
         except Exception:
@@ -2687,31 +2640,20 @@ class ProductAdminFilterView(APIView, ProductListMixin):
             )
 
 
-class ProgramProductsView(ListAPIView):
+class ProgramProductsView(ProductListMixin, generics.ListAPIView):
     """
-    GET /api/v1/programmes/<program_id>/products/?page=<n>&sort_by=<field>
-    returns:
-    {
-      links: { next, previous },
-      count: <total>,
-      results: [ /* products */ ],
-      diseases: [ /* disease meta */ ],
-      vaccinations: [ /* vaccination meta */ ]
-    }
+    GET /api/v1/programmes/<program_id>/products/
     """
 
     serializer_class = ProductSerializer
     pagination_class = CustomPagination
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
-
     cache_timeout = CACHE_TTL
 
     def get_cache_key(self, request, program_id):
-        user_part = (
-            f"user:{request.user.id}" if request.user.is_authenticated else "user:anon"
-        )
-        return f"prog_products:{program_id}:{user_part}:{request.get_full_path()}"
+        user_id = request.user.id if request.user.is_authenticated else "anon"
+        return f"prog_products:{program_id}:user:{user_id}:{request.get_full_path()}"
 
     def get_queryset(self):
         program = get_object_or_404(Program, pk=self.kwargs["program_id"])
@@ -2724,13 +2666,11 @@ class ProgramProductsView(ListAPIView):
                 "update_ref__vaccination_ref",
             )
             .filter(
-                Q(program_id=program.pk)
-                & (
-                    Q(update_ref__diseases_ref__in=diseases)
-                    | Q(update_ref__vaccination_ref__in=vaccinations)
-                )
-                & Q(is_latest=True)
-                & Q(status="live")
+                Q(program_id=program.pk),
+                Q(update_ref__diseases_ref__in=diseases)
+                | Q(update_ref__vaccination_ref__in=vaccinations),
+                Q(is_latest=True),
+                Q(status="live"),
             )
             .distinct()
         )
@@ -2741,73 +2681,50 @@ class ProgramProductsView(ListAPIView):
         if cached:
             return Response(cached)
 
-        page = self.paginate_queryset(self.get_queryset())
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            data = serializer.data
+        response = super().list(request, *args, **kwargs)
 
-            # presign with TTL & caching
-            all_urls = extract_s3_urls(data)
-            presigned = generate_presigned_urls(all_urls)
-            update_product_urls(data, presigned)
+        # presign URLs
+        all_urls = extract_s3_urls(response.data["results"])
+        presigned = generate_presigned_urls(all_urls)
+        update_product_urls(response.data["results"], presigned)
 
-            resp = self.get_paginated_response(data)
+        program = get_object_or_404(Program, pk=kwargs["program_id"])
+        response.data["diseases"] = DiseaseSerializer(
+            Disease.objects.filter(programs=program), many=True
+        ).data
+        response.data["vaccinations"] = VaccinationSerializer(
+            Vaccination.objects.filter(programs=program), many=True
+        ).data
 
-            program = get_object_or_404(Program, pk=kwargs["program_id"])
-            resp.data["diseases"] = DiseaseSerializer(
-                Disease.objects.filter(programs=program), many=True
-            ).data
-            resp.data["vaccinations"] = VaccinationSerializer(
-                Vaccination.objects.filter(programs=program), many=True
-            ).data
-
-            cache.set(cache_key, resp.data, self.cache_timeout)
-            return resp
-
-        # fallback (no pagination)
-        data = self.get_serializer(self.get_queryset(), many=True).data
-        cache.set(cache_key, data, self.cache_timeout)
-        return Response(data)
+        cache.set(cache_key, response.data, self.cache_timeout)
+        return response
 
 
 class IncompleteProductsView(View):
     def get(self, request, *args, **kwargs):
-        # Get the current date and the target date range
-        current_date = timezone.now().date()
-        target_date = current_date + timedelta(days=7)
-
-        # Query products that are in Draft status and have a publish_date within the next 7 days
-        products = Product.objects.filter(
+        current = timezone.now().date()
+        ahead = current + timezone.timedelta(days=7)
+        drafts = Product.objects.filter(
             status="draft",
-            publish_date__gt=current_date,
-            publish_date__lte=target_date,
+            publish_date__gt=current,
+            publish_date__lte=ahead,
         )
-        logger.info(
-            "Found %d products in Draft status with publish_date within the next 7 days",
-            products.count(),
-        )
+        logger.info("Found %d draft products publishing within 7 days", drafts.count())
 
-        # Initialize the ProductStatusUpdateView for field checking
-        status_update_view = ProductStatusUpdateView()
-
-        incomplete_products = []
-
-        # Iterate over the products and check for incomplete fields
-        for product in products:
-            missing_fields = status_update_view.check_required_fields(product)
-
-            # If there are missing fields, append the product to the list
-            if missing_fields:
-                incomplete_products.append(
+        checker = ProductStatusUpdateView()
+        incomplete = []
+        for p in drafts:
+            missing = checker.check_required_fields(p)
+            if missing:
+                incomplete.append(
                     {
-                        "tag": product.tag,
-                        "product_title": product.product_title,
-                        "product_code": product.product_code,
+                        "tag": p.tag,
+                        "product_title": p.product_title,
+                        "product_code": p.product_code,
                     }
                 )
 
-        # Return the data as JSON
-        return JsonResponse(incomplete_products, safe=False)
+        return JsonResponse(incomplete, safe=False)
 
 
 #

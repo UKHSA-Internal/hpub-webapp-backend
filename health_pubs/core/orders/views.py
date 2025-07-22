@@ -514,6 +514,12 @@ class OrderViewSet(viewsets.ModelViewSet):
     def _attempt_create(
         self, data, items, order_user, limit_user, address, parent, request, admin=False
     ):
+        """
+        Wrap order creation, item creation, quantity updates, and notification
+        in a single retryable block.  After saving the order we generate
+        the confirmation payload exactly once and then call GOV.UK Notify
+        with that same payload.
+        """
         for attempt in range(3):
             try:
                 with transaction.atomic():
@@ -523,11 +529,23 @@ class OrderViewSet(viewsets.ModelViewSet):
                     )
                     self._create_order_items(items, order, locked, order_user)
                     self._update_product_quantities(items)
-                    # Pass the admin flag into notification
-                    self._notify_and_record(order, request, admin)
-                    return Response(
-                        self.get_serializer(order).data, status=status.HTTP_201_CREATED
-                    )
+
+                # outside the inner atomic, once the order is definitely committed:
+                confirmation = generate_order_confirmation(order)
+                # ensure the DB uses exactly that confirmation number
+                if (
+                    order.order_confirmation_number
+                    != confirmation["confirmation_number"]
+                ):
+                    order.order_confirmation_number = confirmation[
+                        "confirmation_number"
+                    ]
+                    order.save(update_fields=["order_confirmation_number"])
+
+                self._notify_with_payload(order, request, confirmation, admin)
+                return Response(
+                    self.get_serializer(order).data, status=status.HTTP_201_CREATED
+                )
 
             except (IntegrityError, DjangoValidationError) as exc:
                 if self._is_collision(exc) and attempt < 2:
@@ -548,27 +566,22 @@ class OrderViewSet(viewsets.ModelViewSet):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
-    def _notify_and_record(self, order, request, admin=False):
+    def _notify_with_payload(self, order, request, confirmation, admin=False):
         """
-        Sends the confirmation email—using the logged-in admin's name
-        if this was an admin-created order.
+        Sends the confirmation email using *exactly* the confirmation payload
+        we just generated and wrote to the DB.
         """
-        # The “recipient” is always the order.user_ref…
         recipient = order.user_ref
 
-        # …but the “sender_name” should be the admin (when admin=True),
-        # otherwise the user themselves.
+        # Pick the right sender name
         if admin and hasattr(request, "user"):
             sender_full_name = (
                 f"{request.user.first_name} {request.user.last_name}".strip()
             )
-            sender_name = f"{request.user.first_name}".strip()
+            sender_name = request.user.first_name.strip()
         else:
             sender_full_name = f"{recipient.first_name} {recipient.last_name}".strip()
-            sender_name = f"{recipient.first_name}".strip() or recipient.first_name
-
-        # Build the confirmation payload
-        confirmation = generate_order_confirmation(order)
+            sender_name = recipient.first_name.strip() or recipient.first_name
 
         try:
             send_notification(
@@ -583,13 +596,13 @@ class OrderViewSet(viewsets.ModelViewSet):
                 confirmation["shipping_address"],
             )
         except Exception as e:
-            logger.warning(f"Email send failed for {order.order_id}: {e}")
+            logger.warning(f"Email send failed for order {order.order_id}: {e}")
 
-        # And still record any reorder events
+        # Still record any reorder events
         try:
             self.record_reorder_events(order, request)
         except Exception as e:
-            logger.error(f"Analytics failed for {order.order_id}: {e}")
+            logger.error(f"Analytics failed for order {order.order_id}: {e}")
 
     def _is_collision(self, exc):
         return (isinstance(exc, IntegrityError) and self._is_path_collision(exc)) or (
@@ -752,6 +765,8 @@ class OrderViewSet(viewsets.ModelViewSet):
         unique_slug = self.get_unique_slug(
             slugify("orders_title" + str(datetime.now()))
         )
+        # Generate the confirmation number here
+        confirmation_number = generate_confirmation_number()
         order_id = data.get("order_id")
         if order_id is None:
             order_id = str(uuid.uuid4())
@@ -762,7 +777,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             order_id=order_id,
             user_ref=user_instance,
             address_ref=address_ref,
-            order_confirmation_number=generate_confirmation_number(),
+            order_confirmation_number=confirmation_number,
             order_origin=data.get("order_origin"),
             full_external_key=data.get("full_external_key"),
             created_at=data.get("created_at"),

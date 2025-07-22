@@ -2345,6 +2345,7 @@ class ProductListMixin:
         cache.set(cache_key, response, self.cache_timeout)
         return response
 
+
 @method_decorator(cache_page(CACHE_TTL), name="dispatch")
 class ProductAdminListView(APIView, ProductListMixin):
     authentication_classes = [CustomTokenAuthentication]

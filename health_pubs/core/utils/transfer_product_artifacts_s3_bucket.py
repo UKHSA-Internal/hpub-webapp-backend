@@ -124,7 +124,7 @@ def content_disposition_header(original_filename: str) -> str:
     return f"attachment; filename*=UTF-8''{quoted}"
 
 
-def find_local_filename(directory: str, original: str) -> str:
+def find_local_filename(directory: str, original: str) -> Optional[str]:
     target = sanitize_filename(original)
     for fname in os.listdir(directory):
         if sanitize_filename(fname) == target:
@@ -344,7 +344,7 @@ def _process_row(idx, row, cur, conn):
     return processed, skipped
 
 
-def _process_column(cur, conn, update_ref_id, product_code, tag, col, row, has_row):
+def _process_column(cur, conn, update_ref_id, product_code, col, row, has_row):
     original = row.get(col, "").strip()
     if not original:
         # no file provided

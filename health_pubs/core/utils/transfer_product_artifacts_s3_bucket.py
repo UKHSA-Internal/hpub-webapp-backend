@@ -338,7 +338,7 @@ def _process_row(idx, row, cur, conn):
     has_row = fetch_current_downloads(cur, update_ref_id) is not None
     for col in DOWNLOAD_COLUMNS:
         p, s, has_row = _process_column(
-            cur, conn, update_ref_id, product_code, tag, col, row, has_row
+            cur, conn, update_ref_id, product_code, col, row, has_row
         )
         processed += p
         skipped += s

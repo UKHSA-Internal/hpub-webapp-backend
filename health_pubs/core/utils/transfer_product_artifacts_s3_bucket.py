@@ -4,6 +4,7 @@ import sys
 import re
 import unicodedata
 import logging
+import csv
 import boto3
 import psycopg2
 from psycopg2 import extras
@@ -17,7 +18,10 @@ LOG_FILENAME = "transfer_product_artifacts.log"
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s: %(message)s",
-    handlers=[logging.FileHandler(LOG_FILENAME, mode="w"), logging.StreamHandler()],
+    handlers=[
+        logging.FileHandler(LOG_FILENAME, mode="w"),
+        logging.StreamHandler(),
+    ],
 )
 logger = logging.getLogger(__name__)
 
@@ -25,7 +29,6 @@ logger = logging.getLogger(__name__)
 # Project path (for your custom modules)
 # -----------------------------------------------------------------------------
 sys.path.append(os.path.abspath(os.path.join(__file__, "../../..")))
-
 from configs.get_secret_config import Config
 from extract_file_metadata import get_file_metadata
 
@@ -46,6 +49,7 @@ PG = {
 
 LOCAL_DIR = "./files/"
 EXCEL_PATH = "./files/updated_lookup_data.xlsx"
+MISSING_LOG = "./files/missing_links.csv"
 
 ALLOWED_EXTS = {
     "main_download_file_name": {"jpg", "jpeg", "png", "gif"},
@@ -94,39 +98,39 @@ EXCEL_TO_DB = {
 OBJECT_KEYS = {"main_download_url", "video_url"}
 DOWNLOAD_COLUMNS = list(EXCEL_TO_DB.keys())
 
+# Global to track missing entries
+missing_entries = []
+
 
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
+def normalize_smart_quotes(name: str) -> str:
+    return name.replace("‘", "'").replace("’", "'")
+
+
 def sanitize_filename(name: str) -> str:
-    """
-    Turn any Unicode filename into a safe ASCII-only name:
-      - Normalize accents → base chars
-      - Drop any remaining non-ASCII
-      - Replace anything not [A-Za-z0-9._-] with underscore
-      - Collapse multiple underscores
-    """
-    # Normalize NFKD → base letters + accents
+    name = normalize_smart_quotes(name)
     nkfd = unicodedata.normalize("NFKD", name)
-    # Encode to ASCII bytes, ignore non-ascii
     ascii_bytes = nkfd.encode("ascii", "ignore")
     ascii_str = ascii_bytes.decode("ascii")
-    # Replace unsafe chars
     cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", ascii_str)
-    # Collapse runs of underscores
     cleaned = re.sub(r"_+", "_", cleaned)
-    # Trim leading/trailing underscores or dots
     return cleaned.strip("._")
 
 
-def content_disposition_header(filename: str) -> str:
-    """
-    Always emit RFC5987 filename* with UTF-8 quoting of the SANITIZED name.
-    This ensures no ISO-8859-1 errors, and the client sees the clean name.
-    """
-    safe = sanitize_filename(filename)
-    quoted = quote(safe, encoding="utf-8", safe="")
+def content_disposition_header(original_filename: str) -> str:
+    orig_nfc = unicodedata.normalize("NFC", original_filename)
+    quoted = quote(orig_nfc, encoding="utf-8", safe="")
     return f"attachment; filename*=UTF-8''{quoted}"
+
+
+def find_local_filename(directory: str, original: str) -> Optional[str]:
+    target = sanitize_filename(original)
+    for fname in os.listdir(directory):
+        if sanitize_filename(fname) == target:
+            return fname
+    return None
 
 
 def get_update_ref_id(cur, product_code):
@@ -160,7 +164,7 @@ def ensure_s3_object(local_path, s3_key):
         s3.head_object(Bucket=BUCKET_NAME, Key=s3_key)
         logger.info("    S3 object exists: %s", s3_key)
     except s3.exceptions.ClientError as e:
-        if e.response["Error"]["Code"] == "404":
+        if e.response.get("Error", {}).get("Code") == "404":
             s3.upload_file(
                 local_path,
                 BUCKET_NAME,
@@ -245,7 +249,7 @@ def insert_db(cur, update_ref_id, db_field, metadata):
             update_ref_id,
             extras.Json(downloads),
             extras.Json(downloads.get("main_download_url", {})),
-            extras.Json(downloads.get("video_url", "")),
+            extras.Json(downloads.get("video_url", {})),
             extras.Json(downloads.get("print_download_url", [])),
             extras.Json(downloads.get("web_download_url", [])),
             extras.Json(downloads.get("transcript_url", [])),
@@ -262,9 +266,24 @@ def main():
     conn, cur = _connect_db()
     df = _load_dataframe(EXCEL_PATH)
     processed, skipped = _process_rows(df, cur, conn)
+    _report_missing()
     cur.close()
     conn.close()
     logger.info("Done: processed=%d, skipped=%d", processed, skipped)
+
+
+def _report_missing():
+    if not missing_entries:
+        logger.info("No missing links or data detected.")
+        return
+    logger.warning(
+        "Detected %d missing entries, see %s", len(missing_entries), MISSING_LOG
+    )
+    with open(MISSING_LOG, "w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["product_code", "column", "reason"])
+        for rec in missing_entries:
+            writer.writerow(rec)
 
 
 def _connect_db():
@@ -301,76 +320,77 @@ def _process_row(idx, row, cur, conn):
     processed = skipped = 0
     product_code = row.get("product_code", "").strip()
     tag = row.get("tag", "").strip().lower()
-    logger.info("Row %d → product_code=%s, tag=%s", idx + 1, product_code, tag)
 
+    logger.info("Row %d → product_code=%s, tag=%s", idx + 1, product_code, tag)
     if tag == "order-only" and not row.get("main_download_file_name", "").strip():
-        logger.warning("  order-only but no main_download; skipping")
+        reason = "order-only without main_download"
+        missing_entries.append((product_code, "main_download", reason))
+        logger.warning("  %s; skipping", reason)
         return 0, 1
 
     update_ref_id = get_update_ref_id(cur, product_code)
     if not update_ref_id:
-        logger.warning("  no update_ref_id for %s; skipping", product_code)
+        reason = "no update_ref_id"
+        missing_entries.append((product_code, "all", reason))
+        logger.warning("  %s for %s; skipping", reason, product_code)
         return 0, 1
 
     has_row = fetch_current_downloads(cur, update_ref_id) is not None
-
     for col in DOWNLOAD_COLUMNS:
         p, s, has_row = _process_column(
-            cur, conn, update_ref_id, product_code, tag, col, row, has_row
+            cur, conn, update_ref_id, product_code, col, row, has_row
         )
         processed += p
         skipped += s
-
     return processed, skipped
 
 
-def _process_column(cur, conn, update_ref_id, product_code, tag, col, row, has_row):
-    # --- Tag-based skips ---
-    if tag == "order-only" and col != "main_image_file_name":
-        # only main_image_file_name is allowed in order-only mode
-        return 0, 0, has_row
-
-    if tag == "download-only" and col == "print_download_file_name":
-        # print_download_file_name is not needed for download-only
-        return 0, 0, has_row
-
+def _process_column(cur, conn, update_ref_id, product_code, col, row, has_row):
     original = row.get(col, "").strip()
     if not original:
+        # no file provided
         return 0, 0, has_row
 
-    # --- File extension check ---
     ext = os.path.splitext(original)[1].lower().lstrip(".")
     if ext not in ALLOWED_EXTS[col]:
-        logger.warning("  %s: extension '%s' not allowed; skipping", col, ext)
+        reason = f"extension '{ext}' not allowed"
+        missing_entries.append((product_code, col, reason))
+        logger.warning("  %s; skipping", reason)
         return 0, 1, has_row
 
-    # --- Local file existence ---
-    local_path = os.path.join(LOCAL_DIR, original)
-    if not os.path.isfile(local_path):
-        logger.warning("  missing file: %s; skipping", local_path)
+    matched = find_local_filename(LOCAL_DIR, original)
+    if not matched:
+        reason = "file missing locally"
+        missing_entries.append((product_code, col, reason))
+        logger.warning("  %s for %s; skipping", reason, original)
         return 0, 1, has_row
 
-    # --- S3 upload ---
+    local_path = os.path.join(LOCAL_DIR, matched)
     safe_name = sanitize_filename(original)
     s3_key = f"{product_code}/{safe_name}"
+
     try:
         ensure_s3_object(local_path, s3_key)
     except Exception as e:
-        logger.error("  S3 error for %s: %s", original, e)
+        reason = f"S3 upload error: {e}"
+        missing_entries.append((product_code, col, reason))
+        logger.error("  %s", reason)
         return 0, 1, has_row
 
-    # --- Presigned URL ---
     try:
-        presigned = generate_presigned_get(BUCKET_NAME, s3_key, safe_name)
+        presigned = generate_presigned_get(BUCKET_NAME, s3_key, original)
     except Exception as e:
-        logger.error("  presign error for %s: %s", safe_name, e)
+        reason = f"presign error: {e}"
+        missing_entries.append((product_code, col, reason))
+        logger.error("  %s", reason)
         return 0, 1, has_row
 
-    # --- Metadata retrieval ---
     try:
         md = get_file_metadata([presigned])[0]
     except Exception as e:
-        logger.error("  metadata error for %s: %s", safe_name, e)
+        reason = f"metadata error: {e}"
+        missing_entries.append((product_code, col, reason))
+        logger.error("  %s", reason)
         return 0, 1, has_row
 
     metadata = {
@@ -381,25 +401,22 @@ def _process_column(cur, conn, update_ref_id, product_code, tag, col, row, has_r
     }
     db_field = EXCEL_TO_DB[col]
 
-    # --- Database write or update ---
     try:
         if has_row:
             updated = update_db(cur, update_ref_id, db_field, metadata)
-            if updated:
-                conn.commit()
-                logger.info("  updated DB for %s → %s", product_code, db_field)
-                return 1, 0, has_row
-            logger.info("  already in DB %s → %s", product_code, db_field)
-            return 0, 0, has_row
+            action = "updated" if updated else "exists"
         else:
             insert_db(cur, update_ref_id, db_field, metadata)
-            conn.commit()
             has_row = True
-            logger.info("  inserted new productupdate for %s", product_code)
-            return 1, 0, has_row
+            action = "inserted"
+        conn.commit()
+        logger.info("  %s %s → %s", action, product_code, db_field)
+        return (1 if action in ("updated", "inserted") else 0), 0, has_row
     except Exception as e:
         conn.rollback()
-        logger.error("  DB write failed: %s", e)
+        reason = f"DB write failed: {e}"
+        missing_entries.append((product_code, db_field, reason))
+        logger.error("  %s", reason)
         return 0, 1, has_row
 
 

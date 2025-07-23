@@ -2280,7 +2280,8 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
 
 class ProductListMixin:
     """
-    Handles sorting, pagination + S3 presigning, with per-request caching of raw data.
+    Handles sorting, pagination + S3 presigning,
+    with per‑request caching of raw data list.
     """
 
     serializer_class = ProductSerializer
@@ -2292,12 +2293,16 @@ class ProductListMixin:
         user_id = request.user.id if request.user.is_authenticated else "anon"
         return f"{prefix}:user:{user_id}:{request.get_full_path()}"
 
-    def get_serializer_context(self, request):
-        return {"request": request} if self.include_request_context else {}
+    def get_serializer_context(self):
+        """
+        Override DRF method signature: no args.
+        Only include 'request' if flagged.
+        """
+        return {"request": self.request} if self.include_request_context else {}
 
     def get_sorted_queryset(self, queryset, request):
         sort_by = request.GET.get("sort_by", "").lstrip()
-        if sort_by and sort_by in VALID_SORT_FIELDS:
+        if sort_by in VALID_SORT_FIELDS:
             return queryset.order_by(sort_by)
         return queryset
 
@@ -2310,10 +2315,7 @@ class ProductListMixin:
     ):
         """
         Returns (data_list, paginator).
-        1) Try cache (raw data list).
-        2) Always instantiate & run paginator.paginate_queryset(...) so paginator state is correct.
-        3) On cache hit: return (cached_list, paginator).
-        4) On miss: serialize & presign, cache raw list, return (new_list, paginator).
+        Caches only the data_list, never a Response.
         """
         cache_key = self.get_cache_key(request)
         cached = cache.get(cache_key)
@@ -2324,7 +2326,7 @@ class ProductListMixin:
         if cached is not None:
             return cached, paginator
 
-        ctx = self.get_serializer_context(request)
+        ctx = self.get_serializer_context()
         serializer = (serializer_class or self.serializer_class)(
             page, many=True, context=ctx
         )
@@ -2356,8 +2358,8 @@ class ProductAdminListView(ProductListMixin, APIView):
     def get(self, request, *args, **kwargs):
         logger.info("ProductAdminListView GET called")
         try:
-            products = Product.objects.all()
-            if not products.exists():
+            qs = Product.objects.all()
+            if not qs.exists():
                 logger.warning(ErrorMessage.PRODUCT_NOT_FOUND.value)
                 return handle_error(
                     ErrorCode.PRODUCT_NOT_FOUND,
@@ -2365,11 +2367,9 @@ class ProductAdminListView(ProductListMixin, APIView):
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
 
-            sorted_qs = self.get_sorted_queryset(products, request)
+            sorted_qs = self.get_sorted_queryset(qs, request)
             data, paginator = self.paginate_and_serialize(
-                sorted_qs,
-                request,
-                use_direct_update=True,
+                sorted_qs, request, use_direct_update=True
             )
             logger.info("Returning %d products", len(data))
             return paginator.get_paginated_response(
@@ -2417,7 +2417,7 @@ class ProductUsersListView(ProductListMixin, APIView):
 
 class ProductSearchListMixin(ProductListMixin):
     """
-    A specialized mixin for search endpoints. Uses ProductSearchSerializer.
+    Mixin for search endpoints. Uses ProductSearchSerializer.
     """
 
     serializer_class = ProductSearchSerializer
@@ -2434,7 +2434,6 @@ class BaseProductSearchView(APIView, ProductListMixin):
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            # 1) Validate inputs
             product_code = request.GET.get("product_code")
             product_title = request.GET.get("product_title")
             if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
@@ -2442,7 +2441,6 @@ class BaseProductSearchView(APIView, ProductListMixin):
             if product_title and not isinstance(product_title, str):
                 return _handle_invalid_query_param()
 
-            # 2) Build base query
             query = self.get_default_query()
             if product_code:
                 query &= Q(product_code_no_dashes__icontains=product_code)
@@ -2456,22 +2454,18 @@ class BaseProductSearchView(APIView, ProductListMixin):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-            # 3) ORM sorting
             sort_by = request.GET.get("sort_by")
             allowed = {"product_title", "product_code_no_dashes"}
             if sort_by and sort_by.lstrip("-") in allowed:
                 products = products.order_by(sort_by)
 
-            # 4) Paginate & serialize
             data, paginator = self.paginate_and_serialize(products, request)
 
-            # 5) Build & postprocess payload
             response_data = _prepare_response_data(
                 products, data, product_code, product_title
             )
             response_data = self.postprocess_response_data(response_data, products)
 
-            # 6/7) Return same shape as before
             if paginator is None:
                 return Response(response_data, status=status.HTTP_200_OK)
             return paginator.get_paginated_response(
@@ -2540,7 +2534,6 @@ class ProductUsersFilterView(ProductListMixin, APIView):
             base_q = Q(is_latest=True, status="live")
             filters = Q()
 
-            # boolean flags
             dl = request.GET.get("download_only", "").lower()
             do = request.GET.get("download_or_order", "").lower()
             oo = request.GET.get("order_only", "").lower()
@@ -2551,7 +2544,6 @@ class ProductUsersFilterView(ProductListMixin, APIView):
             elif oo == "true":
                 filters &= Q(tag="order_only")
 
-            # multi‑value filters
             for param, lookup in [
                 ("audiences", "update_ref__audience_ref__name"),
                 ("diseases", "update_ref__diseases_ref__name"),
@@ -2566,7 +2558,6 @@ class ProductUsersFilterView(ProductListMixin, APIView):
                 if vals:
                     filters &= Q(**{f"{lookup}__in": vals})
 
-            # recently_updated
             if recent := request.GET.get("recently_updated"):
                 try:
                     filters &= Q(updated_at__gte=recent)
@@ -2683,7 +2674,6 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
 
         response = super().list(request, *args, **kwargs)
 
-        # presign URLs
         all_urls = extract_s3_urls(response.data["results"])
         presigned = generate_presigned_urls(all_urls)
         update_product_urls(response.data["results"], presigned)
@@ -2703,7 +2693,7 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
 class IncompleteProductsView(View):
     def get(self, request, *args, **kwargs):
         current = timezone.now().date()
-        ahead = current + timezone.timedelta(days=7)
+        ahead = current + timedelta(days=7)
         drafts = Product.objects.filter(
             status="draft",
             publish_date__gt=current,
@@ -2725,6 +2715,3 @@ class IncompleteProductsView(View):
                 )
 
         return JsonResponse(incomplete, safe=False)
-
-
-#

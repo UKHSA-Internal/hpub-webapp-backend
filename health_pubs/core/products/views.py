@@ -10,6 +10,7 @@ import time
 from django.db import IntegrityError
 from psycopg2 import errors as pg_errors
 from collections import defaultdict
+from datetime import timedelta
 
 import pandas as pd
 from core.audiences.models import Audience

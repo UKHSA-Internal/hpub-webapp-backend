@@ -2,6 +2,7 @@
 import os
 import sys
 import re
+import json
 import unicodedata
 import logging
 import csv
@@ -9,7 +10,9 @@ import boto3
 import psycopg2
 from psycopg2 import extras
 import pandas as pd
+import urllib.parse
 from urllib.parse import quote
+from typing import Optional, Tuple
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -29,11 +32,11 @@ logger = logging.getLogger(__name__)
 # Project path (for your custom modules)
 # -----------------------------------------------------------------------------
 sys.path.append(os.path.abspath(os.path.join(__file__, "../../..")))
-from configs.get_secret_config import Config
-from extract_file_metadata import get_file_metadata
+from configs.get_secret_config import Config  # noqa: E402
+from extract_file_metadata import get_file_metadata  # noqa: E402
 
 # -----------------------------------------------------------------------------
-# Config
+# Config / Constants
 # -----------------------------------------------------------------------------
 config = Config()
 BUCKET_NAME = config.get_hpub_s3_bucket_name()
@@ -48,8 +51,8 @@ PG = {
 }
 
 LOCAL_DIR = "./files/"
-EXCEL_PATH = "./files/updated_lookup_data.xlsx"
-MISSING_LOG = "./files/missing_links.csv"
+EXCEL_PATH = "./files/updated_lookup_data_draft.xlsx"
+MISSING_LOG = "./files/missing_links_draft_pub.csv"
 
 ALLOWED_EXTS = {
     "main_download_file_name": {"jpg", "jpeg", "png", "gif"},
@@ -72,6 +75,7 @@ ALLOWED_EXTS = {
         "odt",
         "ppt",
         "xlsx",
+        "xslx",
     },
     "print_download_file_name": {
         "pdf",
@@ -84,6 +88,7 @@ ALLOWED_EXTS = {
         "odt",
         "ppt",
         "xlsx",
+        "xslx",
     },
 }
 
@@ -92,11 +97,16 @@ EXCEL_TO_DB = {
     "transcript_file_name": "transcript_url",
     "web_download_file_name": "web_download_url",
     "print_download_file_name": "print_download_url",
-    "video_urls": "video_url",
+    "video_urls": "video_url",  # handled separately (YouTube link)
 }
 
-OBJECT_KEYS = {"main_download_url", "video_url"}
-DOWNLOAD_COLUMNS = list(EXCEL_TO_DB.keys())
+# Only file-based columns here; video_urls (YouTube) is special-cased
+DOWNLOAD_COLUMNS = [k for k in EXCEL_TO_DB.keys() if k != "video_urls"]
+
+OBJECT_KEYS = {
+    "main_download_url",
+    "video_url",
+}  # video_url may be object with type youtube
 
 # Global to track missing entries
 missing_entries = []
@@ -127,13 +137,16 @@ def content_disposition_header(original_filename: str) -> str:
 
 def find_local_filename(directory: str, original: str) -> Optional[str]:
     target = sanitize_filename(original)
-    for fname in os.listdir(directory):
-        if sanitize_filename(fname) == target:
-            return fname
+    try:
+        for fname in os.listdir(directory):
+            if sanitize_filename(fname) == target:
+                return fname
+    except FileNotFoundError:
+        logger.error("Local directory does not exist: %s", directory)
     return None
 
 
-def get_update_ref_id(cur, product_code):
+def get_update_ref_id(cur, product_code: str) -> Optional[int]:
     cur.execute(
         """
         SELECT update_ref_id
@@ -146,7 +159,7 @@ def get_update_ref_id(cur, product_code):
     return row[0] if row and row[0] else None
 
 
-def fetch_current_downloads(cur, update_ref_id):
+def fetch_current_downloads(cur, update_ref_id) -> Optional[dict]:
     cur.execute(
         """
         SELECT product_downloads
@@ -159,12 +172,13 @@ def fetch_current_downloads(cur, update_ref_id):
     return row[0] if row else None
 
 
-def ensure_s3_object(local_path, s3_key):
+def ensure_s3_object(local_path: str, s3_key: str):
     try:
         s3.head_object(Bucket=BUCKET_NAME, Key=s3_key)
         logger.info("    S3 object exists: %s", s3_key)
     except s3.exceptions.ClientError as e:
-        if e.response.get("Error", {}).get("Code") == "404":
+        code = e.response.get("Error", {}).get("Code", "")
+        if code == "404":
             s3.upload_file(
                 local_path,
                 BUCKET_NAME,
@@ -176,7 +190,9 @@ def ensure_s3_object(local_path, s3_key):
             raise
 
 
-def generate_presigned_get(bucket, key, original_filename, expires=3600):
+def generate_presigned_get(
+    bucket: str, key: str, original_filename: str, expires: int = 3600
+) -> str:
     cd = content_disposition_header(original_filename)
     return s3.generate_presigned_url(
         ClientMethod="get_object",
@@ -185,15 +201,50 @@ def generate_presigned_get(bucket, key, original_filename, expires=3600):
     )
 
 
-def update_db(cur, update_ref_id, db_field, metadata):
+def canonicalize_youtube_url(url: str) -> Optional[str]:
+    parsed = urllib.parse.urlparse(url.strip())
+    netloc = parsed.netloc.lower()
+    video_id = None
+    if "youtu.be" in netloc:
+        video_id = parsed.path.lstrip("/")
+    elif "youtube.com" in netloc:
+        if parsed.path.startswith("/shorts/"):
+            parts = parsed.path.split("/")
+            if len(parts) >= 3:
+                video_id = parts[2]
+        else:
+            qs = urllib.parse.parse_qs(parsed.query)
+            video_id = qs.get("v", [None])[0]
+    if not video_id:
+        return None
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def normalize_existing_field(existing_value):
+    """
+    Defensive normalization: if existing_value is a string that encodes JSON, try to parse it.
+    Return a clean Python object or None.
+    """
+    if existing_value is None:
+        return None
+    if isinstance(existing_value, str):
+        try:
+            parsed = json.loads(existing_value)
+            return parsed
+        except Exception:
+            return None
+    return existing_value
+
+
+def update_db(cur, update_ref_id, db_field: str, metadata: dict) -> bool:
     current = fetch_current_downloads(cur, update_ref_id) or {}
     if db_field in OBJECT_KEYS:
-        existing = current.get(db_field)
-        if (
-            isinstance(existing, dict)
-            and existing.get("s3_bucket_url") == metadata["s3_bucket_url"]
+        existing = normalize_existing_field(current.get(db_field))
+        if isinstance(existing, dict) and existing.get("s3_bucket_url") == metadata.get(
+            "s3_bucket_url"
         ):
             return False
+        # upsert object
         cur.execute(
             """
             UPDATE public.products_productupdate
@@ -204,8 +255,14 @@ def update_db(cur, update_ref_id, db_field, metadata):
             (db_field, extras.Json(metadata), update_ref_id),
         )
     else:
-        arr = current.get(db_field, [])
-        if any(i.get("s3_bucket_url") == metadata["s3_bucket_url"] for i in arr):
+        arr = normalize_existing_field(current.get(db_field)) or []
+        if not isinstance(arr, list):
+            arr = []
+        if any(
+            isinstance(i, dict)
+            and i.get("s3_bucket_url") == metadata.get("s3_bucket_url")
+            for i in arr
+        ):
             return False
         path = f"{{{db_field}}}"
         cur.execute(
@@ -224,7 +281,7 @@ def update_db(cur, update_ref_id, db_field, metadata):
     return True
 
 
-def insert_db(cur, update_ref_id, db_field, metadata):
+def insert_db(cur, update_ref_id, db_field: str, metadata: dict):
     downloads = {db_field: metadata if db_field in OBJECT_KEYS else [metadata]}
     cur.execute(
         """
@@ -258,18 +315,27 @@ def insert_db(cur, update_ref_id, db_field, metadata):
 
 
 # -----------------------------------------------------------------------------
-# Main
+# Processing logic
 # -----------------------------------------------------------------------------
+def _connect_db():
+    try:
+        conn = psycopg2.connect(**PG)
+        cur = conn.cursor()
+        logger.info("Connected to PostgreSQL.")
+        return conn, cur
+    except Exception as e:
+        logger.error("DB connection failed: %s", e)
+        sys.exit(1)
 
 
-def main():
-    conn, cur = _connect_db()
-    df = _load_dataframe(EXCEL_PATH)
-    processed, skipped = _process_rows(df, cur, conn)
-    _report_missing()
-    cur.close()
-    conn.close()
-    logger.info("Done: processed=%d, skipped=%d", processed, skipped)
+def _load_dataframe(path: str) -> pd.DataFrame:
+    try:
+        df = pd.read_excel(path, dtype=str).fillna("")
+        logger.info("Loaded %d rows from Excel.", len(df))
+        return df
+    except Exception as e:
+        logger.error("Excel read failed: %s", e)
+        sys.exit(1)
 
 
 def _report_missing():
@@ -286,28 +352,7 @@ def _report_missing():
             writer.writerow(rec)
 
 
-def _connect_db():
-    try:
-        conn = psycopg2.connect(**PG)
-        cur = conn.cursor()
-        logger.info("Connected to PostgreSQL.")
-        return conn, cur
-    except Exception as e:
-        logger.error("DB connection failed: %s", e)
-        sys.exit(1)
-
-
-def _load_dataframe(path):
-    try:
-        df = pd.read_excel(path, dtype=str).fillna("")
-        logger.info("Loaded %d rows from Excel.", len(df))
-        return df
-    except Exception as e:
-        logger.error("Excel read failed: %s", e)
-        sys.exit(1)
-
-
-def _process_rows(df, cur, conn):
+def _process_rows(df: pd.DataFrame, cur, conn) -> Tuple[int, int]:
     processed = skipped = 0
     for idx, row in df.iterrows():
         p, s = _process_row(idx, row, cur, conn)
@@ -316,7 +361,7 @@ def _process_rows(df, cur, conn):
     return processed, skipped
 
 
-def _process_row(idx, row, cur, conn):
+def _process_row(idx: int, row: pd.Series, cur, conn) -> Tuple[int, int]:
     processed = skipped = 0
     product_code = row.get("product_code", "").strip()
     tag = row.get("tag", "").strip().lower()
@@ -336,23 +381,31 @@ def _process_row(idx, row, cur, conn):
         return 0, 1
 
     has_row = fetch_current_downloads(cur, update_ref_id) is not None
+
     for col in DOWNLOAD_COLUMNS:
         p, s, has_row = _process_column(
             cur, conn, update_ref_id, product_code, col, row, has_row
         )
         processed += p
         skipped += s
+
+    # handle YouTube link separately
+    p_vid, s_vid, has_row = _process_video_urls(
+        cur, conn, update_ref_id, product_code, row, has_row
+    )
+    processed += p_vid
+    skipped += s_vid
+
     return processed, skipped
 
 
 def _process_column(cur, conn, update_ref_id, product_code, col, row, has_row):
     original = row.get(col, "").strip()
     if not original:
-        # no file provided
-        return 0, 0, has_row
+        return 0, 0, has_row  # nothing to do
 
     ext = os.path.splitext(original)[1].lower().lstrip(".")
-    if ext not in ALLOWED_EXTS[col]:
+    if ext not in ALLOWED_EXTS.get(col, set()):
         reason = f"extension '{ext}' not allowed"
         missing_entries.append((product_code, col, reason))
         logger.warning("  %s; skipping", reason)
@@ -418,6 +471,62 @@ def _process_column(cur, conn, update_ref_id, product_code, col, row, has_row):
         missing_entries.append((product_code, db_field, reason))
         logger.error("  %s", reason)
         return 0, 1, has_row
+
+
+def _process_video_urls(cur, conn, update_ref_id, product_code, row, has_row):
+    original = row.get("video_urls", "").strip()
+    if not original:
+        return 0, 0, has_row
+
+    urls = [u.strip() for u in original.split(",") if u.strip()]
+    if not urls:
+        return 0, 0, has_row
+
+    first_url = urls[0]
+    canonical = canonicalize_youtube_url(first_url)
+    if not canonical:
+        reason = "invalid YouTube URL"
+        missing_entries.append((product_code, "video_urls", reason))
+        logger.warning("  %s; skipping: %s", reason, first_url)
+        return 0, 1, has_row
+
+    metadata = {
+        "URL": canonical,
+        "original": first_url,
+        "type": "youtube",
+    }
+    db_field = EXCEL_TO_DB["video_urls"]  # should be "video_url"
+
+    try:
+        if has_row:
+            updated = update_db(cur, update_ref_id, db_field, metadata)
+            action = "updated" if updated else "exists"
+        else:
+            insert_db(cur, update_ref_id, db_field, metadata)
+            has_row = True
+            action = "inserted"
+        conn.commit()
+        logger.info("  %s %s → %s (YouTube link)", action, product_code, db_field)
+        return (1 if action in ("updated", "inserted") else 0), 0, has_row
+    except Exception as e:
+        conn.rollback()
+        reason = f"DB write failed: {e}"
+        missing_entries.append((product_code, db_field, reason))
+        logger.error("  %s", reason)
+        return 0, 1, has_row
+
+
+# -----------------------------------------------------------------------------
+# Entry point
+# -----------------------------------------------------------------------------
+def main():
+    conn, cur = _connect_db()
+    df = _load_dataframe(EXCEL_PATH)
+    processed, skipped = _process_rows(df, cur, conn)
+    _report_missing()
+    cur.close()
+    conn.close()
+    logger.info("Done: processed=%d, skipped=%d", processed, skipped)
 
 
 if __name__ == "__main__":

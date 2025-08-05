@@ -185,7 +185,7 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, data):
-        tag = self.context.get("tag", None)
+        tag = self.context.get("tag", "").strip().lower() if self.context else ""
 
         if tag == "download-only":
             # Set 'run_to_zero' to False if it's None for 'download-only' tag

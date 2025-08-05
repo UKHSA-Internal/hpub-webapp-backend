@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import uuid
+import difflib
 from typing import Any, Mapping, Optional, Union, Dict, List, Tuple
 from urllib.parse import unquote
 from django.utils import timezone
@@ -124,6 +125,24 @@ _DIGITS = list("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 _BASE = len(_DIGITS)
 # default TTLs (in seconds)
 CACHE_TTL = getattr(settings, "CACHE_TTL")
+
+
+CANONICAL_TAGS = {"download-only", "download-or-order", "order-only"}
+
+
+def normalize_tag(raw: str) -> str:
+    if not raw:
+        return ""
+    cleaned = raw.strip().lower().replace("_", "-")
+    # fix extremely common misspellings manually if needed
+    if cleaned == "donwload-only":
+        cleaned = "download-only"
+    # fuzzy-match to canonical tags (optional, helpful for other typos)
+    if cleaned not in CANONICAL_TAGS:
+        close = difflib.get_close_matches(cleaned, CANONICAL_TAGS, n=1, cutoff=0.8)
+        if close:
+            cleaned = close[0]
+    return cleaned
 
 
 def generate_product_key(last_key: str | None) -> str:
@@ -532,8 +551,6 @@ class ErrorHandlingMixin:
 
 
 class ProductUtilsMixin:
-    """Shared helpers (sanitising, factories, Wagtail helpers, etc.)."""
-
     DATE_INPUT_FORMATS = ("%Y-%m-%d", "%m/%d/%Y")
     DATETIME_INPUT_FORMATS = (
         "%Y-%m-%d %H:%M:%S",
@@ -542,10 +559,6 @@ class ProductUtilsMixin:
         "%d/%m/%Y %H:%M",
     )
     DATE_SENTINELS = {"immediately", "no_end_date", "specific_date"}
-
-    def skip_row(self, index: int, message: str) -> Dict[str, Any]:
-        logger.warning("Skipping row %d: %s", index + 1, message)
-        return {"skip": True, "row": index + 1, "error": message}
 
     @staticmethod
     def _none_if_na(value: Any) -> Any:
@@ -599,11 +612,6 @@ class ProductUtilsMixin:
 
     @staticmethod
     def _clean_local_code(value: Any) -> Optional[str]:
-        """
-        Zero-pad local_code to four digits,
-        treating numeric strings (including floats) correctly,
-        and 'I' (case-insensitive) as '0001'.
-        """
         if value is None:
             return None
         try:
@@ -612,7 +620,6 @@ class ProductUtilsMixin:
                 return f"{int(num):04d}"
         except Exception:
             pass
-
         v = str(value).strip()
         if not v:
             return None
@@ -677,7 +684,6 @@ class ProductUtilsMixin:
             "1",
         }
 
-        # dynamically load valid product_type choices
         try:
             choices = ProductUpdate._meta.get_field("product_type").choices
             valid_types = [val for val, _ in choices]
@@ -745,34 +751,29 @@ class ProductUtilsMixin:
         for date_col in ("order_from_date", "order_until_date", "order_end_date"):
             row[date_col] = self._coerce_date(row.get(date_col))
 
-        logger.debug("Cleaning row data: %s", row)
+        if row.get("stock_owner"):
+            row["stock_owner_email_address"] = row.get("stock_owner")
+        if row.get("stock_referral"):
+            row["order_referral_email_address"] = row.get("stock_referral")
 
+        logger.debug("Cleaned row data: %s", row)
         return row
 
     def safe_add_child(self, parent: Page, instance: Page) -> Page:
-        """
-        Adds `instance` as a child of `parent`, but handles the
-        special case where `parent` has no existing children
-        (so get_last_child() would return None).
-        """
         try:
             return parent.add_child(instance=instance)
         except AttributeError as exc:
-            # treebeard/mp_tree throws this when get_last_child() is None
             if "'NoneType' object has no attribute '_inc_path'" in str(exc):
                 logger.info(
                     "Parent %r has no children yet; assigning first-child path manually",
                     parent,
                 )
-                # figure out token size (default 4)
                 token_size = getattr(MP_Node, "_path_step", 4)
-                # first-child segment is '0001', '0002', ...
                 seg = str(1).zfill(token_size)
                 instance.depth = parent.depth + 1
                 instance.path = parent.path + seg
                 instance.save()
                 return instance
-            # other attribute errors should propagate
             raise
 
     def create_product_update(self, row: Mapping[str, Any]) -> ProductUpdate:
@@ -792,8 +793,8 @@ class ProductUtilsMixin:
             local_code=row.get("local_code"),
             unit_of_measure=row.get("unit_of_measure"),
             summary_of_guidance=row.get("guidance"),
-            stock_owner_email_address=row.get("stock_owner"),
-            order_referral_email_address=row.get("stock_referral"),
+            stock_owner_email_address=row.get("stock_owner_email_address"),
+            order_referral_email_address=row.get("order_referral_email_address"),
             product_downloads={
                 "main_download_url": row.get("main_download_file_name"),
                 "web_download_url": row.get("web_download_file_name"),
@@ -826,9 +827,9 @@ class ProductUtilsMixin:
             program_name=(program.programme_name if program else ""),
             product_title=slug_base,
             status=row.get("status"),
-            product_code=row.get("product_code"),
+            product_code=row.get("product_code").strip(),
             file_url=row.get("gov_related_article"),
-            tag=row.get("tag"),
+            tag=str(row.get("tag") or "").strip().lower(),
             product_key=row.get("product_key"),
             program_id=program,
             language_id=language,
@@ -956,9 +957,37 @@ class ProductUtilsMixin:
         root: Page,
         m2m_map: Dict[str, Tuple[str, Any, str, str]],
     ) -> Dict[str, Any]:
+        warnings: List[str] = []
+        errors: List[str] = []
+        created = False
+        updated = False
+        order_limits_created = 0
+
         try:
-            # ---- UPSERT existing ----
-            code = row.get("product_code")
+            tag_raw = row.get("tag") or ""
+            normalized_tag = normalize_tag(str(tag_raw))
+            row["tag"] = normalized_tag
+            is_download_only = normalized_tag == "download-only"
+
+            status_val = str(row.get("status") or "").strip().lower()
+            is_live = status_val == "live"
+
+            if row.get("stock_owner"):
+                row["stock_owner_email_address"] = row.get("stock_owner")
+            if row.get("stock_referral"):
+                row["order_referral_email_address"] = row.get("stock_referral")
+
+            logger.debug(
+                "Processing row %d: tag=%s, status=%s, is_download_only=%s, is_live=%s; row=%r",
+                idx + 1,
+                normalized_tag,
+                status_val,
+                is_download_only,
+                is_live,
+                row,
+            )
+
+            code = row.get("product_code").strip() if row.get("product_code") else None
             if code:
                 existing = Product.objects.filter(product_code=code).first()
                 if existing:
@@ -980,23 +1009,25 @@ class ProductUtilsMixin:
                         if incoming is not None and not getattr(existing, field):
                             setattr(existing, field, incoming)
                     existing.save()
-                    self.assign_m2m_fields(
-                        existing.update_ref, m2m_map, row, add_only=True
-                    )
-                    new_ols = self.create_order_limits(existing, row)
+                    if existing.update_ref:
+                        self.assign_m2m_fields(
+                            existing.update_ref, m2m_map, row, add_only=True
+                        )
+                    if is_live and not is_download_only:
+                        ols = self.create_order_limits(existing, row)
+                        order_limits_created = len(ols)
+                    updated = True
                     return {
                         "skip": False,
                         "updated": True,
-                        "order_limits": len(new_ols),
+                        "order_limits": order_limits_created,
+                        "warnings": warnings,
+                        "errors": errors,
                     }
 
-            # ---- VALIDATE required fields ----
-            status_val = str(row.get("status") or "").lower()
-            is_live = status_val == "live"
-            tag_val = str(row.get("tag") or "").lower()
-
-            if is_live and tag_val == "download-only":
-                required = {
+            # Validate required fields but do not abort; collect missing
+            if is_live and is_download_only:
+                expected_required = {
                     "product_key",
                     "title",
                     "language_id",
@@ -1017,7 +1048,7 @@ class ProductUtilsMixin:
                     "where_to_use_ids",
                 }
             elif is_live:
-                required = {
+                expected_required = {
                     "product_key",
                     "title",
                     "language_id",
@@ -1034,8 +1065,8 @@ class ProductUtilsMixin:
                     "product_type",
                     "audience_ids",
                     "where_to_use_ids",
-                    "stock_owner",
-                    "stock_referral",
+                    "stock_owner_email_address",
+                    "order_referral_email_address",
                     "run_to_zero",
                     "alternative_type",
                     "local_code",
@@ -1050,73 +1081,92 @@ class ProductUtilsMixin:
                     "organization_names",
                 }
                 if self._must_have_order_until(row):
-                    required.add("order_until_date")
+                    expected_required.add("order_until_date")
             else:
-                required = set()
+                expected_required = set()
 
             def _is_missing(val: Any) -> bool:
                 return val is None or (isinstance(val, str) and not val.strip())
 
-            missing = [f for f in required if _is_missing(row.get(f))]
+            missing = [f for f in expected_required if _is_missing(row.get(f))]
             if missing:
-                return self.skip_row(
-                    idx,
-                    "Missing/invalid required fields: " + ", ".join(sorted(missing)),
+                msg = (
+                    f"Row {idx+1} missing expected fields: {', '.join(sorted(missing))}"
                 )
+                logger.warning(msg)
+                warnings.append(msg)
 
-            # ---- CREATE new pages ----
             created_dt = self._coerce_datetime(row.get("created"))
             pub_date = (
                 self._coerce_date(row.get("version_date")) or datetime.date.today()
             )
 
-            # Program lookup
             program = None
             pid = row.get("programme_id")
             if pid:
                 program = Program.objects.filter(program_id=str(pid)).first()
                 if is_live and not program:
-                    return self.skip_row(idx, f"Program {pid} not found")
+                    warning = f"Program {pid} not found"
+                    logger.warning(warning)
+                    warnings.append(warning)
 
-            # Language lookup
             language = None
             lid = row.get("language_id")
             if lid:
                 language = LanguagePage.objects.filter(language_id=lid).first()
                 if is_live and not language:
-                    return self.skip_row(idx, f"Language {lid} not found")
+                    warning = f"Language {lid} not found"
+                    logger.warning(warning)
+                    warnings.append(warning)
             iso_code = language.iso_language_code if language else ""
 
             pu = self.create_product_update(row)
             res_pu = self.safe_add_child(root, pu)
             if isinstance(res_pu, dict) and res_pu.get("skip"):
-                return res_pu
-            pu = res_pu
+                error = "Failed to attach ProductUpdate"
+                logger.error(error)
+                errors.append(error)
+            else:
+                pu = res_pu
+                self.assign_m2m_fields(pu, m2m_map, row, add_only=False)
 
-            self.assign_m2m_fields(pu, m2m_map, row, add_only=False)
-
-            prod = self.create_product(
-                row, program, language, iso_code, pu, created_dt, pub_date
-            )
-            res_prod = self.safe_add_child(pu, prod)
-            if isinstance(res_prod, dict) and res_prod.get("skip"):
-                return res_prod
-            prod = res_prod
-
-            ols = []
-            if is_live and tag_val != "download-only":
-                ols = self.create_order_limits(prod, row)
-
-            return {"skip": False, "order_limits": len(ols)}
+                prod = self.create_product(
+                    row, program, language, iso_code, pu, created_dt, pub_date
+                )
+                # try full_clean for early validation insight
+                try:
+                    prod.full_clean()
+                except ValidationError as ve:
+                    warning = f"Product validation warnings: {ve}"
+                    logger.warning(warning)
+                    warnings.append(warning)
+                res_prod = self.safe_add_child(pu, prod)
+                if isinstance(res_prod, dict) and res_prod.get("skip"):
+                    error = "Failed to attach Product"
+                    logger.error(error)
+                    errors.append(error)
+                else:
+                    prod = res_prod
+                    if is_live and not is_download_only:
+                        ols = self.create_order_limits(prod, row)
+                        order_limits_created = len(ols)
+                    created = True
 
         except Exception as exc:
             logger.exception("Row %d unexpected error", idx + 1)
-            return self.skip_row(idx, str(exc))
+            errors.append(str(exc))
+
+        return {
+            "skip": False,
+            "created": created,
+            "updated": updated,
+            "order_limits": order_limits_created,
+            "warnings": warnings,
+            "errors": errors,
+        }
 
 
 class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
-    """`POST /products/bulk-upload` endpoint."""
-
     authentication_classes: List = []
     permission_classes: List = []
 
@@ -1155,7 +1205,8 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
             "disease_ids": ("diseases_ref", Disease, "disease_id", "disease_names"),
         }
 
-        skipped, created, updated, order_limits = [], 0, 0, 0
+        summary = []
+        created, updated, order_limits = 0, 0, 0
         for idx, row_series in df.iterrows():
             row = self.clean_row_data(row_series.to_dict())
             try:
@@ -1163,24 +1214,39 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
                     result = self._process_row(idx, row, root, m2m_map)
             except Exception as exc:
                 logger.exception("Row %d catastrophic error", idx + 1)
-                result = self.skip_row(idx, str(exc))
+                result = {
+                    "skip": False,
+                    "created": False,
+                    "updated": False,
+                    "order_limits": 0,
+                    "warnings": [],
+                    "errors": [str(exc)],
+                }
 
-            if result.get("skip"):
-                skipped.append(result)
-            else:
-                if result.get("updated"):
-                    updated += 1
-                else:
-                    created += 1
-                order_limits += result.get("order_limits", 0)
+            if result.get("updated"):
+                updated += 1
+            elif result.get("created"):
+                created += 1
+            order_limits += result.get("order_limits", 0)
+
+            summary.append(
+                {
+                    "row": idx + 1,
+                    "created": result.get("created", False),
+                    "updated": result.get("updated", False),
+                    "order_limits": result.get("order_limits", 0),
+                    "warnings": result.get("warnings", []),
+                    "errors": result.get("errors", []),
+                }
+            )
 
         return Response(
             {
                 "message": "Bulk upload complete.",
                 "created_products": created,
                 "updated_products": updated,
-                "skipped_rows": skipped,
                 "order_limits_created": order_limits,
+                "row_summary": summary,
             },
             status=status.HTTP_201_CREATED,
         )

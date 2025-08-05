@@ -13,6 +13,8 @@ from psycopg2 import errors as pg_errors
 from collections import defaultdict
 
 import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 from core.audiences.models import Audience
 from core.diseases.models import Disease
 from core.diseases.serializers import DiseaseSerializer
@@ -87,6 +89,7 @@ from .serializers import (
     ProductSearchSerializer,
     ProductSerializer,
     ProductUpdateSerializer,
+    RelatedProductSerializer,
 )
 from wagtail.models import Page
 from treebeard.mp_tree import MP_Node
@@ -796,10 +799,10 @@ class ProductUtilsMixin:
             stock_owner_email_address=row.get("stock_owner_email_address"),
             order_referral_email_address=row.get("order_referral_email_address"),
             product_downloads={
-                "main_download_url": row.get("main_download_file_name"),
-                "web_download_url": row.get("web_download_file_name"),
-                "print_download_url": row.get("print_download_file_name"),
-                "transcript_download_url": row.get("print_download_file_name"),
+                "main_download_url": row.get("main_download_file_name", {}),
+                "web_download_url": row.get("web_download_file_name", {}),
+                "print_download_url": row.get("print_download_file_name", {}),
+                "transcript_download_url": row.get("print_download_file_name", {}),
                 "video_url": row.get("video_urls", ""),
             },
         )
@@ -1276,6 +1279,103 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return df, None
+
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="related-products/(?P<product_code>[\w-]+)",
+    )
+    def related_publications(self, request, product_code=None):
+        """
+        Return related publications grouped by product_type, with up to 2 per group,
+        and a 'has_more' flag indicating if more related items exist.
+        """
+        try:
+            product = Product.objects.get(product_code=product_code)
+        except Product.DoesNotExist:
+            return Response({"error": "Product not found."}, status=404)
+
+        product_update = product.update_ref
+        if not product_update:
+            return Response(
+                {"error": "No associated product update found."}, status=404
+            )
+
+        # Find same disease/topic
+        disease_ids = list(
+            product_update.diseases_ref.values_list("disease_id", flat=True)
+        )
+        disease_ids = list(map(str, disease_ids))  # ensure correct type
+
+        products = (
+            Product.objects.select_related("update_ref")
+            .filter(update_ref__diseases_ref__in=disease_ids)
+            .exclude(product_code=product_code)
+            .distinct()
+        )
+
+        if not products.exists():
+            return Response({})
+
+        # Prepare similarity
+        df = pd.DataFrame(
+            [
+                {
+                    "product_code": p.product_code,
+                    "product_title": p.product_title,
+                    "summary_of_guidance": p.update_ref.summary_of_guidance
+                    if p.update_ref
+                    else "",
+                    "product_type": p.update_ref.product_type if p.update_ref else "",
+                }
+                for p in products
+            ]
+        )
+
+        df["text"] = (
+            df["product_title"].fillna("")
+            + " "
+            + df["summary_of_guidance"].fillna("")
+            + " "
+            + df["product_type"].fillna("")
+        )
+
+        ref_text = (
+            product.product_title
+            + " "
+            + (product_update.summary_of_guidance or "")
+            + " "
+            + (product_update.product_type or "")
+        )
+        texts = [ref_text] + df["text"].tolist()
+
+        vectorizer = TfidfVectorizer(stop_words="english")
+        tfidf_matrix = vectorizer.fit_transform(texts)
+        cosine_sim = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:]).flatten()
+
+        df["similarity_score"] = cosine_sim
+
+        # Filter low similarity
+        df = df[df["similarity_score"] > 0.18]
+
+        # Grouped output with 'has_more'
+        grouped = {}
+        ITEMS_PER_TYPE = 2  # Change to 3 if you prefer
+
+        for product_type, group in df.groupby("product_type"):
+            group_sorted = group.sort_values("similarity_score", ascending=False)
+            codes = group_sorted["product_code"].tolist()
+            top_codes = codes[:ITEMS_PER_TYPE]
+            has_more = len(codes) > ITEMS_PER_TYPE
+            related_objs = Product.objects.filter(product_code__in=top_codes)
+            serializer = RelatedProductSerializer(related_objs, many=True)
+            grouped[product_type] = {
+                "items": serializer.data,
+                "has_more": has_more,
+                "total_count": len(codes),
+            }
+
+        return Response(grouped)
 
 
 class PresignedUrlMixin:
@@ -2734,7 +2834,8 @@ class ProductUsersListView(ProductListMixin, APIView):
             data = filter_live_languages(data)
             return paginator.get_paginated_response(data)
 
-        except Exception:
+        except Exception as e:
+            logger.exception(f"Unhandled exception in ProductUsersListView.get, {e}")
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,

@@ -121,7 +121,7 @@ def parse_downloads(download_data) -> Dict[str, Union[str, List[Dict]]]:
 
     def _build_list(lst):
         out = []
-        for raw in lst:
+        for raw in lst or []:  # Always treat None as empty list
             normalized = _normalise_entry(raw)
             try:
                 out.append(file_metadata_serializer(normalized).data)
@@ -132,7 +132,7 @@ def parse_downloads(download_data) -> Dict[str, Union[str, List[Dict]]]:
     return {
         "main_download_url": download_data.get("main_download_url"),
         "video_url": download_data.get("video_url"),
-        "web_download_url": _build_list(download_data.get("web_download_url", [])),
-        "print_download_url": _build_list(download_data.get("print_download_url", [])),
-        "transcript_url": _build_list(download_data.get("transcript_url", [])),
+        "web_download_url": _build_list(download_data.get("web_download_url")),
+        "print_download_url": _build_list(download_data.get("print_download_url")),
+        "transcript_url": _build_list(download_data.get("transcript_url")),
     }

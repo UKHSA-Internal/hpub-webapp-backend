@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: ["main"]
+  release:
+    types: [published]
 
 permissions:
   id-token: write
@@ -224,13 +226,11 @@ jobs:
       max-parallel: 1
       matrix:
         environment: ["preprod", "prod"]
-    if: github.ref == 'refs/heads/prod' && github.event_name == 'push'
+    if: github.event_name == 'release' && github.event.action == 'published'
     permissions:
       contents: write
       id-token: write
       actions: read
-    needs:
-      - release
     steps:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -238,10 +238,13 @@ jobs:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
           role-session-name: deploy-${{ github.sha }}
           aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Get Release Tag
+        run: echo "Release tag is ${{ github.event.release.tag_name }}"
 
       - name: Update Parameter Store with new value
         env:
-          NEW_TAG: ${{ needs.release.outputs.release_tag }}
+          NEW_TAG: ${{ github.event.release.tag_name }}
         run: |
           aws ssm put-parameter --name "/hpub/$APP_NAME/image_tag" --type "String" --value "$NEW_TAG" --overwrite
 
@@ -256,7 +259,7 @@ jobs:
           task-definition: task-definition.json
           container-name: app
           # We have to construct this as Github Actions will refuse to pass the full URL from 'release' step as it contains an AWS account ID
-          image: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ needs.release.outputs.release_tag }}
+          image: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ github.event.release.tag_name }}
 
       - name: Deploy to Amazon ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2

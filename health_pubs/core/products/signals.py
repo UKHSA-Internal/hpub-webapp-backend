@@ -50,7 +50,7 @@ def skip_if_suppressed(fn):
         if getattr(instance, "suppress_event", False):
             logger.info(
                 "Event suppressed for product %s (suppress_event=True)",
-                instance.product_code,
+                instance.product_code_no_dashes,
             )
             return
         return fn(sender, instance, **kwargs)
@@ -68,7 +68,7 @@ def prepare_product_data(product_instance, required_fields_enum, status):
     # ARCHIVED / WITHDRAWN: minimal payloads
     if status in ("archived", "withdrawn"):
         return {
-            "publicationId": str(product_instance.product_code),
+            "publicationId": str(product_instance.product_code_no_dashes),
             "status": normalised,
         }
 
@@ -77,18 +77,18 @@ def prepare_product_data(product_instance, required_fields_enum, status):
     if not update and status != "draft":
         logger.error(
             "No update_ref for product %s when preparing %s payload",
-            product_instance.product_code,
+            product_instance.product_code_no_dashes,
             status,
         )
         return {
-            "publicationId": str(product_instance.product_code),
+            "publicationId": str(product_instance.product_code_no_dashes),
             "status": normalised,
         }
 
     # DRAFT: full draft payload
     if status == "draft":
         return {
-            "publicationId": str(product_instance.product_code),
+            "publicationId": str(product_instance.product_code_no_dashes),
             "title": product_instance.product_title,
             "status": normalised,
             "maxOrder": [],
@@ -107,7 +107,7 @@ def prepare_product_data(product_instance, required_fields_enum, status):
 
     # LIVE (and any other non‐draft) statuses
     full = {
-        "publicationId": str(product_instance.product_code),
+        "publicationId": str(product_instance.product_code_no_dashes),
         "title": product_instance.product_title,
         "status": normalised,
         "maxOrder": [
@@ -184,14 +184,14 @@ def send_product_event(product_instance, event_type, detail_type, required_field
             logger.info(
                 "Sent %s event for %s: %s",
                 event_type,
-                product_instance.product_code,
+                product_instance.product_code_no_dashes,
                 resp,
             )
         else:
             logger.info(
                 "Simulated %s event for %s: %s",
                 event_type,
-                product_instance.product_code,
+                product_instance.product_code_no_dashes,
                 payload,
             )
 
@@ -199,7 +199,7 @@ def send_product_event(product_instance, event_type, detail_type, required_field
         logger.error(
             "Error sending %s event for %s: %s",
             event_type,
-            product_instance.product_code,
+            product_instance.product_code_no_dashes,
             exc,
         )
 
@@ -221,7 +221,7 @@ def send_product_draft_event(sender, instance, **kwargs):
             required_event_fields_draft,
         )
     else:
-        logger.warning(MISSING_STATUS_WARNING, instance.product_code)
+        logger.warning(MISSING_STATUS_WARNING, instance.product_code_no_dashes)
 
 
 @receiver(post_save, sender=Product)
@@ -238,7 +238,7 @@ def send_product_live_event(sender, instance, **kwargs):
             required_event_fields_live,
         )
     else:
-        logger.warning(MISSING_STATUS_WARNING, instance.product_code)
+        logger.warning(MISSING_STATUS_WARNING, instance.product_code_no_dashes)
 
 
 @receiver(post_save, sender=Product)
@@ -255,7 +255,7 @@ def send_product_archived_event(sender, instance, **kwargs):
             required_event_fields_archived,
         )
     else:
-        logger.warning(MISSING_STATUS_WARNING, instance.product_code)
+        logger.warning(MISSING_STATUS_WARNING, instance.product_code_no_dashes)
 
 
 @receiver(post_save, sender=Product)
@@ -272,4 +272,4 @@ def send_product_withdrawn_event(sender, instance, **kwargs):
             required_event_fields_withdrawn,
         )
     else:
-        logger.warning(MISSING_STATUS_WARNING, instance.product_code)
+        logger.warning(MISSING_STATUS_WARNING, instance.product_code_no_dashes)

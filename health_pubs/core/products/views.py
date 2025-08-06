@@ -1947,7 +1947,7 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                 continue
 
             limit_val = lim.get("order_limit_value", 0)
-            full_keys = full_keys_map.get(org.id, [])
+            full_keys = full_keys_map.get(org.organization_id, [])
             seen_orgs.add(org_name)
 
             # ------------------------------------------------------------------
@@ -1967,6 +1967,7 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
             # ------------------------------------------------------------------
             # Case B: new page → create
             # ------------------------------------------------------------------
+            logger.info("full_external_keys for %s: %s", org_name, full_keys)
             new_page = OrderLimitPage(
                 title=f"Order Limit for {org_name}",
                 slug=slugify(f"{org_name}-order-limit-{uuid.uuid4()}"),

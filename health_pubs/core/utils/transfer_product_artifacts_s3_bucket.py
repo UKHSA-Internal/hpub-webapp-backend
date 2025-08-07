@@ -43,8 +43,8 @@ PG = {
 }
 
 LOCAL_DIR = "./files/"
-EXCEL_PATH = "./files/updated_lookup_data.xlsx"
-MISSING_LOG = "./files/missing_links_assetss_pub.csv"
+EXCEL_PATH = "./files/updated_lookup_data_draft.xlsx"
+MISSING_LOG = "./files/missing_links_draft_pub.csv"
 
 ALLOWED_EXTS = {
     "main_download_file_name": {"jpg", "jpeg", "png", "gif"},
@@ -150,18 +150,21 @@ def log_missing_local_file(original, target, directory):
         )
 
 
-# Split filenames on commas, ignoring commas inside parentheses
-def split_filenames(s: str) -> List[str]:
+def parse_filenames(cell: str) -> List[str]:
+    # Split on commas NOT inside parentheses
+    if not cell or not cell.strip():
+        return []
     parts = []
     buf = ""
     depth = 0
-    for ch in s:
+    for ch in cell:
         if ch == "(":
             depth += 1
         elif ch == ")":
             depth = max(depth - 1, 0)
         if ch == "," and depth == 0:
-            parts.append(buf.strip())
+            if buf.strip():
+                parts.append(buf.strip())
             buf = ""
         else:
             buf += ch
@@ -170,59 +173,62 @@ def split_filenames(s: str) -> List[str]:
     return parts
 
 
-# Extract filenames by regex matching allowed extensions
-def extract_filenames(cell: str, col: str) -> List[str]:
-    exts = ALLOWED_EXTS.get(col, [])
-    if not exts:
-        return []
-    # build regex for extensions
-    pattern = (
-        r"[^,]+" + r"\.(" + "|".join(exts) + r")(?=$|,)"
-    )  # match up to .ext before comma or end
-    regex = re.compile(pattern, flags=re.IGNORECASE)
-    matches = regex.findall(cell + ",")  # add comma to match end case
-    # regex.findall returns list of ext group; use finditer
-    filenames = [m.group(0).strip() for m in regex.finditer(cell + ",")]
-    return filenames or [cell.strip()]
+def get_file_extension(fname: str) -> str:
+    # Always get the true last extension, ignoring any commas or parentheses
+    fname = fname.strip()
+    if "." in fname:
+        return fname.rsplit(".", 1)[1].lower()
+    return ""
 
 
 def find_local_filename(directory: str, original: str) -> Optional[str]:
+    """
+    Try to match a file in 'directory' to the provided filename.
+    Robust to casing, whitespace, + vs space, dashes, and unicode issues.
+    Returns the actual filename if found, else None.
+    """
     if not os.path.isdir(directory):
         logger.error("Local directory missing: %s", directory)
         return None
-    target = sanitize_filename(original)
+
+    # Prepare all variants of the input name
+    def normalize(s):
+        s = unicodedata.normalize("NFKD", s)
+        s = s.replace("+", " ").replace("_", " ").replace("-", " ")
+        s = s.strip().lower()
+        s = re.sub(r"\s+", " ", s)  # collapse multiple spaces
+        return s
+
+    target_norm = normalize(original)
     available = os.listdir(directory)
-    sanitized_files = {sanitize_filename(f): f for f in available}
-    if target in sanitized_files:
-        return sanitized_files[target]
-    orig_lower = original.lower()
-    for fname in available:
-        if fname.lower() == orig_lower:
-            return fname
-    norm_forms = [
-        unicodedata.normalize(form, original) for form in ["NFC", "NFD", "NFKD"]
-    ]
-    for fname in available:
-        if fname in norm_forms:
-            return fname
+    # Build map: normed name → real name
+    norm_to_real = {normalize(f): f for f in available}
 
-    def undash(s):
-        return (
-            s.replace("–", "-")
-            .replace("—", "-")
-            .replace("\u2013", "-")
-            .replace("\u2014", "-")
-        )
+    # 1. Exact match (normalized)
+    if target_norm in norm_to_real:
+        return norm_to_real[target_norm]
 
-    undashed = undash(original)
-    for fname in available:
-        if undash(fname) == undashed:
-            return fname
-    candidates = list(sanitized_files.keys())
-    closest = difflib.get_close_matches(target, candidates, n=1, cutoff=0.80)
+    # 2. Fuzzy match (difflib, for truly close names)
+    closest = difflib.get_close_matches(
+        target_norm, norm_to_real.keys(), n=1, cutoff=0.8
+    )
     if closest:
-        return sanitized_files[closest[0]]
-    log_missing_local_file(original, target, directory)
+        return norm_to_real[closest[0]]
+
+    # 3. Extension-only fallback: match base+ext if only the extension matches
+    orig_base, orig_ext = os.path.splitext(original.strip().lower())
+    for f in available:
+        base, ext = os.path.splitext(f.lower())
+        if ext == orig_ext and base.replace(" ", "") == orig_base.replace(" ", ""):
+            return f
+
+    # 4. Super-fuzzy: substring match
+    for norm, real in norm_to_real.items():
+        if target_norm in norm or norm in target_norm:
+            return real
+
+    # 5. Log and return None
+    log_missing_local_file(original, target_norm, directory)
     return None
 
 
@@ -460,77 +466,83 @@ def _process_row(idx: int, row: pd.Series, cur, conn) -> Tuple[int, int]:
     return processed + p2, skipped + s2
 
 
+def is_valid_file_value(val: str) -> bool:
+    return val and val.strip().lower() not in {"n/a", "na", "-", ""}
+
+
+def get_extension(fname: str) -> str:
+    fname = fname.strip()
+    _, ext = os.path.splitext(fname)
+    return ext.lstrip(".").lower()
+
+
 def _process_column(cur, conn, ref_id, prod_code, col, row, has_row):
     original = row.get(col, "").strip()
-    if not original:
+    if not is_valid_file_value(original):
         return 0, 0, has_row
-    files = split_filenames(original)
-    processed = skipped = 0
-    for fname in files:
-        ext = os.path.splitext(fname)[1].lower().lstrip(".")
-        if ext not in ALLOWED_EXTS.get(col, set()):
-            missing_entries.append(
-                (prod_code, col, f"extension '{ext}' not allowed", fname)
-            )
-            logger.warning(f"  extension '{ext}' not allowed; skipping {fname}")
-            skipped += 1
-            continue
-        matched = find_local_filename(LOCAL_DIR, fname)
-        if not matched:
-            missing_entries.append((prod_code, col, "file missing locally", fname))
-            logger.warning(f"  file missing locally for {fname}; skipping")
-            skipped += 1
-            continue
-        local_path = os.path.join(LOCAL_DIR, matched)
-        safe_name = sanitize_filename(fname)
-        key = f"{prod_code}/{safe_name}"
-        try:
-            ensure_s3_object(local_path, key)
-            presigned = generate_presigned_get(
-                BUCKET_NAME,
-                key,
-                fname,
-                is_main_download=(col == "main_download_file_name"),
-            )
-            md = get_file_metadata([presigned])[0]
-        except Exception as e:
-            missing_entries.append(
-                (prod_code, col, f"Error processing file: {e}", fname)
-            )
-            logger.error(f"  Error processing file: {e}")
-            skipped += 1
-            continue
-        metadata = {
-            "URL": presigned,
-            "s3_bucket_url": f"https://{BUCKET_NAME}.s3.amazonaws.com/{key}",
-            "file_size": md.get("file_size"),
-            "file_type": md.get("file_type"),
-        }
-        db_field = EXCEL_TO_DB[col]
-        try:
-            if has_row:
-                updated = update_db(cur, ref_id, db_field, metadata)
-                action = "updated" if updated else "exists"
-            else:
-                insert_db(cur, ref_id, db_field, metadata)
-                has_row = True
-                action = "inserted"
-            conn.commit()
-            logger.info(f"  {action} {prod_code} → {db_field}")
-            processed += 1
-        except Exception as e:
-            conn.rollback()
-            missing_entries.append((prod_code, col, f"DB write failed: {e}", fname))
-            logger.error(f"  DB write failed: {e}")
-            skipped += 1
-    return processed, skipped, has_row
+
+    fname = original
+    ext = get_extension(fname)
+    if ext not in ALLOWED_EXTS.get(col, set()):
+        missing_entries.append(
+            (prod_code, col, f"extension '{ext}' not allowed", fname)
+        )
+        logger.warning(f"  extension '{ext}' not allowed; skipping {fname}")
+        return 0, 1, has_row
+
+    matched = find_local_filename(LOCAL_DIR, fname)
+    if not matched:
+        missing_entries.append((prod_code, col, "file missing locally", fname))
+        logger.warning(f"  file missing locally for {fname}; skipping")
+        return 0, 1, has_row
+
+    local_path = os.path.join(LOCAL_DIR, matched)
+    safe_name = sanitize_filename(fname)
+    key = f"{prod_code}/{safe_name}"
+    try:
+        ensure_s3_object(local_path, key)
+        presigned = generate_presigned_get(
+            BUCKET_NAME,
+            key,
+            fname,
+            is_main_download=(col == "main_download_file_name"),
+        )
+        md = get_file_metadata([presigned])[0]
+    except Exception as e:
+        missing_entries.append((prod_code, col, f"Error processing file: {e}", fname))
+        logger.error(f"  Error processing file: {e}")
+        return 0, 1, has_row
+
+    metadata = {
+        "URL": presigned,
+        "s3_bucket_url": f"https://{BUCKET_NAME}.s3.amazonaws.com/{key}",
+        "file_size": md.get("file_size"),
+        "file_type": md.get("file_type"),
+    }
+    db_field = EXCEL_TO_DB[col]
+    try:
+        if has_row:
+            updated = update_db(cur, ref_id, db_field, metadata)
+            action = "updated" if updated else "exists"
+        else:
+            insert_db(cur, ref_id, db_field, metadata)
+            has_row = True
+            action = "inserted"
+        conn.commit()
+        logger.info(f"  {action} {prod_code} → {db_field}")
+        return 1, 0, has_row
+    except Exception as e:
+        conn.rollback()
+        missing_entries.append((prod_code, col, f"DB write failed: {e}", fname))
+        logger.error(f"  DB write failed: {e}")
+        return 0, 1, has_row
 
 
 def _process_video_urls(cur, conn, ref_id, prod_code, row, has_row):
     original = row.get("video_urls", "").strip()
     if not original:
         return 0, 0, has_row
-    urls = split_filenames(original)
+    urls = parse_filenames(original)
     first = urls[0]
     canonical = canonicalize_youtube_url(first)
     if not canonical:

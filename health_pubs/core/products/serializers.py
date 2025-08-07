@@ -21,6 +21,7 @@ from core.utils.download_helpers import parse_downloads
 
 logger = logging.getLogger(__name__)
 
+
 class RelatedProductSerializer(serializers.ModelSerializer):
     product_type = serializers.SerializerMethodField()
     summary_of_guidance = serializers.SerializerMethodField()
@@ -39,6 +40,7 @@ class RelatedProductSerializer(serializers.ModelSerializer):
 
     def get_summary_of_guidance(self, obj):
         return obj.update_ref.summary_of_guidance if obj.update_ref else None
+
 
 class FileMetadataSerializer(serializers.Serializer):
     URL = serializers.URLField(required=True)

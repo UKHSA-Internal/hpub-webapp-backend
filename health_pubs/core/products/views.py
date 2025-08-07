@@ -1930,7 +1930,6 @@ class ProductUpdateView(View):
             )
 
 
-
 class ProductPatchView(ErrorHandlingMixin, APIView):
     """
     Optimized view to handle product updates via PATCH requests.

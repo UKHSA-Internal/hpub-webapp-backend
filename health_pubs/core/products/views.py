@@ -11,6 +11,8 @@ import time
 from django.db import IntegrityError
 from psycopg2 import errors as pg_errors
 from collections import defaultdict
+from datetime import timedelta
+
 
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -1428,11 +1430,17 @@ class PresignedUrlMixin:
 
     def _collect_s3_urls(self, product_downloads):
         urls = []
-        main_download = product_downloads.get("main_download_url")
-        if isinstance(main_download, dict):
-            s3_url = main_download.get("s3_bucket_url")
-            if s3_url:
-                urls.append(s3_url)
+
+        # Handle main_download_url as either a dict or a list of dicts
+        main = product_downloads.get("main_download_url")
+        if isinstance(main, dict):
+            urls.append(main.get("s3_bucket_url"))
+        elif isinstance(main, list):
+            for item in main:
+                if isinstance(item, dict) and item.get("s3_bucket_url"):
+                    urls.append(item["s3_bucket_url"])
+
+        # The rest stays the same…
         for download_type in [
             "web_download_url",
             "print_download_url",
@@ -1441,11 +1449,9 @@ class PresignedUrlMixin:
             downloads = product_downloads.get(download_type, [])
             if isinstance(downloads, list):
                 urls.extend(
-                    [
-                        item.get("s3_bucket_url")
-                        for item in downloads
-                        if isinstance(item, dict) and item.get("s3_bucket_url")
-                    ]
+                    item.get("s3_bucket_url")
+                    for item in downloads
+                    if isinstance(item, dict) and item.get("s3_bucket_url")
                 )
         return urls
 
@@ -1453,8 +1459,18 @@ class PresignedUrlMixin:
         self, item, presigned_urls, inline_presigned_urls, metadata_dict
     ):
         """
-        Helper to update a download item with both presigned URLs and file metadata.
+        Update a single download entry, but also handle lists for main_download_url
         """
+        # If it's a list, process each element
+        if isinstance(item, list):
+            return [
+                self._apply_metadata_and_presigned(
+                    i, presigned_urls, inline_presigned_urls, metadata_dict
+                )
+                for i in item
+            ]
+
+        # … existing dict handling below
         if not isinstance(item, dict):
             return item
 
@@ -1462,13 +1478,8 @@ class PresignedUrlMixin:
         if s3_url in presigned_urls:
             presigned_url = presigned_urls[s3_url]
             item["URL"] = presigned_url
-
-            # Merge metadata if available
-            if metadata_dict and presigned_url in metadata_dict:
-                # Merge existing metadata into the item.
-                meta = metadata_dict[presigned_url]
-                item.update(meta)
-            # Always keep the original S3 URL for reference.
+            if presigned_url in metadata_dict:
+                item.update(metadata_dict[presigned_url])
             item["s3_bucket_url"] = s3_url
 
         if s3_url in inline_presigned_urls:
@@ -2705,10 +2716,10 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return None
 
 
-class ProductListMixin:
+class ProductListMixin(PresignedUrlMixin):
     """
-    Handles sorting, pagination + S3 presigning,
-    with per‑request caching of raw data list.
+    Handles sorting, pagination + S3 presigning (both attachment and inline),
+    with per-request caching of raw data list.
     """
 
     serializer_class = ProductSerializer
@@ -2758,11 +2769,11 @@ class ProductListMixin:
             page, many=True, context=ctx
         )
 
-        # 1) Gather & presign S3 URLs
+        # 1) Gather & presign "download" URLs
         urls = extract_s3_urls(serializer.data)
         presigned = generate_presigned_urls(urls)
 
-        # 2) Inject presigned URLs
+        # 2) Inject attachment-style presigned URLs into the serialized data
         if use_direct_update:
             _update_product_downloads_with_presigned_urls(page, presigned)
             serializer = (serializer_class or self.serializer_class)(
@@ -2772,6 +2783,11 @@ class ProductListMixin:
             update_product_urls(serializer.data, presigned)
 
         data = serializer.data
+
+        # 3) Inject inline presigned URLs (and merge metadata) for every item
+        for item in data:
+            self._process_presigned_urls(item)
+
         cache.set(cache_key, data, self.cache_timeout)
         return data, paginator
 
@@ -2871,7 +2887,8 @@ class BaseProductSearchView(APIView, ProductListMixin):
 
             query = self.get_default_query()
             if product_code:
-                query &= Q(product_code_no_dashes__icontains=product_code)
+                normalized = re.sub(r"[-_]", "", product_code)
+                query &= Q(product_code_no_dashes__icontains=normalized)
             if product_title:
                 query &= Q(product_title__icontains=product_title)
 
@@ -3038,7 +3055,8 @@ class ProductAdminFilterView(ProductListMixin, APIView):
         if codes:
             code_q = Q()
             for c in codes:
-                code_q |= Q(product_code_no_dashes__icontains=c)
+                normalized = re.sub(r"[-_]", "", c)
+                code_q |= Q(product_code_no_dashes__icontains=normalized)
             q &= code_q
 
         return q

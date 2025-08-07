@@ -1018,13 +1018,83 @@ class ProductUtilsMixin:
         root: Page,
         is_live: bool,
         is_download_only: bool,
-        m2m_map,
+        m2m_map: Dict[str, Tuple[str, Any, str, str]],
     ) -> Dict[str, Any]:
         warnings: List[str] = []
         errors: List[str] = []
 
-        # Required‐fields validation
-        required: set = set()
+        # 1) Validate required fields
+        self._validate_required(idx, row, is_live, is_download_only, warnings)
+
+        # 2) Parse timestamps
+        created_dt = self._coerce_datetime(row.get("created"))
+        pub_date = self._coerce_date(row.get("version_date")) or datetime.date.today()
+
+        # 3) Look up related objects
+        program = self._find_obj(
+            Program, "program_id", row.get("programme_id"), is_live, "Program", warnings
+        )
+        language = self._find_obj(
+            LanguagePage,
+            "language_id",
+            row.get("language_id"),
+            is_live,
+            "Language",
+            warnings,
+        )
+        iso_code = language.iso_language_code if language else ""
+
+        # 4) Create and attach the ProductUpdate
+        pu = self._attach_update(row, root, m2m_map, errors, warnings)
+        if pu is None:
+            return {
+                "created": False,
+                "updated": False,
+                "order_limits": 0,
+                "warnings": warnings,
+                "errors": errors,
+            }
+
+        # 5) Build, validate and attach the Product
+        prod = self.create_product(
+            row, program, language, iso_code, pu, created_dt, pub_date
+        )
+        prod_attached = self._attach_product(prod, pu, errors, warnings)
+        if prod_attached is None:
+            return {
+                "created": False,
+                "updated": False,
+                "order_limits": 0,
+                "warnings": warnings,
+                "errors": errors,
+            }
+
+        # 6) Order‐limits if live
+        ol_count = (
+            len(self.create_order_limits(prod_attached, row))
+            if is_live and not is_download_only
+            else 0
+        )
+
+        return {
+            "created": True,
+            "updated": False,
+            "order_limits": ol_count,
+            "warnings": warnings,
+            "errors": errors,
+        }
+
+    # ---- Helpers used by _create_new ----
+
+    def _validate_required(
+        self,
+        idx: int,
+        row: Dict[str, Any],
+        is_live: bool,
+        is_download_only: bool,
+        warnings: List[str],
+    ) -> None:
+        required: Set[str] = set()
         if is_live:
             if is_download_only:
                 required = {
@@ -1082,95 +1152,73 @@ class ProductUtilsMixin:
                 }
                 if row.get("available_until_choice") == "specific_date":
                     required.add("order_until_date")
-
-        def _missing(field: str) -> bool:
-            val = row.get(field)
-            return val is None or (isinstance(val, str) and not val.strip())
-
-        missing = [f for f in required if _missing(f)]
+        missing = [
+            f
+            for f in required
+            if row.get(f) is None
+            or (isinstance(row.get(f), str) and not row[f].strip())
+        ]
         if missing:
             msg = f"Row {idx+1} missing: {', '.join(sorted(missing))}"
             logger.warning(msg)
             warnings.append(msg)
 
-        # Timestamps
-        created_dt = self._coerce_datetime(row.get("created"))
-        pub_date = self._coerce_date(row.get("version_date")) or datetime.date.today()
+    def _find_obj(
+        self,
+        model: Any,
+        lookup: str,
+        value: Any,
+        is_live: bool,
+        name: str,
+        warnings: List[str],
+    ) -> Optional[Any]:
+        if not value:
+            return None
+        obj = model.objects.filter(**{lookup: str(value)}).first()
+        if is_live and obj is None:
+            msg = f"{name} {value} not found"
+            logger.warning(msg)
+            warnings.append(msg)
+        return obj
 
-        # Program & Language lookups
-        program = None
-        pid = row.get("programme_id")
-        if pid:
-            program = Program.objects.filter(program_id=str(pid)).first()
-            if is_live and not program:
-                w = f"Program {pid} not found"
-                logger.warning(w)
-                warnings.append(w)
-
-        language = None
-        iso_code = ""
-        lid = row.get("language_id")
-        if lid:
-            language = LanguagePage.objects.filter(language_id=lid).first()
-            if is_live and not language:
-                w = f"Language {lid} not found"
-                logger.warning(w)
-                warnings.append(w)
-            iso_code = language.iso_language_code if language else ""
-
-        # Create ProductUpdate
+    def _attach_update(
+        self,
+        row: Dict[str, Any],
+        root: Page,
+        m2m_map: Dict[str, Tuple[str, Any, str, str]],
+        errors: List[str],
+        warnings: List[str],
+    ) -> Optional[ProductUpdate]:
         pu_obj = self.create_product_update(row)
-        res_pu = self.safe_add_child(root, pu_obj)
-        if isinstance(res_pu, dict) and res_pu.get("skip"):
+        res = self.safe_add_child(root, pu_obj)
+        if isinstance(res, dict) and res.get("skip"):
             err = "Failed to attach ProductUpdate"
             logger.error(err)
             errors.append(err)
-            return {
-                "created": False,
-                "updated": False,
-                "order_limits": 0,
-                "warnings": warnings,
-                "errors": errors,
-            }
-        pu = res_pu
-        self.assign_m2m_fields(pu, m2m_map, row, add_only=False)
+            return None
+        self.assign_m2m_fields(res, m2m_map, row, add_only=False)
+        return res
 
-        # Create Product
-        prod_obj = self.create_product(
-            row, program, language, iso_code, pu, created_dt, pub_date
-        )
+    def _attach_product(
+        self,
+        prod_obj: Product,
+        pu: ProductUpdate,
+        errors: List[str],
+        warnings: List[str],
+    ) -> Optional[Product]:
         try:
             prod_obj.full_clean()
         except ValidationError as ve:
-            w = f"Validation issues: {ve}"
-            logger.warning(w)
-            warnings.append(w)
-
-        res_prod = self.safe_add_child(pu, prod_obj)
-        if isinstance(res_prod, dict) and res_prod.get("skip"):
+            msg = f"Validation issues: {ve}"
+            logger.warning(msg)
+            warnings.append(msg)
+        res = self.safe_add_child(pu, prod_obj)
+        if isinstance(res, dict) and res.get("skip"):
             err = "Failed to attach Product"
             logger.error(err)
             errors.append(err)
-            return {
-                "created": False,
-                "updated": False,
-                "order_limits": 0,
-                "warnings": warnings,
-                "errors": errors,
-            }
-
-        # Order limits
-        ol_count = 0
-        if is_live and not is_download_only:
-            ol_count = len(self.create_order_limits(res_prod, row))
-
-        return {
-            "created": True,
-            "updated": False,
-            "order_limits": ol_count,
-            "warnings": warnings,
-            "errors": errors,
-        }
+            return None
+        return res
 
     def _process_row(
         self,

@@ -21,6 +21,24 @@ from core.utils.download_helpers import parse_downloads
 
 logger = logging.getLogger(__name__)
 
+class RelatedProductSerializer(serializers.ModelSerializer):
+    product_type = serializers.SerializerMethodField()
+    summary_of_guidance = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = (
+            "product_code",
+            "product_title",
+            "product_type",
+            "summary_of_guidance",
+        )
+
+    def get_product_type(self, obj):
+        return obj.update_ref.product_type if obj.update_ref else None
+
+    def get_summary_of_guidance(self, obj):
+        return obj.update_ref.summary_of_guidance if obj.update_ref else None
 
 class FileMetadataSerializer(serializers.Serializer):
     URL = serializers.URLField(required=True)
@@ -185,7 +203,7 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, data):
-        tag = self.context.get("tag", None)
+        tag = self.context.get("tag", "").strip().lower() if self.context else ""
 
         if tag == "download-only":
             # Set 'run_to_zero' to False if it's None for 'download-only' tag

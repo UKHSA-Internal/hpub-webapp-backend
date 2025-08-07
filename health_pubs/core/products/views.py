@@ -2181,7 +2181,9 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
     ):
         short_program_id = str(program_id)[:5]
         short_product_key = str(product_key)[:4]
-        short_language_code = iso_language_code[:4]
+        # remove hyphens (and any other non-alphanumerics) from the ISO code:
+        clean_lang = re.sub(r"[^A-Za-z0-9]", "", iso_language_code)
+        short_language_code = clean_lang[:4]
         product_code = f"{short_program_id}{short_product_key}{short_language_code}{version_number:03}"
         while Product.objects.filter(product_code=product_code).exists():
             version_number += 1

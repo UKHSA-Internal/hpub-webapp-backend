@@ -21,6 +21,7 @@ from core.utils.download_helpers import parse_downloads
 
 logger = logging.getLogger(__name__)
 
+
 class RelatedProductSerializer(serializers.ModelSerializer):
     product_type = serializers.SerializerMethodField()
     summary_of_guidance = serializers.SerializerMethodField()

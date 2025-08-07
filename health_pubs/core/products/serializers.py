@@ -41,6 +41,7 @@ class RelatedProductSerializer(serializers.ModelSerializer):
     def get_summary_of_guidance(self, obj):
         return obj.update_ref.summary_of_guidance if obj.update_ref else None
 
+
 class FileMetadataSerializer(serializers.Serializer):
     URL = serializers.URLField(required=True)
     inline_presigned_s3_url = serializers.URLField(required=False)

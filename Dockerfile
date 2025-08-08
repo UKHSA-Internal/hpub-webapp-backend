@@ -18,6 +18,7 @@ RUN apt-get update \
         ffmpeg \
         libmagic1 \
         tzdata \
+        libmbedtls-dev \
     && ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime \
     && echo "$TZ" > /etc/timezone \
     && apt-get clean \

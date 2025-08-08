@@ -2,6 +2,7 @@ import datetime
 import json
 import logging
 import re
+import os
 import uuid
 import difflib
 from typing import Any, Mapping, Optional, Union, Dict, List, Tuple
@@ -1233,6 +1234,23 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
             elif result.get("created"):
                 created += 1
             order_limits += result.get("order_limits", 0)
+
+            # 7. Log every row that neither created nor updated
+            if not result.get("created") and not result.get("updated"):
+                log_path = os.path.join(settings.BASE_DIR, "products_not_created.log")
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                with open(log_path, "a", encoding="utf-8") as fh:
+                    fh.write(
+                        json.dumps(
+                            {
+                                "row": idx + 1,
+                                "product_code": row.get("product_code"),
+                                "warnings": result.get("warnings", []),
+                                "errors": result.get("errors", []),
+                            }
+                        )
+                        + "\n"
+                    )
 
             summary.append(
                 {

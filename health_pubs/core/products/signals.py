@@ -43,13 +43,20 @@ STATUS_MAPPING = {
 
 
 def skip_if_suppressed(fn):
-    """Skip handler if instance.suppress_event is True."""
-
     @wraps(fn)
     def wrapper(sender, instance, **kwargs):
+        # Block event if suppress_event or download-only tag
         if getattr(instance, "suppress_event", False):
             logger.info(
                 "Event suppressed for product %s (suppress_event=True)",
+                instance.product_code,
+            )
+            return
+        # Skip event if download-only
+        tag = (getattr(instance, "tag", None) or "").strip().lower()
+        if tag == "download-only":
+            logger.info(
+                "Event not sent for product %s: tag is 'download-only'",
                 instance.product_code,
             )
             return

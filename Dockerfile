@@ -17,6 +17,7 @@ RUN apt-get update \
         cron \
         ffmpeg \
         libmagic1 \
+        libmbedtls-dev \
         tzdata \
     && ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime \
     && echo "$TZ" > /etc/timezone \

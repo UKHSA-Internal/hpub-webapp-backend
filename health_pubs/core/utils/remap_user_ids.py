@@ -68,8 +68,8 @@ def remap_user_ids(
 # Example usage
 if __name__ == "__main__":
     remap_user_ids(
-        address_file="address_with_user_id_from_duplicate_users_data.xlsx",
-        duplicate_users_file="users_with_duplicated.xlsx",
-        non_duplicate_users_file="users_without_duplicate.xlsx",
-        output_file="address_with_user_id_from_non_duplicate_users_data.xlsx",
+        address_file="./files/orders_with_user_id_from_duplicate_users_data.xlsx",
+        duplicate_users_file="./files/users_with_duplicated.xlsx",
+        non_duplicate_users_file="./files/users_without_duplicate.xlsx",
+        output_file="./files/orders_with_user_id_from_non_duplicate_users_data.xlsx",
     )

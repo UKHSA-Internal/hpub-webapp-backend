@@ -98,6 +98,16 @@ from django.core.serializers.json import DjangoJSONEncoder
 from configs.get_secret_config import Config
 from django.core.exceptions import ValidationError
 
+from django.db.models import Q
+
+from core.utils.search import (
+    build_search_filters,
+    annotate_similarity,
+    fuzzy_threshold_filter,
+    normalize_code,
+    normalize_text,
+)
+
 config = Config()
 
 logger = logging.getLogger(__name__)
@@ -2961,39 +2971,102 @@ class BaseProductSearchView(APIView, ProductListMixin):
     def postprocess_response_data(self, response_data: dict, products) -> dict:
         return response_data
 
+    def _build_queryset(self, request):
+        """
+        Unified search:
+          - q: single text query (code or title)
+          - legacy: product_code / product_title still supported
+        """
+        q_param = request.GET.get("q")
+        product_code = request.GET.get("product_code")
+        product_title = request.GET.get("product_title")
+
+        # Validate legacy params lightly
+        if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
+            raise ValidationError("Invalid product_code format")
+        if product_title and not isinstance(product_title, str):
+            raise ValidationError("Invalid product_title")
+
+        base = Product.objects.filter(self.get_default_query()).distinct()
+
+        # CASE A: unified q param (recommended)
+        if q_param:
+            filters, q_norm, q_code_norm = build_search_filters(q_param)
+            qs = base.filter(filters)
+
+            # Add similarity annotations and rank
+            qs = annotate_similarity(qs, q_norm, q_code_norm).order_by(
+                "-rank", "product_title"
+            )
+
+            # If prefix route returns too few, widen with fuzzy tolerance
+            if qs.count() < 10:
+                widened = annotate_similarity(base, q_norm, q_code_norm)
+                widened = fuzzy_threshold_filter(
+                    widened, q_norm, q_code_norm, min_sim=0.15
+                )
+                qs = (qs | widened).distinct().order_by("-rank", "product_title")
+
+            return qs, q_param, q_norm, q_code_norm
+
+        # CASE B: legacy params
+        query = self.get_default_query()
+        if product_code:
+            normalized = normalize_code(product_code)
+            query &= Q(product_code_no_dashes__icontains=normalized)
+        if product_title:
+            query &= Q(product_title__icontains=normalize_text(product_title))
+
+        qs = Product.objects.filter(query).distinct()
+        return (
+            qs,
+            (product_title or product_code),
+            normalize_text(product_title or ""),
+            normalize_code(product_code or ""),
+        )
+
+    def _did_you_mean(self, base_qs, q_norm, q_code_norm, limit=5):
+        """
+        Suggest close alternatives if zero results.
+        """
+        suggestions = annotate_similarity(base_qs, q_norm, q_code_norm)
+        suggestions = fuzzy_threshold_filter(
+            suggestions, q_norm, q_code_norm, min_sim=0.12
+        )
+        suggestions = suggestions.order_by("-rank").values(
+            "product_title", "product_code_no_dashes"
+        )[:limit]
+        return list(suggestions)
+
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            product_code = request.GET.get("product_code")
-            product_title = request.GET.get("product_title")
-            if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
-                return _handle_invalid_query_param()
-            if product_title and not isinstance(product_title, str):
-                return _handle_invalid_query_param()
+            products, raw_q, q_norm, q_code_norm = self._build_queryset(request)
 
-            query = self.get_default_query()
-            if product_code:
-                normalized = re.sub(r"[-_]", "", product_code)
-                query &= Q(product_code_no_dashes__icontains=normalized)
-            if product_title:
-                query &= Q(product_title__icontains=product_title)
+            # Optional sorting: allow '-rank' too
+            sort_by = request.GET.get("sort_by")
+            if sort_by and sort_by.lstrip("-") in VALID_SORT_FIELDS:
+                products = products.order_by(sort_by)
 
-            products = Product.objects.filter(query).distinct()
             if not products.exists():
+                # soft 'did you mean'
+                base = Product.objects.filter(self.get_default_query())
                 return Response(
-                    {"detail": ErrorMessage.PRODUCT_NOT_FOUND.value},
+                    {
+                        "detail": "No products found.",
+                        "did_you_mean": self._did_you_mean(base, q_norm, q_code_norm),
+                    },
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-            sort_by = request.GET.get("sort_by")
-            allowed = {"product_title", "product_code_no_dashes"}
-            if sort_by and sort_by.lstrip("-") in allowed:
-                products = products.order_by(sort_by)
-
-            data, paginator = self.paginate_and_serialize(products, request)
-
-            response_data = _prepare_response_data(
-                products, data, product_code, product_title
+            data, paginator = self.paginate_and_serialize(
+                products, request, serializer_class=ProductSearchSerializer
             )
+
+            response_data = {
+                "query": raw_q,
+                "count": len(data),
+                "results": data,
+            }
             response_data = self.postprocess_response_data(response_data, products)
 
             if paginator is None:
@@ -3006,7 +3079,8 @@ class BaseProductSearchView(APIView, ProductListMixin):
             return _handle_database_error()
         except TimeoutError:
             return _handle_timeout_error()
-        except ValidationError:
+        except ValidationError as e:
+            logger.warning("Invalid query param: %s", e)
             return _handle_invalid_query_param()
         except Exception:
             logger.exception(INTERNAL_ERROR_MSG)
@@ -3035,6 +3109,83 @@ class ProductSearchUserView(BaseProductSearchView):
 
     def get_default_query(self) -> Q:
         return Q(is_latest=True, status="live")
+
+
+class ProductAutocompleteView(APIView):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        q = (request.GET.get("q") or "").strip()
+        if not q:
+            return Response(
+                {"suggestions": [], "has_more": False}, status=status.HTTP_200_OK
+            )
+
+        # limit handling: default 10, clamp 1..50
+        try:
+            limit = int(request.GET.get("limit", 10))
+        except ValueError:
+            limit = 10
+        limit = max(1, min(limit, 50))
+        fetch_cap = limit + 5  # grab a few extra for dedupe
+
+        base = Product.objects.filter(is_latest=True, status="live")
+        filters, q_norm, q_code_norm = build_search_filters(q)
+
+        # 1) prefix first (fast)
+        prefix_qs = base.filter(filters).values("product_title", "product_code")[
+            :fetch_cap
+        ]
+        prefix = list(prefix_qs)
+
+        # 2) fuzzy tail if we still need more
+        fuzzy = []
+        if len(prefix) < limit:
+            widened = annotate_similarity(base, q_norm, q_code_norm)
+            widened = fuzzy_threshold_filter(widened, q_norm, q_code_norm, 0.15)
+            widened = (
+                widened.exclude(
+                    Q(product_title__istartswith=q_norm)
+                    | Q(product_code__istartswith=q_code_norm)
+                )
+                .order_by("-rank")
+                .values("product_title", "product_code")[:fetch_cap]
+            )
+            fuzzy = list(widened)
+
+        # 3) merge + dedupe (prefer keeping earlier/prefix items)
+        seen = set()
+        merged = []
+        more_flag = False
+
+        def add_items(items):
+            nonlocal merged, seen
+            for it in items:
+                key = it.get("product_code") or (it.get("product_title"), None)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(it)
+                if len(merged) >= limit:
+                    return True
+            return False
+
+        filled = add_items(prefix)
+        if not filled:
+            add_items(fuzzy)
+
+        # If we still have more candidates beyond the limit, set has_more
+        has_more = (
+            len(prefix) > fetch_cap
+            or len(fuzzy) > fetch_cap
+            or (len(merged) >= limit and (len(prefix) + len(fuzzy)) > limit)
+        )
+
+        return Response(
+            {"suggestions": merged[:limit], "has_more": has_more},
+            status=status.HTTP_200_OK,
+        )
 
 
 class ProductUsersSearchFilterAPIView(generics.ListAPIView):

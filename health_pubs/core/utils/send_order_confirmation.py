@@ -70,6 +70,14 @@ def send_notification(
 
         # logging.info("items_table", items_table)
         formatted_order_date = dt.strftime("%d %B %Y")
+        logger.info("shipping_address", shipping_address)
+
+        # Build a delivery name from shipping_address first; fall back sensibly
+        delivery_name = (
+            shipping_address.get("name")
+            or f"{(shipping_address.get('first_name') or '').strip()} {(shipping_address.get('last_name') or '').strip()}".strip()
+            or sender_full_name  # last resort
+        )
 
         # Prepare the data payload for the notification
         data = {
@@ -79,7 +87,7 @@ def send_notification(
                 "order_date": formatted_order_date,
                 "items_table": items_table,
                 "total_items": total_items,
-                "name": sender_full_name,
+                "name": delivery_name,
                 "address_line_1": shipping_address["address_line_1"],
                 "address_line_2": shipping_address["address_line_2"],
                 "city": shipping_address["city"],

@@ -193,7 +193,7 @@ class UserSignUpView(APIView):
         # Step 4: Validate Role.
         role = None
         if role_name:
-            role = Role.objects.filter(name=role_name).first()
+            role = Role.objects.filter(name__iexact=role_name).first()
         if role_name and not role:
             logger.error("Role not found: %s", role_name)
             return Response(

@@ -163,7 +163,9 @@ class ProgramCreateViewSet(viewsets.ViewSet):
         if created_programs:
             return Response(
                 {"created_programs": created_programs, "errors": errors},
-                status=status.HTTP_201_CREATED if not errors else status.HTTP_207_MULTI_STATUS,
+                status=status.HTTP_201_CREATED
+                if not errors
+                else status.HTTP_207_MULTI_STATUS,
             )
         return Response({"errors": errors}, status=status.HTTP_400_BAD_REQUEST)
 

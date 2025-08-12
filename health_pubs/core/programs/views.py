@@ -59,7 +59,11 @@ def _assert_featured_capacity(exclude_program_id: str | None = None) -> None:
     Locks featured rows and ensures we don't exceed MAX_FEATURED_PROGRAMMES.
     """
     # Lock currently featured rows to prevent concurrent oversubscription
-    list(Program.objects.select_for_update().filter(is_featured=True).values("program_id"))
+    list(
+        Program.objects.select_for_update()
+        .filter(is_featured=True)
+        .values("program_id")
+    )
 
     q = Program.objects.filter(is_featured=True)
     if exclude_program_id:

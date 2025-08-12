@@ -1,13 +1,11 @@
 import logging
-import string
 import uuid
 
 import pandas as pd
 from core.users.permissions import IsAdminUser
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from django.contrib.contenttypes.models import ContentType
-from django.db import IntegrityError
-from django.db.models import Max
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.text import slugify
 from rest_framework import status, viewsets
@@ -90,17 +88,15 @@ class ProgramCreateViewSet(viewsets.ViewSet):
 
     def create(self, request, *args, **kwargs):
         data = request.data
-        data_list = (
-            [data]
-            if isinstance(data, dict)
-<<<<<<< HEAD
-            else data if isinstance(data, list) else None
-=======
-            else data
-            if isinstance(data, list)
-            else None
->>>>>>> 64fdd0d40858692471bbfa2cf0d62f657d20d0aa
-        )
+
+        # Extracted from: data_list = [data] if isinstance(data, dict) else data if isinstance(data, list) else None
+        if isinstance(data, dict):
+            data_list = [data]
+        elif isinstance(data, list):
+            data_list = data
+        else:
+            data_list = None
+
         if data_list is None:
             return Response(
                 {"error": "Expected a list of programs or a single program object"},
@@ -167,17 +163,11 @@ class ProgramCreateViewSet(viewsets.ViewSet):
         if created_programs:
             return Response(
                 {"created_programs": created_programs, "errors": errors},
-<<<<<<< HEAD
                 status=(
                     status.HTTP_201_CREATED
                     if not errors
                     else status.HTTP_207_MULTI_STATUS
                 ),
-=======
-                status=status.HTTP_201_CREATED
-                if not errors
-                else status.HTTP_207_MULTI_STATUS,
->>>>>>> 64fdd0d40858692471bbfa2cf0d62f657d20d0aa
             )
         return Response({"errors": errors}, status=status.HTTP_400_BAD_REQUEST)
 

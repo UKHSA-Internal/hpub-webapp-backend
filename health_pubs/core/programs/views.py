@@ -1,4 +1,5 @@
 import logging
+import string
 import uuid
 
 import pandas as pd
@@ -8,6 +9,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.text import slugify
+from django.db.models import Max
 from rest_framework import status, viewsets
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
@@ -15,7 +17,9 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from wagtail.models import Page
 from django.db.models import Q, Exists, OuterRef
-from django.core.exceptions import ValidationError
+
+from django.core.exceptions import ValidationError as DjangoValidationError
+from rest_framework.exceptions import ValidationError as DRFValidationError
 
 from django.conf import settings
 
@@ -27,13 +31,6 @@ from rest_framework.views import APIView
 logger = logging.getLogger(__name__)
 
 MAX_FEATURED_PROGRAMMES = getattr(settings, "MAX_FEATURED_PROGRAMMES", 6)
-
-
-def _unique_slug(base_slug: str) -> str:
-    qs = Program.objects.filter(slug__startswith=base_slug)
-    if not qs.exists():
-        return base_slug
-    return f"{base_slug}-{qs.count() + 1}"
 
 
 def _get_or_create_parent_programs_page() -> Page:
@@ -56,6 +53,8 @@ def _assert_featured_capacity(exclude_program_id: str | None = None) -> None:
     Must be called inside a transaction.atomic() block.
     Locks featured rows and ensures we don't exceed MAX_FEATURED_PROGRAMMES.
     """
+    from rest_framework.exceptions import ValidationError
+
     # Lock currently featured rows to prevent concurrent oversubscription
     list(
         Program.objects.select_for_update()
@@ -70,17 +69,30 @@ def _assert_featured_capacity(exclude_program_id: str | None = None) -> None:
     if q.count() >= MAX_FEATURED_PROGRAMMES:
         raise ValidationError(
             {
-                "is_featured": (
+                "is_featured": [
                     f"Featured programmes must be {MAX_FEATURED_PROGRAMMES} or fewer. "
                     "Go back to ‘manage featured programmes’ to reduce the number, before you try again."
-                )
+                ]
             }
         )
+
+
+def _serialize_validation_error(exc):
+    # DRF ValidationError
+    if hasattr(exc, "detail"):
+        return exc.detail
+    # Django ValidationError
+    if hasattr(exc, "message_dict"):
+        return exc.message_dict
+    if hasattr(exc, "messages"):
+        return exc.messages
+    return str(exc)
 
 
 class ProgramCreateViewSet(viewsets.ViewSet):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
+
     serializer_class = ProgramSerializer
 
     def get_serializer(self, *args, **kwargs):
@@ -130,9 +142,14 @@ class ProgramCreateViewSet(viewsets.ViewSet):
                     if bool(entry.get("is_featured")):
                         _assert_featured_capacity()
 
-                    slug = _unique_slug(slugify(name))
+                    # ✅ use your unique slug helper
+                    slug = self.get_unique_slug(slugify(name))
+
+                    # ✅ use your next base-36 ID helper (≤ 22 chars)
+                    program_id = entry.get("program_id") or self.get_next_program_id()
+
                     program_instance = Program(
-                        program_id=str(entry.get("program_id") or uuid.uuid4()),
+                        program_id=program_id,
                         title=name,
                         slug=slug,
                         programme_name=name,
@@ -154,8 +171,8 @@ class ProgramCreateViewSet(viewsets.ViewSet):
                         "detail": str(ie),
                     }
                 )
-            except ValidationError as ve:
-                errors.append({"error": ve.detail, "data": entry})
+            except (DRFValidationError, DjangoValidationError) as ve:
+                errors.append({"error": _serialize_validation_error(ve), "data": entry})
             except Exception as e:
                 logger.exception("Unexpected error creating program")
                 errors.append({"error": str(e), "data": entry})
@@ -170,6 +187,24 @@ class ProgramCreateViewSet(viewsets.ViewSet):
                 ),
             )
         return Response({"errors": errors}, status=status.HTTP_400_BAD_REQUEST)
+
+    def get_unique_slug(self, base_slug):
+        queryset = Program.objects.filter(slug__startswith=base_slug)
+        if not queryset.exists():
+            return base_slug
+        return f"{base_slug}-{queryset.count() + 1}"
+
+    def get_next_program_id(self):
+        last_id = Program.objects.aggregate(max_id=Max("program_id"))["max_id"]
+        return self.base36encode(int(last_id, 36) + 1) if last_id else "1"
+
+    def base36encode(self, number):
+        alphabet = string.digits + string.ascii_uppercase
+        base36 = []
+        while number:
+            number, i = divmod(number, 36)
+            base36.append(alphabet[i])
+        return "".join(reversed(base36)) or "1"
 
 
 class ProgramListViewSet(viewsets.ReadOnlyModelViewSet):
@@ -276,6 +311,7 @@ class ProgramUpdateViewSet(viewsets.ModelViewSet):
 
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
+
     queryset = Program.objects.all()
     serializer_class = ProgramSerializer
     lookup_field = "program_id"
@@ -301,8 +337,11 @@ class ProgramUpdateViewSet(viewsets.ModelViewSet):
 
             return Response(ser.data, status=status.HTTP_200_OK)
 
-        except ValidationError as ve:
-            return Response(ve.detail, status=status.HTTP_400_BAD_REQUEST)
+        except (DRFValidationError, DjangoValidationError) as ve:
+            return Response(
+                {"error": _serialize_validation_error(ve)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         except Exception as e:
             logger.exception("Error updating program")
             return Response(

@@ -31,8 +31,6 @@ logger = logging.getLogger(__name__)
 MAX_FEATURED_PROGRAMMES = getattr(settings, "MAX_FEATURED_PROGRAMMES", 6)
 
 
-
-
 def _unique_slug(base_slug: str) -> str:
     qs = Program.objects.filter(slug__startswith=base_slug)
     if not qs.exists():
@@ -61,19 +59,25 @@ def _assert_featured_capacity(exclude_program_id: str | None = None) -> None:
     Locks featured rows and ensures we don't exceed MAX_FEATURED_PROGRAMMES.
     """
     # Lock currently featured rows to prevent concurrent oversubscription
-    list(Program.objects.select_for_update().filter(is_featured=True).values("program_id"))
+    list(
+        Program.objects.select_for_update()
+        .filter(is_featured=True)
+        .values("program_id")
+    )
 
     q = Program.objects.filter(is_featured=True)
     if exclude_program_id:
         q = q.exclude(program_id=exclude_program_id)
 
     if q.count() >= MAX_FEATURED_PROGRAMMES:
-        raise ValidationError({
-            "is_featured": (
-                f"Featured programmes must be {MAX_FEATURED_PROGRAMMES} or fewer. "
-                "Go back to ‘manage featured programmes’ to reduce the number, before you try again."
-            )
-        })
+        raise ValidationError(
+            {
+                "is_featured": (
+                    f"Featured programmes must be {MAX_FEATURED_PROGRAMMES} or fewer. "
+                    "Go back to ‘manage featured programmes’ to reduce the number, before you try again."
+                )
+            }
+        )
 
 
 class ProgramCreateViewSet(viewsets.ViewSet):
@@ -86,7 +90,11 @@ class ProgramCreateViewSet(viewsets.ViewSet):
 
     def create(self, request, *args, **kwargs):
         data = request.data
-        data_list = [data] if isinstance(data, dict) else data if isinstance(data, list) else None
+        data_list = (
+            [data]
+            if isinstance(data, dict)
+            else data if isinstance(data, list) else None
+        )
         if data_list is None:
             return Response(
                 {"error": "Expected a list of programs or a single program object"},
@@ -153,7 +161,11 @@ class ProgramCreateViewSet(viewsets.ViewSet):
         if created_programs:
             return Response(
                 {"created_programs": created_programs, "errors": errors},
-                status=status.HTTP_201_CREATED if not errors else status.HTTP_207_MULTI_STATUS,
+                status=(
+                    status.HTTP_201_CREATED
+                    if not errors
+                    else status.HTTP_207_MULTI_STATUS
+                ),
             )
         return Response({"errors": errors}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -162,6 +174,7 @@ class ProgramListViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Public/read endpoints (list + special filtered lists).
     """
+
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
     serializer_class = ProgramSerializer
@@ -233,7 +246,9 @@ class ProgramListViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=["get"], url_path="featured-all")
     def featured_all(self, request):
         """ALL featured (counts towards cap), regardless of publishability."""
-        qs = Program.objects.filter(is_featured=True, is_temporary=False).order_by("programme_name")
+        qs = Program.objects.filter(is_featured=True, is_temporary=False).order_by(
+            "programme_name"
+        )
         ser = self.get_serializer(qs, many=True)
         return Response(ser.data, status=status.HTTP_200_OK)
 
@@ -256,6 +271,7 @@ class ProgramUpdateViewSet(viewsets.ModelViewSet):
     """
     Private/admin update + retrieve by program_id.
     """
+
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
     queryset = Program.objects.all()
@@ -291,8 +307,6 @@ class ProgramUpdateViewSet(viewsets.ModelViewSet):
                 {"detail": "Unable to update program", "error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-
-
 
 
 class ProgramDestroyViewSet(viewsets.ModelViewSet):

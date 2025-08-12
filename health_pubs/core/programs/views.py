@@ -17,6 +17,9 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from wagtail.models import Page
 from django.db.models import Q, Exists, OuterRef
+from django.core.exceptions import ValidationError
+
+from django.conf import settings
 
 from core.products.models import Product
 from .models import Program
@@ -25,10 +28,57 @@ from rest_framework.views import APIView
 
 logger = logging.getLogger(__name__)
 
+MAX_FEATURED_PROGRAMMES = getattr(settings, "MAX_FEATURED_PROGRAMMES", 6)
+
+
+
+
+def _unique_slug(base_slug: str) -> str:
+    qs = Program.objects.filter(slug__startswith=base_slug)
+    if not qs.exists():
+        return base_slug
+    return f"{base_slug}-{qs.count() + 1}"
+
+
+def _get_or_create_parent_programs_page() -> Page:
+    try:
+        return Page.objects.get(slug="programs")
+    except Page.DoesNotExist:
+        root_page = Page.objects.first()
+        parent_page = Page(
+            title="Programs",
+            slug="programs",
+            content_type=ContentType.objects.get_for_model(Page),
+        )
+        root_page.add_child(instance=parent_page)
+        parent_page.save()
+        return parent_page
+
+
+def _assert_featured_capacity(exclude_program_id: str | None = None) -> None:
+    """
+    Must be called inside a transaction.atomic() block.
+    Locks featured rows and ensures we don't exceed MAX_FEATURED_PROGRAMMES.
+    """
+    # Lock currently featured rows to prevent concurrent oversubscription
+    list(Program.objects.select_for_update().filter(is_featured=True).values("program_id"))
+
+    q = Program.objects.filter(is_featured=True)
+    if exclude_program_id:
+        q = q.exclude(program_id=exclude_program_id)
+
+    if q.count() >= MAX_FEATURED_PROGRAMMES:
+        raise ValidationError({
+            "is_featured": (
+                f"Featured programmes must be {MAX_FEATURED_PROGRAMMES} or fewer. "
+                "Go back to ‘manage featured programmes’ to reduce the number, before you try again."
+            )
+        })
+
 
 class ProgramCreateViewSet(viewsets.ViewSet):
     authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAdminUser]
     serializer_class = ProgramSerializer
 
     def get_serializer(self, *args, **kwargs):
@@ -36,105 +86,86 @@ class ProgramCreateViewSet(viewsets.ViewSet):
 
     def create(self, request, *args, **kwargs):
         data = request.data
-        if isinstance(data, dict):
-            data_list = [data]
-        elif isinstance(data, list):
-            data_list = data
-        else:
+        data_list = [data] if isinstance(data, dict) else data if isinstance(data, list) else None
+        if data_list is None:
             return Response(
                 {"error": "Expected a list of programs or a single program object"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        created_programs = []
-        errors = []
+        created_programs, errors = [], []
+        parent_page = _get_or_create_parent_programs_page()
 
-        for entry in data_list:
-            program_name = entry.get("programme_name", "")
-            if not program_name:
+        for raw in data_list:
+            entry = dict(raw or {})
+            name = (entry.get("programme_name") or "").strip()
+            if not name:
                 errors.append({"error": "Program Name is required", "data": entry})
                 continue
 
-            slug = slugify(program_name)
-            unique_slug = self.get_unique_slug(slug)
-            entry["title"] = program_name
-            entry["slug"] = unique_slug
-
-            program_id = entry.get("program_id") or self.get_next_program_id()
-            entry["program_id"] = program_id
-            entry["is_featured"] = entry.get("is_featured", False)
-
-            try:
-                parent_page = Page.objects.get(slug="programs")
-            except Page.DoesNotExist:
-                root_page = Page.objects.first()
-                parent_page = Page(
-                    title="Programs",
-                    slug="programs",
-                    content_type=ContentType.objects.get_for_model(Page),
-                )
-                root_page.add_child(instance=parent_page)
+            # Build fields expected by serializer; slug/title handled here
+            entry.setdefault("external_key", "")
+            entry.setdefault("is_temporary", False)
+            entry.setdefault("is_featured", False)
+            entry.setdefault("program_term", None)
 
             serializer = self.get_serializer(data=entry)
-            if serializer.is_valid():
-                try:
+            if not serializer.is_valid():
+                errors.append({"error": serializer.errors, "data": entry})
+                continue
+
+            try:
+                with transaction.atomic():
+                    # Cap check if setting featured on create
+                    if bool(entry.get("is_featured")):
+                        _assert_featured_capacity()
+
+                    slug = _unique_slug(slugify(name))
                     program_instance = Program(
-                        title=entry["title"],
-                        slug=entry["slug"],
-                        programme_name=entry["programme_name"],
-                        program_term=entry.get("program_term"),
-                        is_temporary=entry.get("is_temporary"),
-                        program_id=entry["program_id"],
-                        is_featured=entry["is_featured"],
-                        external_key=entry.get("external_key", ""),
+                        program_id=str(entry.get("program_id") or uuid.uuid4()),
+                        title=name,
+                        slug=slug,
+                        programme_name=name,
+                        is_featured=bool(entry.get("is_featured")),
+                        is_temporary=bool(entry.get("is_temporary")),
+                        program_term=entry.get("program_term") or None,
+                        external_key=entry.get("external_key") or "",
                     )
                     parent_page.add_child(instance=program_instance)
                     program_instance.save()
-                    created_programs.append(
-                        self.serializer_class(program_instance).data
-                    )
-                except IntegrityError:
-                    errors.append(
-                        {
-                            "error": f"Program with name '{entry['programme_name']}' already exists",
-                            "data": entry,
-                        }
-                    )
-            else:
-                errors.append({"error": serializer.errors, "data": entry})
+
+                created_programs.append(self.serializer_class(program_instance).data)
+
+            except IntegrityError as ie:
+                errors.append(
+                    {
+                        "error": f"Program with name '{name}' already exists",
+                        "data": entry,
+                        "detail": str(ie),
+                    }
+                )
+            except ValidationError as ve:
+                errors.append({"error": ve.detail, "data": entry})
+            except Exception as e:
+                logger.exception("Unexpected error creating program")
+                errors.append({"error": str(e), "data": entry})
 
         if created_programs:
             return Response(
                 {"created_programs": created_programs, "errors": errors},
-                status=status.HTTP_201_CREATED
-                if not errors
-                else status.HTTP_207_MULTI_STATUS,
+                status=status.HTTP_201_CREATED if not errors else status.HTTP_207_MULTI_STATUS,
             )
         return Response({"errors": errors}, status=status.HTTP_400_BAD_REQUEST)
 
-    def get_unique_slug(self, base_slug):
-        queryset = Program.objects.filter(slug__startswith=base_slug)
-        if not queryset.exists():
-            return base_slug
-        return f"{base_slug}-{queryset.count() + 1}"
-
-    def get_next_program_id(self):
-        last_id = Program.objects.aggregate(max_id=Max("program_id"))["max_id"]
-        return self.base36encode(int(last_id, 36) + 1) if last_id else "1"
-
-    def base36encode(self, number):
-        alphabet = string.digits + string.ascii_uppercase
-        base36 = []
-        while number:
-            number, i = divmod(number, 36)
-            base36.append(alphabet[i])
-        return "".join(reversed(base36)) or "1"
-
 
 class ProgramListViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Public/read endpoints (list + special filtered lists).
+    """
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
     serializer_class = ProgramSerializer
+    queryset = Program.objects.all()
 
     def get_queryset(self):
         if self.action == "list":
@@ -142,43 +173,39 @@ class ProgramListViewSet(viewsets.ReadOnlyModelViewSet):
         return Program.objects.filter(is_temporary=False)
 
     def list(self, request, *args, **kwargs):
-        queryset = self.get_queryset()
-        serializer = self.get_serializer(queryset, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        qs = self.get_queryset()
+        ser = self.get_serializer(qs, many=True)
+        return Response(ser.data, status=status.HTTP_200_OK)
 
-    def get_filtered_programs(self, is_featured=False):
+    def _filtered_programs(self, is_featured: bool = False):
         """
-        Helper function to filter programs based on shared logic.
+        Publishable programs: have diseases or vaccinations AND at least one live product.
         """
-        # Step 1: Filter Programs with Diseases or Vaccinations
-        programs_with_diseases_or_vaccinations = Program.objects.filter(
+        base = Program.objects.filter(
             (Q(diseases__isnull=False) | Q(vaccinations__isnull=False)),
             is_temporary=False,
         ).distinct()
 
-        if is_featured is True:
-            programs_with_diseases_or_vaccinations = (
-                programs_with_diseases_or_vaccinations.filter(is_featured=True)
-            )
+        if is_featured:
+            base = base.filter(is_featured=True)
 
-        # Step 2: Further filter Programs where associated Diseases or Vaccinations are tied to a Product
+        # IMPORTANT: match on program_id explicitly (string PK per model)
         products_qs_disease = Product.objects.filter(
-            program_id=OuterRef("pk"),
-            update_ref__diseases_ref__programs=OuterRef("pk"),
+            program_id=OuterRef("program_id"),
+            update_ref__diseases_ref__programs__program_id=OuterRef("program_id"),
             status="live",
             is_latest=True,
         )
 
         products_qs_vaccination = Product.objects.filter(
-            program_id=OuterRef("pk"),
-            update_ref__vaccination_ref__programs=OuterRef("pk"),
+            program_id=OuterRef("program_id"),
+            update_ref__vaccination_ref__programs__program_id=OuterRef("program_id"),
             status="live",
             is_latest=True,
         )
 
-        # Annotate Programs with boolean flags indicating the existence of related Products
-        programs_final = (
-            programs_with_diseases_or_vaccinations.annotate(
+        return (
+            base.annotate(
                 has_related_product_disease=Exists(products_qs_disease),
                 has_related_product_vaccination=Exists(products_qs_vaccination),
             )
@@ -189,69 +216,83 @@ class ProgramListViewSet(viewsets.ReadOnlyModelViewSet):
             .distinct()
         )
 
-        return programs_final
-
     @action(detail=False, methods=["get"], url_path="featured")
     def featured_programs(self, request):
-        """
-        List featured programs with the same filtering logic.
-        """
+        """Featured + publishable (for homepage)."""
         try:
-            featured_programs = self.get_filtered_programs(is_featured=True)
-            serializer = self.get_serializer(featured_programs, many=True)
-            return Response(serializer.data, status=status.HTTP_200_OK)
+            qs = self._filtered_programs(is_featured=True)
+            ser = self.get_serializer(qs, many=True)
+            return Response(ser.data, status=status.HTTP_200_OK)
         except Exception as e:
             logger.exception("Error fetching featured programs")
             return Response(
-                {
-                    "detail": "An unexpected error occurred. Please try again later.",
-                    "error": str(e),
-                },
+                {"detail": "Unexpected error.", "error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+    @action(detail=False, methods=["get"], url_path="featured-all")
+    def featured_all(self, request):
+        """ALL featured (counts towards cap), regardless of publishability."""
+        qs = Program.objects.filter(is_featured=True, is_temporary=False).order_by("programme_name")
+        ser = self.get_serializer(qs, many=True)
+        return Response(ser.data, status=status.HTTP_200_OK)
+
     @action(detail=False, methods=["get"], url_path="filtered-programmes")
     def programs_with_related(self, request):
-        """
-        List programs that have diseases or vaccinations associated with them,
-        and those diseases or vaccinations are tied to at least one product.
-        """
+        """All publishable programs (for listings)."""
         try:
-            programs = self.get_filtered_programs()
-            serializer = self.get_serializer(programs, many=True)
-            return Response(serializer.data, status=status.HTTP_200_OK)
-
+            qs = self._filtered_programs()
+            ser = self.get_serializer(qs, many=True)
+            return Response(ser.data, status=status.HTTP_200_OK)
         except Exception as e:
             logger.exception("Error fetching filtered programmes")
-
             return Response(
-                {
-                    "detail": "An unexpected error occurred. Please try again later.",
-                    "error": str(e),
-                },
+                {"detail": "Unexpected error.", "error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
 
 class ProgramUpdateViewSet(viewsets.ModelViewSet):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    """
+    Private/admin update + retrieve by program_id.
+    """
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
     queryset = Program.objects.all()
     serializer_class = ProgramSerializer
+    lookup_field = "program_id"
 
     def update(self, request, *args, **kwargs):
-        instance = self.get_object()
+        instance: Program = self.get_object()
         data = request.data.copy()
-        # Remove the slug field if present to avoid triggering uniqueness validation.
 
-        serializer = self.get_serializer(instance, data=data, partial=True)
-        serializer.is_valid(raise_exception=True)
+        wants_featured = data.get("is_featured", None)
+        if isinstance(wants_featured, str):
+            wants_featured = wants_featured.lower() in {"true", "1", "yes"}
 
-        updated_instance = serializer.save()
-        # Optionally, if needed to trigger additional logic on save:
-        updated_instance.save()
+        try:
+            with transaction.atomic():
+                # Enforce cap only when going False -> True
+                if wants_featured is True and not instance.is_featured:
+                    _assert_featured_capacity(exclude_program_id=instance.program_id)
 
-        return Response(serializer.data, status=status.HTTP_200_OK)
+                ser = self.get_serializer(instance, data=data, partial=True)
+                ser.is_valid(raise_exception=True)
+                obj = ser.save()
+                obj.save()
+
+            return Response(ser.data, status=status.HTTP_200_OK)
+
+        except ValidationError as ve:
+            return Response(ve.detail, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.exception("Error updating program")
+            return Response(
+                {"detail": "Unable to update program", "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
 
 
 class ProgramDestroyViewSet(viewsets.ModelViewSet):

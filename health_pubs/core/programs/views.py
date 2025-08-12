@@ -256,6 +256,7 @@ class ProgramUpdateViewSet(viewsets.ModelViewSet):
     """
     Private/admin update + retrieve by program_id.
     """
+
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
     queryset = Program.objects.all()

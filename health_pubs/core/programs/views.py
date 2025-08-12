@@ -93,7 +93,13 @@ class ProgramCreateViewSet(viewsets.ViewSet):
         data_list = (
             [data]
             if isinstance(data, dict)
+<<<<<<< HEAD
             else data if isinstance(data, list) else None
+=======
+            else data
+            if isinstance(data, list)
+            else None
+>>>>>>> 64fdd0d40858692471bbfa2cf0d62f657d20d0aa
         )
         if data_list is None:
             return Response(
@@ -161,11 +167,17 @@ class ProgramCreateViewSet(viewsets.ViewSet):
         if created_programs:
             return Response(
                 {"created_programs": created_programs, "errors": errors},
+<<<<<<< HEAD
                 status=(
                     status.HTTP_201_CREATED
                     if not errors
                     else status.HTTP_207_MULTI_STATUS
                 ),
+=======
+                status=status.HTTP_201_CREATED
+                if not errors
+                else status.HTTP_207_MULTI_STATUS,
+>>>>>>> 64fdd0d40858692471bbfa2cf0d62f657d20d0aa
             )
         return Response({"errors": errors}, status=status.HTTP_400_BAD_REQUEST)
 

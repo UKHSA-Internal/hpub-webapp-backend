@@ -28,6 +28,7 @@ AWS_BUCKET_NAME = config.get_hpub_s3_bucket_name()
 ACCESS_TOKEN_LIFETIME = timedelta(minutes=30)
 REFRESH_TOKEN_LIFETIME = timedelta(days=1)
 REFRESH_TOKEN_MAX_AGE = 86400
+MAX_FEATURED_PROGRAMMES = 6
 # Quick-start development settings - unsuitable for production
 
 SECRET_KEY = DJANGO_SECRET

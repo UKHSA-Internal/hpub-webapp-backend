@@ -31,8 +31,6 @@ logger = logging.getLogger(__name__)
 MAX_FEATURED_PROGRAMMES = getattr(settings, "MAX_FEATURED_PROGRAMMES", 6)
 
 
-
-
 def _unique_slug(base_slug: str) -> str:
     qs = Program.objects.filter(slug__startswith=base_slug)
     if not qs.exists():

@@ -70,12 +70,14 @@ def _assert_featured_capacity(exclude_program_id: str | None = None) -> None:
         q = q.exclude(program_id=exclude_program_id)
 
     if q.count() >= MAX_FEATURED_PROGRAMMES:
-        raise ValidationError({
-            "is_featured": (
-                f"Featured programmes must be {MAX_FEATURED_PROGRAMMES} or fewer. "
-                "Go back to ‘manage featured programmes’ to reduce the number, before you try again."
-            )
-        })
+        raise ValidationError(
+            {
+                "is_featured": (
+                    f"Featured programmes must be {MAX_FEATURED_PROGRAMMES} or fewer. "
+                    "Go back to ‘manage featured programmes’ to reduce the number, before you try again."
+                )
+            }
+        )
 
 
 class ProgramCreateViewSet(viewsets.ViewSet):

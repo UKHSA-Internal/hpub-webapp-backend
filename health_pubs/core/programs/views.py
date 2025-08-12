@@ -90,7 +90,13 @@ class ProgramCreateViewSet(viewsets.ViewSet):
 
     def create(self, request, *args, **kwargs):
         data = request.data
-        data_list = [data] if isinstance(data, dict) else data if isinstance(data, list) else None
+        data_list = (
+            [data]
+            if isinstance(data, dict)
+            else data
+            if isinstance(data, list)
+            else None
+        )
         if data_list is None:
             return Response(
                 {"error": "Expected a list of programs or a single program object"},

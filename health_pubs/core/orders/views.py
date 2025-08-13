@@ -66,19 +66,13 @@ class OrderViewSet(viewsets.ModelViewSet):
         """
         Accepts a list of product_codes and user_ref.
         Returns, for each product:
-          - when the current 24h window started (window_start),
-          - when it will end (window_end),
-          - how many have been ordered in that window (already_ordered),
-          - and what remains (remaining).
+        - window_start/window_end (rolling 24h),
+        - already_ordered,
+        - remaining.
         """
-        user_ref = request.data.get("user_ref")
-        product_codes = request.data.get("product_codes")
-
-        if not user_ref or not product_codes:
-            return Response(
-                {"error": "user_ref and product_codes[] are required."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        user_ref, product_codes, err_resp = self._parse_limits_request(request)
+        if err_resp:
+            return err_resp
 
         try:
             user = self._get_user_or_error(user_ref)
@@ -86,61 +80,41 @@ class OrderViewSet(viewsets.ModelViewSet):
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         now = timezone.now()
-        results = []
+        window_cutoff = now - timedelta(hours=24)
+        org_id = getattr(
+            getattr(user, "organization_ref", None), "organization_id", None
+        )
+        est_key = getattr(
+            getattr(user, "establishment_ref", None), "full_external_key", None
+        )
+        org_obj = getattr(user, "organization_ref", None)
 
+        results = []
         for code in product_codes:
-            try:
-                product = Product.objects.get(product_code=code)
-            except Product.DoesNotExist:
-                # skip unknown codes
+            product = self._get_product_safe(code)
+            if not product:
                 continue
 
-            user_full_key = user.establishment_ref.full_external_key
-            user_org = user.organization_ref
+            # Resolve limit (establishment → org → default 0)
+            limit_page = self._fetch_limit_page(product, est_key, org_obj)
+            daily_limit = getattr(limit_page, "order_limit", 0)
 
-            limit_page = OrderLimitPage.objects.filter(
-                product_ref=product, full_external_keys__contains=[user_full_key]
-            ).first()
-
-            # Fallback: match by organization if no establishment-level limit
-            if not limit_page:
-                limit_page = OrderLimitPage.objects.filter(
-                    product_ref=product, organization_ref=user_org
-                ).first()
-
-            limit = limit_page.order_limit
-
-            # get all orders by this user for this product
-            user_org = user.organization_ref.organization_id
-            base_qs = Order.objects.filter(
-                user_ref__organization_ref__organization_id=user_org,
+            # Recent orders in this org for this product
+            recent_qs = Order.objects.filter(
+                user_ref__organization_ref__organization_id=org_id,
                 order_items__product_ref=product,
-            )
+                created_at__gte=window_cutoff,
+            ).order_by("created_at")
 
-            # keep only orders in the last 24h
-            window_cutoff = now - timedelta(hours=24)
-            recent = base_qs.filter(created_at__gte=window_cutoff)
-
-            if not recent.exists():
-                # no active window → start a new one now
-                window_start = now
-                already_ordered = 0
-            else:
-                # fixed window starts at the time of the earliest recent order
-                first = recent.order_by("created_at").first()
-                window_start = first.created_at
-                already_ordered = (
-                    recent.aggregate(total=Sum("order_items__quantity"))["total"] or 0
-                )
-
+            window_start, already_ordered = self._compute_window_stats(recent_qs, now)
             window_end = window_start + timedelta(hours=24)
-            remaining = max(limit - already_ordered, 0)
+            remaining = max(daily_limit - already_ordered, 0)
 
             results.append(
                 {
                     "product_code": code,
                     "title": product.title,
-                    "daily_limit": limit,
+                    "daily_limit": daily_limit,
                     "window_start": window_start,
                     "window_end": window_end,
                     "already_ordered": already_ordered,
@@ -151,6 +125,48 @@ class OrderViewSet(viewsets.ModelViewSet):
         return Response(results, status=status.HTTP_200_OK)
 
     # Helper methods
+
+    def _parse_limits_request(self, request):
+        user_ref = request.data.get("user_ref")
+        product_codes = request.data.get("product_codes")
+        if not user_ref or not product_codes:
+            return (
+                None,
+                None,
+                Response(
+                    {"error": "user_ref and product_codes[] are required."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                ),
+            )
+        return user_ref, product_codes, None
+
+    def _get_product_safe(self, code):
+        try:
+            return Product.objects.get(product_code=code)
+        except Product.DoesNotExist:
+            return None
+
+    def _fetch_limit_page(self, product, est_key, org_obj):
+        if est_key:
+            lp = OrderLimitPage.objects.filter(
+                product_ref=product,
+                full_external_keys__contains=[est_key],
+            ).first()
+            if lp:
+                return lp
+        if org_obj:
+            return OrderLimitPage.objects.filter(
+                product_ref=product,
+                organization_ref=org_obj,
+            ).first()
+        return None
+
+    def _compute_window_stats(self, recent_qs, now):
+        if not recent_qs.exists():
+            return now, 0
+        first = recent_qs.first()
+        total = recent_qs.aggregate(total=Sum("order_items__quantity"))["total"] or 0
+        return first.created_at, total
 
     def call_record_reorder_events(self, order_instance, request):
         # Now, record reorder events (if any) for this order.
@@ -568,25 +584,21 @@ class OrderViewSet(viewsets.ModelViewSet):
 
     def _notify_with_payload(self, order, request, confirmation, admin=False):
         """
-        Sends the confirmation email using *exactly* the confirmation payload
-        we just generated and wrote to the DB.
+        Always send to order.user_ref (delivery user in admin flow, self otherwise)
+        and greet with that recipient's name.
         """
         recipient = order.user_ref
+        recipient_email = getattr(recipient, "email", None) or getattr(
+            getattr(request, "user", None), "email", None
+        )
 
-        # Pick the right sender name
-        if admin and hasattr(request, "user"):
-            sender_full_name = (
-                f"{request.user.first_name} {request.user.last_name}".strip()
-            )
-            sender_name = request.user.first_name.strip()
-        else:
-            sender_full_name = f"{recipient.first_name} {recipient.last_name}".strip()
-            sender_name = recipient.first_name.strip() or recipient.first_name
+        sender_full_name = f"{(recipient.first_name or '').strip()} {(recipient.last_name or '').strip()}".strip()
+        sender_name = (recipient.first_name or sender_full_name or "Customer").strip()
 
         try:
             send_notification(
                 "email",
-                recipient.email,
+                recipient_email,
                 sender_name,
                 sender_full_name,
                 confirmation["confirmation_number"],
@@ -596,13 +608,12 @@ class OrderViewSet(viewsets.ModelViewSet):
                 confirmation["shipping_address"],
             )
         except Exception as e:
-            logger.warning(f"Email send failed for order {order.order_id}: {e}")
+            logger.warning("Email send failed for order %s: %s", order.order_id, e)
 
-        # Still record any reorder events
         try:
             self.record_reorder_events(order, request)
         except Exception as e:
-            logger.error(f"Analytics failed for order {order.order_id}: {e}")
+            logger.error("Analytics failed for order %s: %s", order.order_id, e)
 
     def _is_collision(self, exc):
         return (isinstance(exc, IntegrityError) and self._is_path_collision(exc)) or (

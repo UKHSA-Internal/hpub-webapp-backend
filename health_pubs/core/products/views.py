@@ -13,6 +13,9 @@ from django.db import IntegrityError
 from psycopg2 import errors as pg_errors
 from collections import defaultdict
 from datetime import timedelta
+from django.db.models import F, Q, Value, Window
+from django.db.models.functions import Trim, Upper, Replace
+from django.db.models.functions.window import RowNumber
 
 
 import pandas as pd
@@ -2738,12 +2741,71 @@ class ProductListMixin(PresignedUrlMixin):
     """
     Handles sorting, pagination + S3 presigning (both attachment and inline),
     with per-request caching of raw data list.
+    Also normalizes/dedupes by product_code to avoid 'ABC' vs 'ABC ' duplicates.
     """
 
     serializer_class = ProductSerializer
     include_request_context = False
     cache_timeout = CACHE_TTL
     pagination_class = CustomPagination
+
+    # ---------------------------
+    # Normalization helpers
+    # ---------------------------
+    @staticmethod
+    def _annotate_norm_code(qs):
+        """
+        Adds:
+          - code_trim: product_code with leading/trailing whitespace trimmed
+          - norm_code: UPPER(TRIM(product_code)) with '-', '_', and spaces removed
+        """
+        return qs.annotate(
+            code_trim=Trim(F("product_code")),
+            norm_code=Upper(
+                Replace(
+                    Replace(
+                        Replace(Trim(F("product_code")), Value("-"), Value("")),
+                        Value("_"),
+                        Value(""),
+                    ),
+                    Value(" "),
+                    Value(""),
+                )
+            ),
+        )
+
+    @staticmethod
+    def _exclude_edge_spaces(qs):
+        """
+        Keep only rows whose product_code equals its trimmed version (no leading/trailing spaces).
+        """
+        return qs.filter(product_code=F("code_trim"))
+
+    @staticmethod
+    def _dedupe_by_norm_code(qs):
+        """
+        Keep only the latest row per normalized code, based on updated_at DESC.
+        """
+        return (
+            qs.annotate(
+                rn=Window(
+                    expression=RowNumber(),
+                    partition_by=[F("norm_code")],
+                    order_by=F("updated_at").desc(nulls_last=True),
+                )
+            )
+            .filter(rn=1)
+            .order_by("id")
+        )
+
+    def clean_dedup_queryset(self, qs):
+        """
+        Pipeline: annotate -> exclude trailing/leading spaces -> dedupe by normalized code.
+        """
+        qs = self._annotate_norm_code(qs)
+        qs = self._exclude_edge_spaces(qs)
+        qs = self._dedupe_by_norm_code(qs)
+        return qs
 
     def get_cache_key(self, request, prefix="products"):
         user_id = request.user.id if request.user.is_authenticated else "anon"
@@ -2758,7 +2820,9 @@ class ProductListMixin(PresignedUrlMixin):
 
     def get_sorted_queryset(self, queryset, request):
         sort_by = request.GET.get("sort_by", "").lstrip()
-        if sort_by in VALID_SORT_FIELDS:
+        # Allow normal fields + the annotated norm_code for stable ordering if requested.
+        allowed = set(VALID_SORT_FIELDS) | {"norm_code", "-norm_code"}
+        if sort_by in allowed:
             return queryset.order_by(sort_by)
         return queryset
 
@@ -2828,6 +2892,9 @@ class ProductAdminListView(ProductListMixin, APIView):
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
 
+            # NEW: exclude codes with edge spaces + dedupe on normalized code
+            qs = self.clean_dedup_queryset(qs)
+
             sorted_qs = self.get_sorted_queryset(qs, request)
             data, paginator = self.paginate_and_serialize(
                 sorted_qs, request, use_direct_update=True
@@ -2854,13 +2921,16 @@ class ProductUsersListView(ProductListMixin, APIView):
 
     def get(self, request, *args, **kwargs):
         try:
-            qs = Product.objects.filter(is_latest=True, status="live").distinct()
+            qs = Product.objects.filter(is_latest=True, status="live")
             if not qs.exists():
                 return handle_error(
                     ErrorCode.PRODUCT_NOT_FOUND,
                     ErrorMessage.PRODUCT_NOT_FOUND,
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
+
+            # NEW: exclude codes with edge spaces + dedupe on normalized code
+            qs = self.clean_dedup_queryset(qs)
 
             sorted_qs = self.get_sorted_queryset(qs, request)
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
@@ -2903,14 +2973,25 @@ class BaseProductSearchView(APIView, ProductListMixin):
             if product_title and not isinstance(product_title, str):
                 return _handle_invalid_query_param()
 
-            query = self.get_default_query()
-            if product_code:
-                normalized = re.sub(r"[-_]", "", product_code)
-                query &= Q(product_code_no_dashes__icontains=normalized)
-            if product_title:
-                query &= Q(product_title__icontains=product_title)
+            # Build from annotated, normalized base
+            products = Product.objects.all()
+            products = self._annotate_norm_code(products)
 
-            products = Product.objects.filter(query).distinct()
+            # Scope (admin/user) via default query
+            products = products.filter(self.get_default_query())
+
+            # Search: match against normalized code
+            if product_code:
+                normalized_input = re.sub(r"[-_\s]", "", product_code).upper()
+                products = products.filter(norm_code__icontains=normalized_input)
+
+            if product_title:
+                products = products.filter(product_title__icontains=product_title)
+
+            # NEW: drop edge-space codes and dedupe
+            products = self._exclude_edge_spaces(products)
+            products = self._dedupe_by_norm_code(products)
+
             if not products.exists():
                 return Response(
                     {"detail": ErrorMessage.PRODUCT_NOT_FOUND.value},
@@ -2918,8 +2999,13 @@ class BaseProductSearchView(APIView, ProductListMixin):
                 )
 
             sort_by = request.GET.get("sort_by")
-            allowed = {"product_title", "product_code_no_dashes"}
-            if sort_by and sort_by.lstrip("-") in allowed:
+            allowed = {
+                "product_title",
+                "product_code_no_dashes",
+                "norm_code",
+                "-norm_code",
+            }
+            if sort_by and sort_by.lstrip("-") in {a.lstrip("-") for a in allowed}:
                 products = products.order_by(sort_by)
 
             data, paginator = self.paginate_and_serialize(products, request)
@@ -2970,7 +3056,7 @@ class ProductSearchUserView(BaseProductSearchView):
         return Q(is_latest=True, status="live")
 
 
-class ProductUsersSearchFilterAPIView(generics.ListAPIView):
+class ProductUsersSearchFilterAPIView(generics.ListAPIView, ProductListMixin):
     """
     GET /api/v1/products/user/search/filter/
     """
@@ -2979,13 +3065,17 @@ class ProductUsersSearchFilterAPIView(generics.ListAPIView):
     permission_classes = [AllowAny]
     serializer_class = ProductSearchSerializer
     pagination_class = CustomPagination
-    queryset = Product.objects.filter(status="live", is_latest=True)
-
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class = ProductFilter
     search_fields = ["product_title", "product_code_no_dashes"]
-    ordering_fields = VALID_SORT_FIELDS
+    ordering_fields = list(dict.fromkeys([*VALID_SORT_FIELDS, "norm_code"]))
+
     ordering = ["product_title", "-updated_at"]
+
+    def get_queryset(self):
+        base = Product.objects.filter(status="live", is_latest=True)
+        base = self.clean_dedup_queryset(base)
+        return base
 
 
 class ProductUsersFilterView(ProductListMixin, APIView):
@@ -3031,7 +3121,10 @@ class ProductUsersFilterView(ProductListMixin, APIView):
                         status_code=status.HTTP_400_BAD_REQUEST,
                     )
 
-            queryset = Product.objects.filter(base_q & filters).distinct()
+            queryset = Product.objects.filter(base_q & filters)
+            # NEW normalization pipeline
+            queryset = self.clean_dedup_queryset(queryset)
+
             sorted_qs = self.get_sorted_queryset(queryset, request)
 
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
@@ -3073,16 +3166,36 @@ class ProductAdminFilterView(ProductListMixin, APIView):
         if codes:
             code_q = Q()
             for c in codes:
-                normalized = re.sub(r"[-_]", "", c)
-                code_q |= Q(product_code_no_dashes__icontains=normalized)
-            q &= code_q
-
+                # Normalize user input same way as DB normalization (strip - _ and spaces)
+                normalized = re.sub(r"[-_\s]", "", c).upper()
+                # We'll filter on the annotated norm_code later once queryset is annotated
+                # Defer by storing the raw values; handled in get()
+                code_q |= (
+                    Q()
+                )  # placeholder so structure remains; actual filter applied after annotation
+            # Attach placeholder so structure isn't lost (we'll reapply the real filter)
+            q &= Q()  # keeps shape consistent
         return q
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
             base_q = self._build_filter_query(request)
-            qs = Product.objects.filter(base_q).distinct()
+            qs = Product.objects.filter(base_q)
+
+            # Apply code filters on annotated norm_code if provided
+            codes = request.GET.getlist("product_code")
+            qs = self._annotate_norm_code(qs)
+            if codes:
+                code_filters = Q()
+                for c in codes:
+                    normalized = re.sub(r"[-_\s]", "", c).upper()
+                    code_filters |= Q(norm_code__icontains=normalized)
+                qs = qs.filter(code_filters)
+
+            # NEW normalization pipeline
+            qs = self._exclude_edge_spaces(qs)
+            qs = self._dedupe_by_norm_code(qs)
+
             sorted_qs = self.get_sorted_queryset(qs, request)
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
             return paginator.get_paginated_response(data)
@@ -3114,7 +3227,8 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
         program = get_object_or_404(Program, pk=self.kwargs["program_id"])
         diseases = Disease.objects.filter(programs=program)
         vaccinations = Vaccination.objects.filter(programs=program)
-        return (
+
+        qs = (
             Product.objects.select_related("update_ref")
             .prefetch_related(
                 "update_ref__diseases_ref",
@@ -3127,8 +3241,11 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
                 Q(is_latest=True),
                 Q(status="live"),
             )
-            .distinct()
         )
+
+        # NEW normalization pipeline
+        qs = self.clean_dedup_queryset(qs)
+        return qs
 
     def list(self, request, *args, **kwargs):
         cache_key = self.get_cache_key(request, kwargs["program_id"])

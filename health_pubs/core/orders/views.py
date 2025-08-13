@@ -458,7 +458,6 @@ class OrderViewSet(viewsets.ModelViewSet):
                     request=request,
                     confirmation=confirmation,
                     admin=admin,
-                    owner_user=limit_user,
                 )
                 return Response(
                     self.get_serializer(order).data, status=status.HTTP_201_CREATED

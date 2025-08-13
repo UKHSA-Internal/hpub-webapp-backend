@@ -66,77 +66,49 @@ class OrderViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"], url_path="check-order-limits")
     def check_order_limits(self, request):
         """
-        Request body:
-          {
-            "user_ref": "<the user whose limit applies>",      # required
-            "product_codes": ["..."],                          # required
-            "acting_user_ref": "<admin placing order>",        # optional (ignored for limits)
-          }
-
-        Notes:
-        - Limits are enforced per *limit-user* (the owner), not per org session.
-        - 24h window is rolling from the earliest order in last 24h for (user, product).
+        Accepts a list of product_codes and user_ref.
+        Returns, for each product:
+        - window_start/window_end (rolling 24h),
+        - already_ordered,
+        - remaining.
         """
-        user_ref = request.data.get("user_ref")
-        product_codes = request.data.get("product_codes")
-
-        if not user_ref or not product_codes:
-            return Response(
-                {"error": "user_ref and product_codes[] are required."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        user_ref, product_codes, err_resp = self._parse_limits_request(request)
+        if err_resp:
+            return err_resp
 
         try:
-            limit_user = self._get_user_or_error(user_ref)
+            user = self._get_user_or_error(user_ref)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         now = timezone.now()
         window_cutoff = now - timedelta(hours=24)
-        results = []
-
-        est_key = getattr(
-            getattr(limit_user, "establishment_ref", None), "full_external_key", None
+        org_id = getattr(
+            getattr(user, "organization_ref", None), "organization_id", None
         )
-        org_obj = getattr(limit_user, "organization_ref", None)
+        est_key = getattr(
+            getattr(user, "establishment_ref", None), "full_external_key", None
+        )
+        org_obj = getattr(user, "organization_ref", None)
 
+        results = []
         for code in product_codes:
-            try:
-                product = Product.objects.get(product_code=code)
-            except Product.DoesNotExist:
+            product = self._get_product_safe(code)
+            if not product:
                 continue
 
-            limit_page = None
-            if est_key:
-                limit_page = OrderLimitPage.objects.filter(
-                    product_ref=product, full_external_keys__contains=[est_key]
-                ).first()
-            if not limit_page and org_obj:
-                limit_page = OrderLimitPage.objects.filter(
-                    product_ref=product, organization_ref=org_obj
-                ).first()
+            # Resolve limit (establishment → org → default 0)
+            limit_page = self._fetch_limit_page(product, est_key, org_obj)
+            daily_limit = getattr(limit_page, "order_limit", 0)
 
-            daily_limit = (
-                getattr(limit_page, "order_limit", None) or DEFAULT_DAILY_LIMIT
-            )
-
+            # Recent orders in this org for this product
             recent_qs = Order.objects.filter(
-                user_ref=limit_user,
+                user_ref__organization_ref__organization_id=org_id,
                 order_items__product_ref=product,
                 created_at__gte=window_cutoff,
             ).order_by("created_at")
 
-            if not recent_qs.exists():
-                window_start = now
-                already_ordered = 0
-            else:
-                first = recent_qs.first()
-                window_start = first.created_at
-                already_ordered = (
-                    recent_qs.aggregate(total=Sum("order_items__quantity"))["total"]
-                    or 0
-                )
-
+            window_start, already_ordered = self._compute_window_stats(recent_qs, now)
             window_end = window_start + timedelta(hours=24)
             remaining = max(daily_limit - already_ordered, 0)
 
@@ -216,6 +188,48 @@ class OrderViewSet(viewsets.ModelViewSet):
         return resp
 
     # ---------- Helpers: validation & limits ----------
+
+    def _parse_limits_request(self, request):
+        user_ref = request.data.get("user_ref")
+        product_codes = request.data.get("product_codes")
+        if not user_ref or not product_codes:
+            return (
+                None,
+                None,
+                Response(
+                    {"error": "user_ref and product_codes[] are required."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                ),
+            )
+        return user_ref, product_codes, None
+
+    def _get_product_safe(self, code):
+        try:
+            return Product.objects.get(product_code=code)
+        except Product.DoesNotExist:
+            return None
+
+    def _fetch_limit_page(self, product, est_key, org_obj):
+        if est_key:
+            lp = OrderLimitPage.objects.filter(
+                product_ref=product,
+                full_external_keys__contains=[est_key],
+            ).first()
+            if lp:
+                return lp
+        if org_obj:
+            return OrderLimitPage.objects.filter(
+                product_ref=product,
+                organization_ref=org_obj,
+            ).first()
+        return None
+
+    def _compute_window_stats(self, recent_qs, now):
+        if not recent_qs.exists():
+            return now, 0
+        first = recent_qs.first()
+        total = recent_qs.aggregate(total=Sum("order_items__quantity"))["total"] or 0
+        return first.created_at, total
 
     def _extract_and_validate_request(self, request, admin):
         data = request.data.copy()
@@ -499,52 +513,34 @@ class OrderViewSet(viewsets.ModelViewSet):
             "country": clean(getattr(address, "country", "")) if address else "",
         }
 
-    def _notify_with_payload(
-        self, order, request, confirmation, admin=False, owner_user=None
-    ):
+    def _notify_with_payload(self, order, request, confirmation, admin=False):
         """
-        Admin=True:
-          - Send TO the delivery user (user_info) => order.user_ref.email
-          - Greeting = delivery user's first name
-        Admin=False:
-          - Send to order.user_ref (self-order), greeting = recipient's name
+        Always send to order.user_ref (delivery user in admin flow, self otherwise)
+        and greet with that recipient's name.
         """
-        if admin:
-            recipient = order.user_ref  # delivery user (from user_info)
-        else:
-            recipient = order.user_ref  # normal path (same user)
-
+        recipient = order.user_ref
         recipient_email = getattr(recipient, "email", None) or getattr(
             getattr(request, "user", None), "email", None
         )
 
-        # Greeting + full name are taken from the delivery recipient (user_info) when admin=True
         sender_full_name = f"{(recipient.first_name or '').strip()} {(recipient.last_name or '').strip()}".strip()
         sender_name = (recipient.first_name or sender_full_name or "Customer").strip()
-
-        logger.info(
-            "Sending order confirmation email to %s for order %s (greeting=%s)",
-            recipient_email,
-            order.order_id,
-            sender_name,
-        )
 
         try:
             send_notification(
                 "email",
                 recipient_email,
-                sender_name,  # greeting (delivery first name)
-                sender_full_name,  # fallback full name for delivery block
+                sender_name,
+                sender_full_name,
                 confirmation["confirmation_number"],
                 confirmation["order_date"],
                 confirmation["items_table"],
                 confirmation["total_items"],
-                confirmation["shipping_address"],  # dict including telephone
+                confirmation["shipping_address"],
             )
         except Exception as e:
             logger.warning("Email send failed for order %s: %s", order.order_id, e)
 
-        # Analytics is best-effort
         try:
             self.record_reorder_events(order, request)
         except Exception as e:

@@ -54,15 +54,15 @@ def remap_user_ids(
 
     # Save updated addresses
     addresses_df.to_excel(output_file, index=False)
-    print(f"✅ Updated addresses saved to: {output_file}")
+    print(f" Updated addresses saved to: {output_file}")
 
     # Save unmapped issues if any
     if unmapped_records:
         log_df = pd.DataFrame(unmapped_records)
         log_df.to_csv(log_file, index=False)
-        print(f"⚠️  {len(unmapped_records)} unmapped entries logged to: {log_file}")
+        print(f"  {len(unmapped_records)} unmapped entries logged to: {log_file}")
     else:
-        print("✅ All user_ids successfully remapped.")
+        print(" All user_ids successfully remapped.")
 
 
 # Example usage

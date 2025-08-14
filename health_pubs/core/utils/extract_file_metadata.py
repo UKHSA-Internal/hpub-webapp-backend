@@ -29,6 +29,9 @@ if not logger.handlers:
 # Default MIME type when unknown
 DEFAULT_MIME = "application/octet-stream"
 
+# MIME prefixes
+VIDEO_MIME_PREFIX = "video/"
+
 # ISO A‐series sizes (in millimeters)
 ISO_A_SIZES_MM = {
     "A0": (841.0, 1189.0),
@@ -326,14 +329,14 @@ def _get_local_file_info(local_path: Path) -> Tuple[int, str, Path]:
     return size, mime, local_path
 
 
-def _needs_deep_probe(mime: str, size: int) -> bool:
+def _needs_deep_probe(mime: str) -> bool:
     """
     Decide if a remote file should be downloaded for deeper probing.
 
     - Always probe PDFs, images, audio, and office‐type documents to get full metadata.
     - Skip any 'video/' to avoid large downloads.
     """
-    if mime.startswith("video/"):
+    if mime.startswith(VIDEO_MIME_PREFIX):
         return False
     deep_types = (
         "application/pdf",
@@ -584,7 +587,7 @@ def _extract_additional_metadata(
         return _extract_pdf_metadata(temp_path)
     if mime.startswith("audio/"):
         return _extract_audio_metadata(temp_path)
-    if mime.startswith("video/"):
+    if mime.startswith(VIDEO_MIME_PREFIX):
         return _extract_video_metadata(temp_path)
     if mime in (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -629,7 +632,7 @@ def _process_remote_file(url: str) -> Tuple[int, str, Optional[Path]]:
     logger.debug(f"Remote fetch → size={_hr(size)}, type={mime} for {url}")
 
     # 2) If this is a type that needs deep probing (PDF/images/audio/office), download it
-    if _needs_deep_probe(mime, size):
+    if _needs_deep_probe(mime):
         temp_probe_file = _download_to_temp(url)
 
     return size, mime, temp_probe_file
@@ -692,7 +695,7 @@ def _extract_all_metadata(
       - For other types, run the appropriate extractor on temp file.
     """
     extra: Dict[str, Union[str, int, float, tuple]] = {}
-    if mime.startswith("video/"):
+    if mime.startswith(VIDEO_MIME_PREFIX):
         source = temp_file if (temp_file and temp_file.exists()) else url
         extra = _extract_video_metadata(source)
     elif temp_file and temp_file.exists():

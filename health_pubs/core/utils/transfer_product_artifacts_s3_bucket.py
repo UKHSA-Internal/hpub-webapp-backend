@@ -110,6 +110,9 @@ DOWNLOAD_OBJECT_FIELDS = {"main_download_url", "video_url"}
 DOWNLOAD_ARRAY_FIELDS = {"web_download_url", "print_download_url", "transcript_url"}
 ALL_DOWNLOAD_FIELDS = DOWNLOAD_OBJECT_FIELDS | DOWNLOAD_ARRAY_FIELDS
 
+FILE_TYPE_DEFAULT = "application/octet-stream"
+UNKNOWN_FILE_SIZE = "Unknown"
+
 # ---------------------------
 # State
 # ---------------------------
@@ -119,27 +122,38 @@ missing_entries: List[Tuple[str, str, str, str]] = []
 # ---------------------------
 # Filename helpers
 # ---------------------------
+
+# Pre-compile for the two multi-char patterns you had
+_MULTI_PATTERNS = (
+    (re.compile(r"\+ñ\+"), "-"),
+    (re.compile(r"\+\u00ed\+"), "-"),  # +í+ → -
+)
+
+# Single-character translations (use codepoints to avoid ambiguous Unicode in source)
+_FIX_TRANSLATE = {
+    ord("\u2018"): None,  # ‘  delete
+    ord("\u2019"): None,  # ’  delete
+    ord("\u201C"): None,  # “  delete
+    ord("\u201D"): None,  # ”  delete
+    ord("`"): None,  # backtick → delete (avoids confusion with ‘)
+    ord("\u2013"): "-",  # –  en dash → -
+    ord("\u2014"): "-",  # —  em dash → -
+    ord("\u00F1"): "-",  # ñ → -
+    ord("\u00ED"): "i",  # í → i
+    ord("\u00F3"): "o",  # ó → o
+    ord("\u00FA"): "u",  # ú → u
+    ord("\u00E1"): "a",  # á → a
+    ord("\u00E9"): "e",  # é → e
+    ord("+"): "_",  # remaining + → _
+}
+
+
 def fix_mojibake(name: str) -> str:
-    replacements = {
-        "+ñ+": "-",
-        "+í+": "-",
-        "ñ": "-",
-        "í": "i",
-        "’": "",
-        "“": "",
-        "”": "",
-        "ó": "o",
-        "ú": "u",
-        "á": "a",
-        "é": "e",
-        "–": "-",
-        "—": "-",
-        "‘": "",
-        "’": "",
-    }
-    for k, v in replacements.items():
-        name = name.replace(k, v)
-    return name.replace("+", "_")
+    # Handle the two special multi-character sequences first
+    for pat, repl in _MULTI_PATTERNS:
+        name = pat.sub(repl, name)
+    # Then apply single-char translations (no ambiguous Unicode literals in source)
+    return name.translate(_FIX_TRANSLATE)
 
 
 def sanitize_filename(name: str) -> str:
@@ -148,6 +162,15 @@ def sanitize_filename(name: str) -> str:
     ascii_str = nkfd.encode("ascii", "ignore").decode("ascii")
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_str).strip("._")
     return cleaned.lower()
+
+
+def make_s3_key_and_filename(prod_code: str, filename: str) -> Tuple[str, str]:
+    """
+    Returns (s3_key, download_filename) using the *sanitized* filename.
+    Ensures the object key and the download filename match.
+    """
+    safe_name = sanitize_filename(filename)
+    return f"{prod_code}/{safe_name}", safe_name
 
 
 def content_disposition_header(
@@ -291,26 +314,82 @@ def generate_presigned_get(
 # ---------------------------
 # URL helpers
 # ---------------------------
+YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com"}
+YOUTU_BE_HOST = "youtu.be"
+
+
 def canonicalize_youtube_url(url: str) -> Optional[str]:
+    """
+    Return a canonical YouTube URL or None if the input isn't a recognizable YouTube link.
+
+    Rules:
+      - youtu.be/<id>[?t=..]       -> https://www.youtube.com/watch?v=<id>[&t=..]
+      - youtube.com/watch?v=<id>   -> https://www.youtube.com/watch?v=<id>[&t=..]
+      - youtube.com/shorts/<id>    -> https://www.youtube.com/shorts/<id>
+      - youtube.com/(embed|v|live)/<id> -> https://www.youtube.com/watch?v=<id>[&t=..]
+      - Channel/user/handle/playlist links are passed through with normalized host/scheme.
+    """
     if not url:
         return None
-    parsed = urllib.parse.urlparse(url.strip())
-    netloc = parsed.netloc.lower()
-    if "youtu.be" in netloc:
-        vid = parsed.path.lstrip("/")
-        return f"https://www.youtube.com/watch?v={vid}" if vid else None
-    if "youtube.com" in netloc:
-        if parsed.path.startswith("/watch"):
-            qs = urllib.parse.parse_qs(parsed.query)
-            vid = qs.get("v", [None])[0]
-            return f"https://www.youtube.com/watch?v={vid}" if vid else None
-        if parsed.path.startswith("/shorts/"):
-            parts = parsed.path.split("/")
-            return (
-                f"https://www.youtube.com/shorts/{parts[2]}" if len(parts) > 2 else None
-            )
-        if parsed.path.startswith(("/channel/", "/@", "/user/", "/c/", "/playlist")):
-            return url
+
+    try:
+        p = urllib.parse.urlparse(url.strip())
+    except Exception:
+        return None
+
+    host = p.netloc.lower()
+    path = p.path or ""
+    qs = urllib.parse.parse_qs(p.query)
+
+    def _first(q: Dict[str, List[str]], key: str) -> Optional[str]:
+        return (q.get(key) or [None])[0]
+
+    def _valid_vid(vid: Optional[str]) -> bool:
+        return bool(vid and YOUTUBE_VIDEO_ID_RE.match(vid))
+
+    def _build_watch(vid: str) -> str:
+        # Preserve start time if present
+        start = _first(qs, "t") or _first(qs, "start")
+        params = {"v": vid}
+        if start:
+            params["t"] = start
+        return "https://www.youtube.com/watch?" + urllib.parse.urlencode(params)
+
+    def _normalize_pass_through() -> str:
+        # Keep original path & query but normalize scheme+host
+        return urllib.parse.urlunparse(
+            ("https", "www.youtube.com", path, "", p.query, "")
+        )
+
+    # Short-link: youtu.be/<id>
+    if host.endswith(YOUTU_BE_HOST):
+        vid = path.lstrip("/").split("/", 1)[0]
+        return _build_watch(vid) if _valid_vid(vid) else None
+
+    # Standard YouTube hosts
+    if any(host.endswith(h) for h in YOUTUBE_HOSTS):
+        # /watch?v=<id>
+        if path.startswith("/watch"):
+            vid = _first(qs, "v")
+            return _build_watch(vid) if _valid_vid(vid) else None
+
+        # /shorts/<id>  (keep as shorts canonical)
+        if path.startswith("/shorts/"):
+            parts = [s for s in path.split("/") if s]
+            vid = parts[1] if len(parts) >= 2 else None
+            return f"https://www.youtube.com/shorts/{vid}" if _valid_vid(vid) else None
+
+        # /embed/<id>, /v/<id>, /live/<id>  -> watch?v=<id>
+        parts = [s for s in path.split("/") if s]
+        if len(parts) >= 2 and parts[0] in {"embed", "v", "live"}:
+            vid = parts[1]
+            return _build_watch(vid) if _valid_vid(vid) else None
+
+        # Pass-through for channels, handles, users, custom URLs, playlists
+        if path.startswith(("/channel/", "/@", "/user/", "/c/", "/playlist")):
+            return _normalize_pass_through()
+
     return None
 
 
@@ -341,15 +420,15 @@ def _coerce_metadata_dict(x: Any) -> Optional[Dict[str, Any]]:
     if isinstance(x, dict):
         d = dict(x)
         if "URL" in d and isinstance(d["URL"], str) and _is_url(d["URL"]):
-            d.setdefault("file_size", "Unknown")
-            d.setdefault("file_type", "application/octet-stream")
+            d.setdefault("file_size", UNKNOWN_FILE_SIZE)
+            d.setdefault("file_type", FILE_TYPE_DEFAULT)
             return d
         return None
     if _is_url(x):
         return {
             "URL": x.strip(),
-            "file_size": "Unknown",
-            "file_type": "application/octet-stream",
+            "file_size": UNKNOWN_FILE_SIZE,
+            "file_type": FILE_TYPE_DEFAULT,
         }
     return None
 
@@ -365,48 +444,61 @@ def _uniq_by_url(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+# ---- Helpers used by _normalize_downloads_shape ----
+def _to_dict(raw: Any) -> Dict[str, Any]:
+    """Best-effort: parse JSON-ish input and return a dict, else {}."""
+    base = _json_load_maybe(raw)
+    return base if isinstance(base, dict) else {}
+
+
+def _normalize_object_field(
+    base: Dict[str, Any], field: str
+) -> Optional[Dict[str, Any]]:
+    """Return a single metadata dict or None for object fields."""
+    return _coerce_metadata_dict(_json_load_maybe(base.get(field)))
+
+
+def _iter_normalized_items(v: Any):
+    """
+    Yield 0..N normalized metadata dicts from list/dict/str payloads.
+    Strings are treated as URLs. Dicts must contain a valid 'URL'.
+    """
+    v = _json_load_maybe(v)
+    if isinstance(v, list):
+        for elem in v:
+            md = _coerce_metadata_dict(_json_load_maybe(elem))
+            if md:
+                yield md
+    elif isinstance(v, (dict, str)):
+        md = _coerce_metadata_dict(v)
+        if md:
+            yield md
+
+
+def _normalize_array_field(base: Dict[str, Any], field: str) -> List[Dict[str, Any]]:
+    """Return a URL-deduped list of metadata dicts for array fields."""
+    return _uniq_by_url(list(_iter_normalized_items(base.get(field))))
+
+
 def _normalize_downloads_shape(raw: Any) -> Dict[str, Any]:
     """
-    Return a dict with guaranteed shapes:
-      - object fields: dict or None
-      - array fields: list[dict]
-    Ignore/clean unexpected strings to avoid char-splitting.
+    Guarantee shapes:
+      - object fields -> dict or None
+      - array fields  -> list[dict]
+    Ignores/cleans unexpected primitives to avoid accidental char-splitting.
     """
-    if raw is None:
-        base: Dict[str, Any] = {}
-    else:
-        base = _json_load_maybe(raw)
-        if not isinstance(base, dict):
-            base = {}
+    base = _to_dict(raw)
 
+    # Normalize by field category
+    objects = {f: _normalize_object_field(base, f) for f in DOWNLOAD_OBJECT_FIELDS}
+    arrays = {f: _normalize_array_field(base, f) for f in DOWNLOAD_ARRAY_FIELDS}
+
+    # Ensure all keys exist with defaults
     out: Dict[str, Any] = {}
-
-    # Object fields
-    for f in DOWNLOAD_OBJECT_FIELDS:
-        v = _json_load_maybe(base.get(f))
-        md = _coerce_metadata_dict(v)
-        out[f] = md  # may be None
-
-    # Array fields
-    for f in DOWNLOAD_ARRAY_FIELDS:
-        v = _json_load_maybe(base.get(f))
-        items: List[Dict[str, Any]] = []
-        if isinstance(v, list):
-            for elem in v:
-                elem = _json_load_maybe(elem)
-                md = _coerce_metadata_dict(elem)
-                if md:
-                    items.append(md)
-        elif isinstance(v, (dict, str)):
-            md = _coerce_metadata_dict(v)
-            if md:
-                items.append(md)
-        out[f] = _uniq_by_url(items)
-
-    # Ensure all keys present
-    for f in ALL_DOWNLOAD_FIELDS:
-        if f not in out:
-            out[f] = None if f in DOWNLOAD_OBJECT_FIELDS else []
+    out.update({f: None for f in DOWNLOAD_OBJECT_FIELDS})
+    out.update({f: [] for f in DOWNLOAD_ARRAY_FIELDS})
+    out.update(objects)
+    out.update(arrays)
 
     return out
 
@@ -636,15 +728,16 @@ def _process_column(cur, conn, ref_id, prod_code, col, row, has_row):
         return 0, 1, has_row
 
     local_path = os.path.join(LOCAL_DIR, matched)
-    safe_name = sanitize_filename(fname)
-    key = f"{prod_code}/{safe_name}"
+
+    # Build consistent S3 key and download filename (both sanitized)
+    key, download_filename = make_s3_key_and_filename(prod_code, fname)
 
     try:
         ensure_s3_object(local_path, key)
         presigned = generate_presigned_get(
             BUCKET_NAME,
             key,
-            fname,
+            download_filename,  # use sanitized name for Content-Disposition
             is_main_download=(col == "main_download_file_name"),
         )
         md = get_file_metadata([presigned])[0]  # expects list of URLs
@@ -656,8 +749,8 @@ def _process_column(cur, conn, ref_id, prod_code, col, row, has_row):
     metadata = {
         "URL": presigned,
         "s3_bucket_url": f"https://{BUCKET_NAME}.s3.amazonaws.com/{key}",
-        "file_size": md.get("file_size", "Unknown"),
-        "file_type": md.get("file_type", "application/octet-stream"),
+        "file_size": md.get("file_size", UNKNOWN_FILE_SIZE),
+        "file_type": md.get("file_type", FILE_TYPE_DEFAULT),
     }
     db_field = EXCEL_TO_DB[col]
 
@@ -670,7 +763,15 @@ def _process_column(cur, conn, ref_id, prod_code, col, row, has_row):
             has_row = True
             action = "inserted"
         conn.commit()
-        logger.info("  %s %s → %s", action, prod_code, db_field)
+        logger.info(
+            "  %s %s → %s (S3 key: %s; download filename: %s; original: %s)",
+            action,
+            prod_code,
+            db_field,
+            key,
+            download_filename,
+            fname,
+        )
         return 1, 0, has_row
     except Exception as e:
         conn.rollback()

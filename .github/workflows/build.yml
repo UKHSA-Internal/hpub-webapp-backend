@@ -113,16 +113,17 @@ jobs:
           docker tag $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$IMAGE_TAG $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${{ steps.tag_bump.outputs.new_tag }}
           docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${{ steps.tag_bump.outputs.new_tag }}
 
-      - name: Create Github release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ steps.tag_bump.outputs.new_tag }}
-        run: |
-          gh release create "$tag" \
-            --repo="$GITHUB_REPOSITORY" \
-            --title="${GITHUB_REPOSITORY#*/} ${tag#v}" \
-            --generate-notes
-  deploy:
+      # - name: Create Github release
+      #   env:
+      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #     tag: ${{ steps.tag_bump.outputs.new_tag }}
+      #   run: |
+      #     gh release create "$tag" \
+      #       --repo="$GITHUB_REPOSITORY" \
+      #       --title="${GITHUB_REPOSITORY#*/} ${tag#v}" \
+      #       --generate-notes
+
+  deploy_to_nonprod:
     name: Deploy build to ${{ matrix.environment }}
     runs-on: ubuntu-latest
     environment: ${{ matrix.environment }}
@@ -130,7 +131,6 @@ jobs:
       max-parallel: 1
       matrix:
         # environment: ["dev", "test", "uat", "preprod", "prod"]
-        # environment: ["test", "uat", "preprod", "prod"]
         environment: ["dev"]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:

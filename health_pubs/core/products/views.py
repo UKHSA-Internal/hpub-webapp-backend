@@ -3343,19 +3343,10 @@ class ProductAdminFilterView(ProductListMixin, APIView):
             if vals:
                 q &= Q(**{lookup: vals})
 
-        codes = request.GET.getlist("product_code")
-        if codes:
-            code_q = Q()
-            for c in codes:
-                # Normalize user input same way as DB normalization (strip - _ and spaces)
-                normalize_product_code(c)
-                # We'll filter on the annotated norm_code later once queryset is annotated
-                # Defer by storing the raw values; handled in get()
-                code_q |= (
-                    Q()
-                )  # placeholder so structure remains; actual filter applied after annotation
-            # Attach placeholder so structure isn't lost (we'll reapply the real filter)
-            q &= Q()  # keeps shape consistent
+        # Defer product_code filtering to .get() where queryset is annotated.
+        if request.GET.getlist("product_code"):
+            q &= Q()  # no-op placeholder to keep structure consistent
+
         return q
 
     def get(self, request, *args, **kwargs) -> Response:

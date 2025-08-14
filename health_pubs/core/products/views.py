@@ -2405,7 +2405,7 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                 continue
 
             limit_val = lim.get("order_limit_value", 0)
-            full_keys = full_keys_map.get(org.id, [])
+            full_keys = full_keys_map.get(org.organization_id, [])
             seen_orgs.add(org_name)
 
             # ------------------------------------------------------------------
@@ -2425,6 +2425,7 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
             # ------------------------------------------------------------------
             # Case B: new page → create
             # ------------------------------------------------------------------
+            logger.info("full_external_keys for %s: %s", org_name, full_keys)
             new_page = OrderLimitPage(
                 title=f"Order Limit for {org_name}",
                 slug=slugify(f"{org_name}-order-limit-{uuid.uuid4()}"),
@@ -2638,7 +2639,9 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
     ):
         short_program_id = str(program_id)[:5]
         short_product_key = str(product_key)[:4]
-        short_language_code = iso_language_code[:4]
+        # remove hyphens (and any other non-alphanumerics) from the ISO code:
+        clean_lang = re.sub(r"[^A-Za-z0-9]", "", iso_language_code)
+        short_language_code = clean_lang[:4]
         product_code = f"{short_program_id}{short_product_key}{short_language_code}{version_number:03}"
         while Product.objects.filter(product_code=product_code).exists():
             version_number += 1

@@ -389,6 +389,8 @@ class ProductSearchSerializer(serializers.ModelSerializer):
     """
 
     update_ref = ProductUpdateSearchSerializer(read_only=True)
+    created_at = serializers.DateTimeField(read_only=True)
+    updated_at = serializers.DateTimeField(read_only=True)
 
     class Meta:
         model = Product
@@ -403,4 +405,9 @@ class ProductSearchSerializer(serializers.ModelSerializer):
             "language_id",
             "language_name",
             "product_code_no_dashes",
+            "created_at",
+            "updated_at",
+            "publish_date",
+            "version_number",
+            "suppress_event",
         )

@@ -17,12 +17,12 @@ from django.utils.text import slugify
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
+from core.utils.custom_token_authentication import CustomTokenAuthentication
+from core.users.permissions import IsAdminOrRegisteredUser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from wagtail.models import Page
 
-from core.users.permissions import IsAdminOrRegisteredUser
-from core.utils.custom_token_authentication import CustomTokenAuthentication
 from .models import Address
 from .serializers import AddressSerializer
 
@@ -54,6 +54,7 @@ class CustomPagination(PageNumberPagination):
 class AddressViewSet(viewsets.ModelViewSet):
     lookup_field = "address_id"
     authentication_classes = [CustomTokenAuthentication]
+
     permission_classes = [IsAuthenticated, IsAdminOrRegisteredUser]
     queryset = Address.objects.all()
     serializer_class = AddressSerializer

@@ -548,7 +548,7 @@ def _normalize_downloads_shape(raw: Any) -> Dict[str, Any]:
 
     # Ensure all keys exist with defaults
     out: Dict[str, Any] = {}
-    out.update({f: None for f in DOWNLOAD_OBJECT_FIELDS})
+    out.update(dict.fromkeys(DOWNLOAD_OBJECT_FIELDS))
     out.update({f: [] for f in DOWNLOAD_ARRAY_FIELDS})
     out.update(objects)
     out.update(arrays)

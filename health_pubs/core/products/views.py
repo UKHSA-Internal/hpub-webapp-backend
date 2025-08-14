@@ -5,7 +5,7 @@ import re
 import os
 import uuid
 import difflib
-from typing import Any, Mapping, Optional, Union, Dict, List, Tuple
+from typing import Any, Iterable, Mapping, Optional, Union, Dict, List, Tuple
 from urllib.parse import unquote
 from django.utils import timezone
 import time
@@ -716,33 +716,46 @@ class ProductUtilsMixin:
         except Exception:
             return []
 
-    def _normalize_product_type(self, raw: Any) -> Optional[str]:
+    # ---- tiny helpers for product_type normalization ----
+    @staticmethod
+    def _to_clean_lower(raw: Any) -> Optional[str]:
+        """Return a stripped, lowercase string or None."""
         if not isinstance(raw, str):
             return None
-        valid_types = self._get_valid_product_types()
-        val = raw.strip()
+        s = raw.strip()
+        return s.lower() if s else None
+
+    def _build_product_type_lookup(self) -> Dict[str, str]:
+        """
+        Build a case-insensitive lookup of valid product types.
+        Also maps naïve singular/plural toggles to the canonical choice.
+        """
+        lookup: Dict[str, str] = {}
+        for choice in self._get_valid_product_types():
+            c_low = choice.lower()
+            lookup[c_low] = choice
+            # naive plural/singular bridging
+            if c_low.endswith("s"):
+                lookup[c_low[:-1]] = choice  # singular maps to canonical
+            else:
+                lookup[c_low + "s"] = choice  # plural maps to canonical
+        return lookup
+
+    def _normalize_product_type(self, raw: Any) -> Optional[str]:
+        """
+        Return the canonical product_type (matching model choices) or None.
+        Complexity reduced by using a precomputed lookup.
+        """
+        val = self._to_clean_lower(raw)
         if not val:
             return None
 
-        def eq_ci(a: str, b: str) -> bool:
-            return a.lower() == b.lower()
+        # If choices not available, bail early
+        valid_lookup = self._build_product_type_lookup()
+        if not valid_lookup:
+            return None
 
-        # exact (case-insensitive)
-        for choice in valid_types:
-            if eq_ci(val, choice):
-                return choice
-
-        # singularize or pluralize fallback
-        if val.lower().endswith("s"):
-            base = val[:-1]
-            for choice in valid_types:
-                if eq_ci(base, choice):
-                    return choice
-        else:
-            for choice in valid_types:
-                if eq_ci(val + "s", choice):
-                    return choice
-        return None
+        return valid_lookup.get(val)
 
     def _clean_numeric_columns(self, row: Dict[str, Any], cols: set) -> None:
         for col in cols:

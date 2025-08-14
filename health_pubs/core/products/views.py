@@ -5,7 +5,7 @@ import re
 import os
 import uuid
 import difflib
-from typing import Any, Iterable, Mapping, Optional, Union, Dict, List, Tuple
+from typing import Any, Iterable, Mapping, Optional, Set, Union, Dict, List, Tuple
 from urllib.parse import unquote
 from django.utils import timezone
 import time
@@ -115,8 +115,11 @@ UNEXPECTED_ERROR_MSG = "An unexpected error occurred."
 INTERNAL_ERROR_MSG = "An unexpected error occurred while searching for products."
 PRODUCT_NOT_FOUND_LOG_MSG = "No product found with product_code: %s"
 
-# Global constant for valid sort fields
-VALID_SORT_FIELDS = [
+
+# --------------------------------------------------------------------------- #
+# Global constant for valid sort fields                                       #
+# --------------------------------------------------------------------------- #
+VALID_SORT_FIELDS: List[str] = [
     "product_title",
     "-product_title",
     "created_at",
@@ -128,6 +131,20 @@ VALID_SORT_FIELDS = [
     "version_number",
     "-version_number",
 ]
+
+
+# Expandable internal allow-list we’ll reuse everywhere
+ALLOWED_SORT_FIELDS: set[str] = set(
+    VALID_SORT_FIELDS
+    + [
+        "norm_code",
+        "-norm_code",
+        "product_code_no_dashes",
+        "-product_code_no_dashes",
+        "program_name",
+        "-program_name",
+    ]
+)
 
 
 _DIGITS = list("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
@@ -2931,6 +2948,9 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return None
 
 
+# --------------------------------------------------------------------------- #
+# Core mixin with sorting + normalization/dedupe                              #
+# --------------------------------------------------------------------------- #
 class ProductListMixin(PresignedUrlMixin):
     """
     Handles sorting, pagination + S3 presigning (both attachment and inline),
@@ -3001,6 +3021,29 @@ class ProductListMixin(PresignedUrlMixin):
         qs = self._dedupe_by_norm_code(qs)
         return qs
 
+    # ---------------------------
+    # Sorting helpers (uniform ?sort_by= across endpoints)
+    # ---------------------------
+    @staticmethod
+    def _normalize_sort_param(sort_by: Optional[str]) -> Optional[str]:
+        """
+        Normalize incoming sort string (strip leading whitespace) and validate against allowlist.
+        """
+        if not sort_by:
+            return None
+        sort_by = sort_by.lstrip()
+        return sort_by if sort_by in ALLOWED_SORT_FIELDS else None
+
+    def get_sorted_queryset(self, queryset, request):
+        sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
+        if sort_by:
+            return queryset.order_by(sort_by)
+        # Safe default ordering if none provided; stable, deterministic
+        return queryset.order_by("product_title", "-updated_at")
+
+    # ---------------------------
+    # Pagination + presigning
+    # ---------------------------
     def get_cache_key(self, request, prefix="products"):
         user_id = request.user.id if request.user.is_authenticated else "anon"
         return f"{prefix}:user:{user_id}:{request.get_full_path()}"
@@ -3011,14 +3054,6 @@ class ProductListMixin(PresignedUrlMixin):
         Only include 'request' if flagged.
         """
         return {"request": self.request} if self.include_request_context else {}
-
-    def get_sorted_queryset(self, queryset, request):
-        sort_by = request.GET.get("sort_by", "").lstrip()
-        # Allow normal fields + the annotated norm_code for stable ordering if requested.
-        allowed = set(VALID_SORT_FIELDS) | {"norm_code", "-norm_code"}
-        if sort_by in allowed:
-            return queryset.order_by(sort_by)
-        return queryset
 
     def paginate_and_serialize(
         self,
@@ -3068,6 +3103,9 @@ class ProductListMixin(PresignedUrlMixin):
         return data, paginator
 
 
+# --------------------------------------------------------------------------- #
+# Admin: List                                                                #
+# --------------------------------------------------------------------------- #
 @method_decorator(cache_page(CACHE_TTL), name="dispatch")
 class ProductAdminListView(ProductListMixin, APIView):
     authentication_classes = [CustomTokenAuthentication]
@@ -3086,10 +3124,12 @@ class ProductAdminListView(ProductListMixin, APIView):
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
 
-            # NEW: exclude codes with edge spaces + dedupe on normalized code
+            # Normalize + dedupe
             qs = self.clean_dedup_queryset(qs)
 
+            # Uniform ?sort_by=
             sorted_qs = self.get_sorted_queryset(qs, request)
+
             data, paginator = self.paginate_and_serialize(
                 sorted_qs, request, use_direct_update=True
             )
@@ -3102,6 +3142,9 @@ class ProductAdminListView(ProductListMixin, APIView):
             return handle_exceptions(e)
 
 
+# --------------------------------------------------------------------------- #
+# Users: List (live, latest)                                                 #
+# --------------------------------------------------------------------------- #
 @method_decorator(cache_page(CACHE_TTL), name="dispatch")
 class ProductUsersListView(ProductListMixin, APIView):
     """
@@ -3123,12 +3166,10 @@ class ProductUsersListView(ProductListMixin, APIView):
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
 
-            # NEW: exclude codes with edge spaces + dedupe on normalized code
             qs = self.clean_dedup_queryset(qs)
-
             sorted_qs = self.get_sorted_queryset(qs, request)
-            data, paginator = self.paginate_and_serialize(sorted_qs, request)
 
+            data, paginator = self.paginate_and_serialize(sorted_qs, request)
             data = filter_live_languages(data)
             return paginator.get_paginated_response(data)
 
@@ -3141,6 +3182,9 @@ class ProductUsersListView(ProductListMixin, APIView):
             )
 
 
+# --------------------------------------------------------------------------- #
+# Search (base)                                                              #
+# --------------------------------------------------------------------------- #
 class ProductSearchListMixin(ProductListMixin):
     """
     Mixin for search endpoints. Uses ProductSearchSerializer.
@@ -3163,9 +3207,17 @@ class BaseProductSearchView(APIView, ProductListMixin):
             product_code = request.GET.get("product_code")
             product_title = request.GET.get("product_title")
             if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
-                return _handle_invalid_query_param()
+                return handle_error(
+                    ErrorCode.INVALID_PARAMETER,
+                    ErrorMessage.INVALID_PARAMETER,
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                )
             if product_title and not isinstance(product_title, str):
-                return _handle_invalid_query_param()
+                return handle_error(
+                    ErrorCode.INVALID_PARAMETER,
+                    ErrorMessage.INVALID_PARAMETER,
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                )
 
             # Build from annotated, normalized base
             products = Product.objects.all()
@@ -3182,7 +3234,7 @@ class BaseProductSearchView(APIView, ProductListMixin):
             if product_title:
                 products = products.filter(product_title__icontains=product_title)
 
-            # NEW: drop edge-space codes and dedupe
+            # Drop edge-space codes and dedupe
             products = self._exclude_edge_spaces(products)
             products = self._dedupe_by_norm_code(products)
 
@@ -3192,17 +3244,16 @@ class BaseProductSearchView(APIView, ProductListMixin):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-            sort_by = request.GET.get("sort_by")
-            allowed = {
-                "product_title",
-                "product_code_no_dashes",
-                "norm_code",
-                "-norm_code",
-            }
-            if sort_by and sort_by.lstrip("-") in {a.lstrip("-") for a in allowed}:
+            # Uniform ?sort_by= (allowing extended fields)
+            sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
+            if sort_by:
                 products = products.order_by(sort_by)
+            else:
+                products = products.order_by("product_title", "-updated_at")
 
-            data, paginator = self.paginate_and_serialize(products, request)
+            data, paginator = self.paginate_and_serialize(
+                products, request, serializer_class=ProductSearchSerializer
+            )
 
             response_data = _prepare_response_data(
                 products, data, product_code, product_title
@@ -3216,11 +3267,23 @@ class BaseProductSearchView(APIView, ProductListMixin):
             )
 
         except DatabaseError:
-            return _handle_database_error()
+            return handle_error(
+                ErrorCode.INTERNAL_SERVER_ERROR,
+                ErrorMessage.INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
         except TimeoutError:
-            return _handle_timeout_error()
+            return handle_error(
+                ErrorCode.INTERNAL_SERVER_ERROR,
+                ErrorMessage.INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            )
         except ValidationError:
-            return _handle_invalid_query_param()
+            return handle_error(
+                ErrorCode.INVALID_PARAMETER,
+                ErrorMessage.INVALID_PARAMETER,
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
         except Exception:
             logger.exception(INTERNAL_ERROR_MSG)
             return handle_error(
@@ -3250,20 +3313,34 @@ class ProductSearchUserView(BaseProductSearchView):
         return Q(is_latest=True, status="live")
 
 
+# --------------------------------------------------------------------------- #
+# Users: Search + Filter (DjangoFilter + SearchFilter)                        #
+# --------------------------------------------------------------------------- #
+
+
 class ProductUsersSearchFilterAPIView(generics.ListAPIView, ProductListMixin):
     """
     GET /api/v1/products/user/search/filter/
+      Supports:
+        - ?search= (SearchFilter on product_title, product_code_no_dashes)
+        - ProductFilter (your custom filterset)
+        - ?sort_by= (uniform custom sorting)
     """
 
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
     serializer_class = ProductSearchSerializer
     pagination_class = CustomPagination
+
+    # Keep standard filter/search backends; we’ll still apply our custom sort_by
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class = ProductFilter
     search_fields = ["product_title", "product_code_no_dashes"]
-    ordering_fields = list(dict.fromkeys([*VALID_SORT_FIELDS, "norm_code"]))
 
+    # OrderingFilter fallback fields (if someone uses ?ordering=)
+    ordering_fields = list(
+        dict.fromkeys([*VALID_SORT_FIELDS, "norm_code", "-norm_code"])
+    )
     ordering = ["product_title", "-updated_at"]
 
     def get_queryset(self):
@@ -3271,8 +3348,42 @@ class ProductUsersSearchFilterAPIView(generics.ListAPIView, ProductListMixin):
         base = self.clean_dedup_queryset(base)
         return base
 
+    def list(self, request, *args, **kwargs):
+        """
+        Override to apply uniform ?sort_by= after filter_backends while
+        preserving search/filter behavior.
+        """
+        try:
+            # Apply filter_backends first (filterset + search + default ordering)
+            qs = self.filter_queryset(self.get_queryset())
 
+            # Then enforce our uniform ?sort_by= if provided/valid
+            sorted_qs = self.get_sorted_queryset(qs, request)
+
+            data, paginator = self.paginate_and_serialize(
+                sorted_qs, request, serializer_class=ProductSearchSerializer
+            )
+            data = filter_live_languages(data)
+            return paginator.get_paginated_response(data)
+
+        except Exception:
+            logger.exception(INTERNAL_ERROR_MSG)
+            return handle_error(
+                ErrorCode.INTERNAL_SERVER_ERROR,
+                ErrorMessage.INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Users: Faceted Filter                                                       #
+# --------------------------------------------------------------------------- #
 class ProductUsersFilterView(ProductListMixin, APIView):
+    """
+    GET /api/v1/products/user/filter/
+      Faceted filters + uniform ?sort_by= support
+    """
+
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
@@ -3281,6 +3392,7 @@ class ProductUsersFilterView(ProductListMixin, APIView):
             base_q = Q(is_latest=True, status="live")
             filters = Q()
 
+            # Access type flags (mutually exclusive per your original logic)
             dl = request.GET.get("download_only", "").lower()
             do = request.GET.get("download_or_order", "").lower()
             oo = request.GET.get("order_only", "").lower()
@@ -3291,11 +3403,13 @@ class ProductUsersFilterView(ProductListMixin, APIView):
             elif oo == "true":
                 filters &= Q(tag="order_only")
 
+            # Facets
             for param, lookup in [
                 ("audiences", "update_ref__audience_ref__name"),
                 ("diseases", "update_ref__diseases_ref__name"),
                 ("vaccinations", "update_ref__vaccination_ref__name"),
                 ("program_names", "program_name"),
+                ("program_ids", "program_id"),
                 ("where_to_use", "update_ref__where_to_use_ref__name"),
                 ("alternative_type", "update_ref__alternative_type"),
                 ("product_type", "update_ref__product_type"),
@@ -3316,7 +3430,6 @@ class ProductUsersFilterView(ProductListMixin, APIView):
                     )
 
             queryset = Product.objects.filter(base_q & filters)
-            # NEW normalization pipeline
             queryset = self.clean_dedup_queryset(queryset)
 
             sorted_qs = self.get_sorted_queryset(queryset, request)
@@ -3334,7 +3447,15 @@ class ProductUsersFilterView(ProductListMixin, APIView):
             )
 
 
+# --------------------------------------------------------------------------- #
+# Admin: Faceted Filter                                                       #
+# --------------------------------------------------------------------------- #
 class ProductAdminFilterView(ProductListMixin, APIView):
+    """
+    GET /api/v1/products/admin/filter/
+      Faceted filters for admins + uniform ?sort_by=
+    """
+
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
 
@@ -3349,6 +3470,8 @@ class ProductAdminFilterView(ProductListMixin, APIView):
             "languages": "language_name__in",
             "access_type": "tag__in",
             "status": "status__in",
+            "program_names": "program_name__in",
+            "program_ids": "program_id__in",
         }
         q = Q()
         for param, lookup in mapping.items():
@@ -3356,9 +3479,10 @@ class ProductAdminFilterView(ProductListMixin, APIView):
             if vals:
                 q &= Q(**{lookup: vals})
 
-        # Defer product_code filtering to .get() where queryset is annotated.
+        # Placeholder to keep structure consistent if product_code is present;
+        # actual filtering applied on annotated norm_code below
         if request.GET.getlist("product_code"):
-            q &= Q()  # no-op placeholder to keep structure consistent
+            q &= Q()
 
         return q
 
@@ -3377,7 +3501,6 @@ class ProductAdminFilterView(ProductListMixin, APIView):
                     code_filters |= Q(norm_code__icontains=normalized)
                 qs = qs.filter(code_filters)
 
-            # NEW normalization pipeline
             qs = self._exclude_edge_spaces(qs)
             qs = self._dedupe_by_norm_code(qs)
 
@@ -3393,9 +3516,16 @@ class ProductAdminFilterView(ProductListMixin, APIView):
             )
 
 
+# --------------------------------------------------------------------------- #
+# Program-scoped: Products (with optional facets)                             #
+# --------------------------------------------------------------------------- #
 class ProgramProductsView(ProductListMixin, generics.ListAPIView):
     """
     GET /api/v1/programmes/<program_id>/products/
+      Supports:
+        - program scoping (diseases/vaccinations tied to program)
+        - optional facets (same as user filter)
+        - uniform ?sort_by=
     """
 
     serializer_class = ProductSerializer
@@ -3408,11 +3538,29 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
         user_id = request.user.id if request.user.is_authenticated else "anon"
         return f"prog_products:{program_id}:user:{user_id}:{request.get_full_path()}"
 
+    def _build_facets(self, request) -> Q:
+        q = Q()
+        for param, lookup in [
+            ("audiences", "update_ref__audience_ref__name__in"),
+            ("diseases", "update_ref__diseases_ref__name__in"),
+            ("vaccinations", "update_ref__vaccination_ref__name__in"),
+            ("where_to_use", "update_ref__where_to_use_ref__name__in"),
+            ("alternative_type", "update_ref__alternative_type__in"),
+            ("product_type", "update_ref__product_type__in"),
+            ("languages", "language_name__in"),
+            ("access_type", "tag__in"),
+        ]:
+            vals = request.GET.getlist(param)
+            if vals:
+                q &= Q(**{lookup: vals})
+        return q
+
     def get_queryset(self):
         program = get_object_or_404(Program, pk=self.kwargs["program_id"])
         diseases = Disease.objects.filter(programs=program)
         vaccinations = Vaccination.objects.filter(programs=program)
 
+        # Base program scope (live, latest)
         qs = (
             Product.objects.select_related("update_ref")
             .prefetch_related(
@@ -3428,7 +3576,12 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
             )
         )
 
-        # NEW normalization pipeline
+        # Optional facets
+        facet_q = self._build_facets(self.request)
+        if facet_q:
+            qs = qs.filter(facet_q)
+
+        # Normalize + dedupe
         qs = self.clean_dedup_queryset(qs)
         return qs
 
@@ -3438,22 +3591,55 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
         if cached:
             return Response(cached)
 
-        response = super().list(request, *args, **kwargs)
+        # Apply uniform ?sort_by= before pagination
+        qs = self.get_queryset()
+        qs = self.get_sorted_queryset(qs, request)
 
-        all_urls = extract_s3_urls(response.data["results"])
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            serializer = self.get_serializer(
+                page, many=True, context=self.get_serializer_context()
+            )
+            # Attachment-style presigns
+            all_urls = extract_s3_urls(serializer.data)
+            presigned = generate_presigned_urls(all_urls)
+            update_product_urls(serializer.data, presigned)
+
+            response = self.get_paginated_response(serializer.data)
+
+            # Include program diseases/vaccinations in the payload
+            program = get_object_or_404(Program, pk=kwargs["program_id"])
+            response.data["diseases"] = DiseaseSerializer(
+                Disease.objects.filter(programs=program), many=True
+            ).data
+            response.data["vaccinations"] = VaccinationSerializer(
+                Vaccination.objects.filter(programs=program), many=True
+            ).data
+
+            cache.set(cache_key, response.data, self.cache_timeout)
+            return response
+
+        # Non-paginated fallback (rare)
+        serializer = self.get_serializer(
+            qs, many=True, context=self.get_serializer_context()
+        )
+        data = serializer.data
+        all_urls = extract_s3_urls(data)
         presigned = generate_presigned_urls(all_urls)
-        update_product_urls(response.data["results"], presigned)
+        update_product_urls(data, presigned)
 
         program = get_object_or_404(Program, pk=kwargs["program_id"])
-        response.data["diseases"] = DiseaseSerializer(
-            Disease.objects.filter(programs=program), many=True
-        ).data
-        response.data["vaccinations"] = VaccinationSerializer(
-            Vaccination.objects.filter(programs=program), many=True
-        ).data
-
-        cache.set(cache_key, response.data, self.cache_timeout)
-        return response
+        payload = {
+            "results": data,
+            "diseases": DiseaseSerializer(
+                Disease.objects.filter(programs=program), many=True
+            ).data,
+            "vaccinations": VaccinationSerializer(
+                Vaccination.objects.filter(programs=program), many=True
+            ).data,
+        }
+        cache.set(cache_key, payload, self.cache_timeout)
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class IncompleteProductsView(View):

@@ -11,8 +11,7 @@ import boto3
 import psycopg2
 from psycopg2 import extras
 import pandas as pd
-import urllib.parse
-from urllib.parse import quote
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from typing import Any, Dict, Optional, Tuple, List
 import argparse
 
@@ -312,13 +311,113 @@ def generate_presigned_get(
 
 
 # ---------------------------
-# URL helpers
+# URL helpers (constants)
 # ---------------------------
 YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com"}
 YOUTU_BE_HOST = "youtu.be"
 
 
+# ---------------------------
+# Low-level helpers
+# ---------------------------
+def _safe_parse_url(url: str):
+    if not url:
+        return None
+    try:
+        return urlparse(url.strip())
+    except Exception:
+        return None
+
+
+def _normalize_host(netloc: str) -> str:
+    return (netloc or "").lower().split(":", 1)[0]
+
+
+def _first(q: Dict[str, List[str]], key: str) -> Optional[str]:
+    return (q.get(key) or [None])[0]
+
+
+def _valid_vid(vid: Optional[str]) -> bool:
+    return bool(vid and YOUTUBE_VIDEO_ID_RE.match(vid))
+
+
+def _build_watch(qs: Dict[str, List[str]], vid: str) -> str:
+    """Build canonical watch URL, preserving start time via t/start."""
+    params = {"v": vid}
+    start = _first(qs, "t") or _first(qs, "start")
+    if start:
+        params["t"] = start
+    return "https://www.youtube.com/watch?" + urlencode(params)
+
+
+def _normalize_pass_through(path: str, query: str) -> str:
+    """Keep original path & query; normalize to https + www.youtube.com."""
+    return urlunparse(("https", "www.youtube.com", path or "", "", query or "", ""))
+
+
+# ---------------------------
+# Host-specific handlers
+# ---------------------------
+def _from_youtu_be(path: str, qs: Dict[str, List[str]]) -> Optional[str]:
+    """Handle youtu.be/<id>[?t=..] → watch URL."""
+    vid = (path or "").lstrip("/").split("/", 1)[0]
+    return _build_watch(qs, vid) if _valid_vid(vid) else None
+
+
+def _from_watch(path: str, qs: Dict[str, List[str]]) -> Optional[str]:
+    """Handle /watch?v=<id> → watch URL."""
+    if not (path or "").startswith("/watch"):
+        return None
+    vid = _first(qs, "v")
+    return _build_watch(qs, vid) if _valid_vid(vid) else None
+
+
+def _from_shorts(path: str) -> Optional[str]:
+    """Handle /shorts/<id> → keep shorts canonical."""
+    parts = [seg for seg in (path or "").split("/") if seg]
+    if len(parts) >= 2 and parts[0] == "shorts" and _valid_vid(parts[1]):
+        return f"https://www.youtube.com/shorts/{parts[1]}"
+    return None
+
+
+def _from_embed_variants(path: str, qs: Dict[str, List[str]]) -> Optional[str]:
+    """Handle /embed/<id>, /v/<id>, /live/<id> → watch URL."""
+    parts = [seg for seg in (path or "").split("/") if seg]
+    if len(parts) >= 2 and parts[0] in {"embed", "v", "live"} and _valid_vid(parts[1]):
+        return _build_watch(qs, parts[1])
+    return None
+
+
+def _from_pass_through_paths(path: str, query: str) -> Optional[str]:
+    """
+    Pass-through for channels, handles, users, custom URLs, playlists:
+      /channel/..., /@handle, /user/..., /c/..., /playlist...
+    """
+    prefixes = ("/channel/", "/@", "/user/", "/c/", "/playlist")
+    if (path or "").startswith(prefixes):
+        return _normalize_pass_through(path, query)
+    return None
+
+
+def _from_standard_host(
+    path: str, query: str, qs: Dict[str, List[str]]
+) -> Optional[str]:
+    """
+    Try each standard-host handler in priority order.
+    Returns the first non-None canonical URL.
+    """
+    return (
+        _from_watch(path, qs)
+        or _from_shorts(path)
+        or _from_embed_variants(path, qs)
+        or _from_pass_through_paths(path, query)
+    )
+
+
+# ---------------------------
+# Public API
+# ---------------------------
 def canonicalize_youtube_url(url: str) -> Optional[str]:
     """
     Return a canonical YouTube URL or None if the input isn't a recognizable YouTube link.
@@ -330,65 +429,19 @@ def canonicalize_youtube_url(url: str) -> Optional[str]:
       - youtube.com/(embed|v|live)/<id> -> https://www.youtube.com/watch?v=<id>[&t=..]
       - Channel/user/handle/playlist links are passed through with normalized host/scheme.
     """
-    if not url:
+    p = _safe_parse_url(url)
+    if not p:
         return None
 
-    try:
-        p = urllib.parse.urlparse(url.strip())
-    except Exception:
-        return None
-
-    host = p.netloc.lower()
+    host = _normalize_host(p.netloc)
     path = p.path or ""
-    qs = urllib.parse.parse_qs(p.query)
+    qs = parse_qs(p.query)
 
-    def _first(q: Dict[str, List[str]], key: str) -> Optional[str]:
-        return (q.get(key) or [None])[0]
+    if host == YOUTU_BE_HOST:
+        return _from_youtu_be(path, qs)
 
-    def _valid_vid(vid: Optional[str]) -> bool:
-        return bool(vid and YOUTUBE_VIDEO_ID_RE.match(vid))
-
-    def _build_watch(vid: str) -> str:
-        # Preserve start time if present
-        start = _first(qs, "t") or _first(qs, "start")
-        params = {"v": vid}
-        if start:
-            params["t"] = start
-        return "https://www.youtube.com/watch?" + urllib.parse.urlencode(params)
-
-    def _normalize_pass_through() -> str:
-        # Keep original path & query but normalize scheme+host
-        return urllib.parse.urlunparse(
-            ("https", "www.youtube.com", path, "", p.query, "")
-        )
-
-    # Short-link: youtu.be/<id>
-    if host.endswith(YOUTU_BE_HOST):
-        vid = path.lstrip("/").split("/", 1)[0]
-        return _build_watch(vid) if _valid_vid(vid) else None
-
-    # Standard YouTube hosts
-    if any(host.endswith(h) for h in YOUTUBE_HOSTS):
-        # /watch?v=<id>
-        if path.startswith("/watch"):
-            vid = _first(qs, "v")
-            return _build_watch(vid) if _valid_vid(vid) else None
-
-        # /shorts/<id>  (keep as shorts canonical)
-        if path.startswith("/shorts/"):
-            parts = [s for s in path.split("/") if s]
-            vid = parts[1] if len(parts) >= 2 else None
-            return f"https://www.youtube.com/shorts/{vid}" if _valid_vid(vid) else None
-
-        # /embed/<id>, /v/<id>, /live/<id>  -> watch?v=<id>
-        parts = [s for s in path.split("/") if s]
-        if len(parts) >= 2 and parts[0] in {"embed", "v", "live"}:
-            vid = parts[1]
-            return _build_watch(vid) if _valid_vid(vid) else None
-
-        # Pass-through for channels, handles, users, custom URLs, playlists
-        if path.startswith(("/channel/", "/@", "/user/", "/c/", "/playlist")):
-            return _normalize_pass_through()
+    if host in YOUTUBE_HOSTS:
+        return _from_standard_host(path, p.query, qs)
 
     return None
 

@@ -13,8 +13,21 @@ from django.db import IntegrityError
 from psycopg2 import errors as pg_errors
 from collections import defaultdict
 from datetime import timedelta
-from django.db.models import F, Q, Value, Window
-from django.db.models.functions import Trim, Upper, Replace
+
+from django.db.models import (
+    Q,
+    F,
+    Value,
+    IntegerField,
+    Case,
+    When,
+    Window,
+)
+from django.db.models.functions import (
+    Upper,
+    Trim,
+    Replace,
+)
 from django.db.models.functions.window import RowNumber
 
 
@@ -3193,6 +3206,9 @@ class ProductSearchListMixin(ProductListMixin):
     serializer_class = ProductSearchSerializer
 
 
+# --------------------------------------------------------------------------- #
+# Search (base) — unified q= across code/title with ranking                   #
+# --------------------------------------------------------------------------- #
 class BaseProductSearchView(APIView, ProductListMixin):
     pagination_class = CustomPagination
 
@@ -3202,10 +3218,87 @@ class BaseProductSearchView(APIView, ProductListMixin):
     def postprocess_response_data(self, response_data: dict, products) -> dict:
         return response_data
 
+    @staticmethod
+    def _annotate_rank_signals(qs, q: str, q_norm: str, looks_like_code: int):
+        """
+        Adds ranking signals for product_code, norm_code, and product_title.
+        """
+        return qs.annotate(
+            # product_code signals
+            exact_code=Case(
+                When(product_code__iexact=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            starts_code=Case(
+                When(product_code__istartswith=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            contains_code=Case(
+                When(product_code__icontains=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            # norm_code signals (handles dashes/underscores/spaces)
+            exact_norm=Case(
+                When(norm_code__exact=q_norm, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            starts_norm=Case(
+                When(norm_code__startswith=q_norm, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            contains_norm=Case(
+                When(norm_code__contains=q_norm, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            # title signals
+            exact_title=Case(
+                When(product_title__iexact=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            starts_title=Case(
+                When(product_title__istartswith=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            contains_title=Case(
+                When(product_title__icontains=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            # lightweight bias if query is a single token like a code
+            code_bias=Value(looks_like_code, output_field=IntegerField()),
+        ).annotate(
+            # Weights: norm_code > raw code > title; exact > startswith > contains.
+            rank=(
+                120 * F("exact_norm")
+                + 95 * F("starts_norm")
+                + 75 * F("contains_norm")
+                + 100 * F("exact_code")
+                + 80 * F("starts_code")
+                + 60 * F("contains_code")
+                + 70 * F("exact_title")
+                + 50 * F("starts_title")
+                + 30 * F("contains_title")
+                + 10 * F("code_bias")
+            )
+        )
+
     def get(self, request, *args, **kwargs) -> Response:
         try:
+            # New unified param
+            q = (request.GET.get("q") or "").strip()
+
+            # Legacy params (kept for backward compatibility)
             product_code = request.GET.get("product_code")
             product_title = request.GET.get("product_title")
+
             if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
                 return handle_error(
                     ErrorCode.INVALID_PARAMETER,
@@ -3219,49 +3312,124 @@ class BaseProductSearchView(APIView, ProductListMixin):
                     status_code=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Build from annotated, normalized base
+            # Build base and annotate normalization
             products = Product.objects.all()
             products = self._annotate_norm_code(products)
 
-            # Scope (admin/user) via default query
+            # Scope (admin/user)
             products = products.filter(self.get_default_query())
 
-            # Search: match against normalized code
-            if product_code:
+            # -----------------------------
+            # Legacy field-specific search
+            # -----------------------------
+            if not q and product_code:
                 normalized_input = normalize_product_code(product_code)
                 products = products.filter(norm_code__icontains=normalized_input)
+                products = self._exclude_edge_spaces(products)
+                products = self._dedupe_by_norm_code(products)
 
-            if product_title:
+                sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
+                products = (
+                    products.order_by(sort_by)
+                    if sort_by
+                    else products.order_by("product_title", "-updated_at")
+                )
+
+                data, paginator = self.paginate_and_serialize(
+                    products, request, serializer_class=ProductSearchSerializer
+                )
+                response_data = _prepare_response_data(
+                    products, data, product_code, product_title
+                )
+                response_data = self.postprocess_response_data(response_data, products)
+                return paginator.get_paginated_response(
+                    response_data, status_code=status.HTTP_200_OK
+                )
+
+            if not q and product_title:
                 products = products.filter(product_title__icontains=product_title)
+                products = self._exclude_edge_spaces(products)
+                products = self._dedupe_by_norm_code(products)
 
-            # Drop edge-space codes and dedupe
+                sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
+                products = (
+                    products.order_by(sort_by)
+                    if sort_by
+                    else products.order_by("product_title", "-updated_at")
+                )
+
+                data, paginator = self.paginate_and_serialize(
+                    products, request, serializer_class=ProductSearchSerializer
+                )
+                response_data = _prepare_response_data(
+                    products, data, product_code, product_title
+                )
+                response_data = self.postprocess_response_data(response_data, products)
+                return paginator.get_paginated_response(
+                    response_data, status_code=status.HTTP_200_OK
+                )
+
+            # -----------------------------
+            # Unified q= path (recommended)
+            # -----------------------------
+            if not q:
+                # No query at all: list within scope
+                sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
+                products = (
+                    products.order_by(sort_by)
+                    if sort_by
+                    else products.order_by("product_title", "-updated_at")
+                )
+                data, paginator = self.paginate_and_serialize(
+                    products, request, serializer_class=ProductSearchSerializer
+                )
+                response_data = _prepare_response_data(products, data, None, None)
+                response_data = self.postprocess_response_data(response_data, products)
+                return paginator.get_paginated_response(
+                    response_data, status_code=status.HTTP_200_OK
+                )
+
+            # Normalize input for norm_code matching (removes -, _, spaces; uppercases)
+            try:
+                q_norm = normalize_product_code(q)
+            except NameError:
+                # Fallback if normalize_product_code isn't imported
+                q_norm = re.sub(r"[-_\s]", "", q or "").upper()
+
+            looks_like_code = 1 if re.fullmatch(r"[A-Za-z0-9_-]+", q) else 0
+
+            # Rank signals (one pass)
+            products = self._annotate_rank_signals(products, q, q_norm, looks_like_code)
+
+            # Candidate pool: any hit in raw code/title or normalized code
+            products = products.filter(
+                Q(product_code__icontains=q)
+                | Q(product_title__icontains=q)
+                | Q(norm_code__contains=q_norm)
+            )
+
+            # Clean + dedupe per your pipeline
             products = self._exclude_edge_spaces(products)
             products = self._dedupe_by_norm_code(products)
 
-            if not products.exists():
-                return Response(
-                    {"detail": ErrorMessage.PRODUCT_NOT_FOUND.value},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
-
-            # Uniform ?sort_by= (allowing extended fields)
+            # Final ordering: best rank first, then stable UI sort
             sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
-            if sort_by:
-                products = products.order_by(sort_by)
-            else:
-                products = products.order_by("product_title", "-updated_at")
+            products = (
+                products.order_by("-rank", sort_by)
+                if sort_by
+                else products.order_by("-rank", "product_title", "-updated_at")
+            )
 
             data, paginator = self.paginate_and_serialize(
                 products, request, serializer_class=ProductSearchSerializer
             )
 
+            # Keep your existing response shaping
             response_data = _prepare_response_data(
                 products, data, product_code, product_title
             )
             response_data = self.postprocess_response_data(response_data, products)
 
-            if paginator is None:
-                return Response(response_data, status=status.HTTP_200_OK)
             return paginator.get_paginated_response(
                 response_data, status_code=status.HTTP_200_OK
             )

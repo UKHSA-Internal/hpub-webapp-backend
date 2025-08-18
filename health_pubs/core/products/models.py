@@ -315,7 +315,8 @@ class Product(Page):
     @staticmethod
     def _irregular_root(code: str) -> str:
         norm = Product._normalize_code(code)
-        m = re.match(r"^([A-Z]{2,}\d{1,})[A-Z]{2,3}$", norm)
+        m = re.match(r"^([A-Z]{2,}\d+)[A-Z]{2,3}$", norm)
+
         if m:
             return m.group(1)
         m = re.match(r"^([A-Z]{2,})\d+$", norm)

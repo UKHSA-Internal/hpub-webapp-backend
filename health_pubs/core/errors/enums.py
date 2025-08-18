@@ -41,6 +41,7 @@ class ErrorCode(Enum):
     DUPLICATE_STATUS = "DUPLICATE_STATUS"
     INVALID_STATUS_TRANSITION = "INVALID_STATUS_TRANSITION"
     LANGUAGE_ID_DOES_NOT_EXIST = "LANGUAGE_ID_DOES_NOT_EXIST"
+    INVALID_PARAMETER = "INVALID_PARAMETER"
 
     def __str__(self):
         return self.value
@@ -91,6 +92,7 @@ class ErrorMessage(Enum):
     LANGUAGE_ID_DOES_NOT_EXIST = "Language ID does not exist."
     PROGRAM_NAME_DOES_NOT_EXIST = "Program name does not exist."
     INVALID_PROGRAM_OR_LANGUAGE = "Invalid program or language."
+    INVALID_PARAMETER = "Invalid parameter provided."
 
     @staticmethod
     def product_not_live(product_code):

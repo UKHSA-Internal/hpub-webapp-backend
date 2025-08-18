@@ -1,8 +1,9 @@
-import os
+import os, re
 import sys
 import uuid
 from django.utils import timezone
 from urllib.parse import quote
+from itertools import takewhile
 
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -260,21 +261,20 @@ class Product(Page):
         FieldPanel("suppress_event"),
     ]
 
+    # ---------------------------
+    # Save hook
+    # ---------------------------
     def save(self, *args, **kwargs):
         now = timezone.now()
 
         if self._state.adding:
-            # new instance…
             if self.created_at is None:
                 self.created_at = now
-            # only set updated_at on create if nobody passed one
             if self.updated_at is None:
                 self.updated_at = now
         else:
-            # existing instance: always bump updated_at
             self.updated_at = now
 
-        # keep your product_code_no_dashes logic
         if self.product_code:
             self.product_code_no_dashes = (
                 str(self.product_code).replace("-", "").replace(" ", "")
@@ -282,6 +282,9 @@ class Product(Page):
 
         super().save(*args, **kwargs)
 
+    # ---------------------------
+    # Helpers
+    # ---------------------------
     def is_due_to_publish(self):
         return (
             self.status == "draft"
@@ -293,50 +296,75 @@ class Product(Page):
         return self.product_title
 
     @staticmethod
-    def _get_core_code(code: str, required_length: int = 3) -> str:
-        """
-        Extract the first `required_length` chars of `code` if valid, else empty.
-        """
-        if not isinstance(code, str) or len(code) < required_length:
+    def _normalize_code(code: str) -> str:
+        if not isinstance(code, str):
             return ""
-        return code[:required_length]
+        return re.sub(r"[\s-]+", "", code.upper())
+
+    @staticmethod
+    def _is_standard_series_code(code: str) -> bool:
+        norm = Product._normalize_code(code)
+        return bool(re.match(r"^\d{4,}[A-Z]{2}\d{3}$", norm))
+
+    @staticmethod
+    def _standard_root(code: str) -> str:
+        norm = Product._normalize_code(code)
+        m = re.match(r"^(\d+)[A-Z]{2}\d{3}$", norm)
+        return m.group(1) if m else ""
+
+    @staticmethod
+    def _irregular_root(code: str) -> str:
+        norm = Product._normalize_code(code)
+        m = re.match(r"^([A-Z]{2,}\d+)[A-Z]{2,3}$", norm)
+
+        if m:
+            return m.group(1)
+        m = re.match(r"^([A-Z]{2,})\d+$", norm)
+        if m:
+            return m.group(1)
+        m = re.match(r"^([A-Z]{2,})", norm)
+        return m.group(1) if m else ""
+
+    @staticmethod
+    def _series_info(code: str) -> tuple[str, str]:
+        if Product._is_standard_series_code(code):
+            return "standard", Product._standard_root(code)
+        return "irregular", Product._irregular_root(code)
 
     @staticmethod
     def _get_common_prefix(a: str, b: str, min_length: int = 3) -> str:
-        """
-        Longest common prefix between `a` and `b` if at least `min_length`.
-        """
         a, b = a or "", b or ""
         matched = takewhile(lambda pair: pair[0] == pair[1], zip(a, b))
         prefix = "".join(ch for ch, _ in matched)
         return prefix if len(prefix) >= min_length else ""
 
-    def _format_language(self, data: dict, domain: str, core: str) -> dict | None:
-        """
-        Build a language dict if its core matches, else None.
-        """
+    def _format_language(
+        self, data: dict, domain: str, wanted_root: str, wanted_kind: str
+    ) -> dict | None:
         code = data.get("product_code")
-        if self._get_core_code(code) != core:
+        if not code:
+            return None
+        _, c_root = self._series_info(code)
+        if c_root != wanted_root:
             return None
 
-        title = data.get("product_title") or ""
+        title = (data.get("product_title") or "").strip()
         if not title:
-            logger.warning("No title for %r", code)
             return None
 
-        lang_name = data.get("language_name", "")
-        version = data.get("version_number", 0)
+        lang_name = data.get("language_name", "") or ""
+        version = int(data.get("version_number") or 0)
         alt = data.get("update_ref__alternative_type")
         ptype = data.get("update_ref__product_type")
 
-        # Legacy suffixing for migrated products
-        if version == 1 and alt:
-            suffix = ptype if alt == "not-accessible" and ptype else alt
+        if wanted_kind == "irregular" and version == 1 and alt:
+            suffix = ptype if (alt == "not-accessible" and ptype) else alt
             if suffix:
                 lang_name = f"{lang_name}: {suffix}"
 
         title_enc = quote(title, safe="")
         code_enc = quote(code, safe="")
+
         return {
             "language_name": lang_name,
             "product_url": f"{domain}/{title_enc}/{code_enc}",
@@ -345,37 +373,27 @@ class Product(Page):
 
     @property
     def existing_languages(self) -> list[dict]:
-        """
-        Retrieve other live & latest products in this program,
-        preferring matching product_key, then core code.
-        Applies legacy suffixing only for version 1 products.
-        """
-        # 1) Base domain
         try:
             domain = Config().get_hpub_base_api_url().rstrip("/")
-        except Exception as e:
-            logger.error("Config error: %s", e)
-            return []
+        except Exception:
+            domain = ""
 
-        # 2) Core of our code
         code = getattr(self, "product_code", None)
         if not isinstance(code, str):
-            logger.error("Missing product_code on %r", self)
             return []
-        core = self._get_core_code(code)
-        if not core:
+        kind, root = self._series_info(code)
+        if not root:
             return []
 
-        # 3) Build queryset
         qs = Product.objects.filter(
             program_id=self.program_id, is_latest=True, status="live"
         ).exclude(pk=self.pk)
 
         if self.product_key:
             keyed = qs.filter(product_key=self.product_key)
-            qs = keyed if keyed.exists() else qs
+            if keyed.exists():
+                qs = keyed
 
-        # 4) Fetch and format
         vals = qs.values(
             "language_name",
             "product_title",
@@ -386,10 +404,13 @@ class Product(Page):
             "update_ref__product_type",
         )
 
-        langs = filter(None, (self._format_language(p, domain, core) for p in vals))
-        result = list(langs)
-        logger.debug("Existing languages: %s", result)
-        return result
+        langs = [
+            formatted
+            for row in vals
+            for formatted in [self._format_language(row, domain, root, kind)]
+            if formatted is not None
+        ]
+        return langs
 
 
 #

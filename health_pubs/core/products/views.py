@@ -3518,7 +3518,7 @@ class BaseProductSearchView(APIView, ProductListMixin):
                 if product_title:
                     qs = qs.filter(product_title__icontains=product_title)
 
-                # Ranked = False
+                # Finalize response
                 return self._finalize_and_respond(
                     qs,
                     request,

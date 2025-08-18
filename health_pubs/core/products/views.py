@@ -13,8 +13,21 @@ from django.db import IntegrityError
 from psycopg2 import errors as pg_errors
 from collections import defaultdict
 from datetime import timedelta
-from django.db.models import F, Q, Value, Window
-from django.db.models.functions import Trim, Upper, Replace
+
+from django.db.models import (
+    Q,
+    F,
+    Value,
+    IntegerField,
+    Case,
+    When,
+    Window,
+)
+from django.db.models.functions import (
+    Upper,
+    Trim,
+    Replace,
+)
 from django.db.models.functions.window import RowNumber
 
 
@@ -149,9 +162,14 @@ ALLOWED_SORT_FIELDS: set[str] = set(
 
 _DIGITS = list("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 _BASE = len(_DIGITS)
+
+_DIGIT_MAP = {ch: i for i, ch in enumerate(_DIGITS)}
+_VALID_KEY_RE = re.compile(r"^[A-Z0-9]+$")
 # default TTLs (in seconds)
 CACHE_TTL = getattr(settings, "CACHE_TTL")
 
+# Remove hyphens, underscores, and whitespace, then uppercase.
+PRODUCT_CODE_NORMALIZE_RE = re.compile(r"[-_\s]+")
 
 CANONICAL_TAGS = {"download-only", "download-or-order", "order-only"}
 
@@ -169,10 +187,6 @@ def normalize_tag(raw: str) -> str:
         if close:
             cleaned = close[0]
     return cleaned
-
-
-# Remove hyphens, underscores, and whitespace, then uppercase.
-PRODUCT_CODE_NORMALIZE_RE = re.compile(r"[-_\s]+")
 
 
 def normalize_product_code(value: str) -> str:
@@ -222,34 +236,61 @@ def generate_product_key(last_key: str | None) -> str:
     return "".join(_DIGITS[pos] for pos in positions)
 
 
-def get_next_product_key(program_name: str) -> str:
-    """
-    Looks up all existing keys for this program, finds the
-    max in our custom ordering, and returns the next one.
-    """
-    # pull all keys into Python so we can do a proper numeric max
-    keys = list(
-        Product.objects.filter(program_name=program_name).values_list(
-            "product_key", flat=True
-        )
-    )
-
-    last = max(keys, key=lambda k: _key_to_int(k)) if keys else None
-    next_key = generate_product_key(last)
-    logging.info("get_next_product_key: %r → %r", last, next_key)
-    return next_key
+def _normalize_key(key: str) -> str:
+    if key is None:
+        return ""
+    return str(key).strip().upper()
 
 
 def _key_to_int(key: str) -> int:
     """
-    Converts a key like '1', '9', 'A', 'Z', '11', '1Z', etc.
-    into a plain integer so we can compare them properly.
+    Convert a base-36-like key (A-Z,0-9) into an integer.
+    Raises ValueError for invalid tokens (callers should pre-filter).
     """
+    s = _normalize_key(key)
+    if not s or not _VALID_KEY_RE.match(s):
+        raise ValueError(f"invalid product_key '{key}'")
     value = 0
-    for ch in key:
-        idx = _DIGITS.index(ch)
-        value = value * _BASE + idx
+    for ch in s:
+        value = value * _BASE + _DIGIT_MAP[ch]
     return value
+
+
+def get_next_product_key(program_name: str) -> str:
+    """
+    Fetch existing keys for this program, ignore malformed ones,
+    and compute the next key from the max valid key.
+    """
+    keys_qs = Product.objects.filter(program_name=program_name).values_list(
+        "product_key", flat=True
+    )
+
+    valid_keys, invalid_keys = [], []
+    for raw in keys_qs:
+        s = _normalize_key(raw)
+        if s and _VALID_KEY_RE.match(s):
+            valid_keys.append(s)
+        else:
+            invalid_keys.append(raw)
+
+    if invalid_keys:
+        logging.warning(
+            "get_next_product_key: ignoring %d invalid product_key(s) for program '%s' "
+            "(showing up to 5): %s",
+            len(invalid_keys),
+            program_name,
+            invalid_keys[:5],
+        )
+
+    last = max(valid_keys, key=_key_to_int) if valid_keys else None
+    next_key = generate_product_key(last)  # should handle None
+    logging.info(
+        "get_next_product_key: %r → %r (from %d valid keys)",
+        last,
+        next_key,
+        len(valid_keys),
+    )
+    return next_key
 
 
 def get_next_version_number(program_id, product_key, iso_language_code):
@@ -831,6 +872,11 @@ class ProductUtilsMixin:
     def _create_order_limit_page(
         self, product: "Product", org: "Organization", lim_val: int
     ) -> bool:
+        # idempotency guard — avoid duplicates
+        if OrderLimitPage.objects.filter(
+            product_ref=product, organization_ref=org
+        ).exists():
+            return False
         ol = OrderLimitPage(
             title=f"Order limit for {org.name}",
             slug=f"ol-{org.id}-{uuid.uuid4().hex[:6]}",
@@ -1382,6 +1428,61 @@ class ProductUtilsMixin:
             "errors": errors,
         }
 
+    # ------------------------------------------------------------------ #
+    # NEW: external-key based defaults (robust backfill)                 #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _default_limits_by_external() -> Dict[str, int]:
+        """
+        Map Organization.external_key -> default limit.
+        Based on your DB:
+          NH (NHS), VS (Voluntary Service), LG, SH, GV, ED, PH, PC, SC, PRI.
+        Excludes CR/CRC intentionally.
+        """
+        return {
+            "NH": 500,  # NHS
+            "VS": 100,  # Voluntary Service
+            "LG": 500,  # Local Government
+            "SH": 100,  # Stake Holder
+            "GV": 100,  # Government
+            "ED": 100,  # Education
+            "PH": 5,  # Private Health
+            "PC": 5,  # Private Company
+            "SC": 500,  # Social Care
+            "PRI": 5,  # Private
+        }
+
+    def ensure_default_order_limits(self, product: "Product") -> List[str]:
+        """
+        Create any missing defaults for this product using Organization.external_key.
+        Returns list of created organization names (idempotent).
+        """
+        created: List[str] = []
+        defaults = self._default_limits_by_external()
+
+        # orgs already present for this product
+        existing_org_ids = set(
+            OrderLimitPage.objects.filter(product_ref=product).values_list(
+                "organization_ref_id", flat=True
+            )
+        )
+
+        # candidate orgs by external_key
+        target_orgs = list(
+            Organization.objects.filter(external_key__in=list(defaults.keys()))
+        )
+
+        for org in target_orgs:
+            if org.id in existing_org_ids:
+                continue
+            lim = defaults.get(org.external_key)
+            if lim is None:
+                continue
+            if self._create_order_limit_page(product, org, lim):
+                created.append(org.name)
+
+        return created
+
 
 class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
     authentication_classes: List = []
@@ -1607,6 +1708,50 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
             }
 
         return Response(grouped)
+
+    # ------------------------------------------------------------------ #
+    # NEW: API — fill missing order limits using external_key            #
+    # ------------------------------------------------------------------ #
+    @action(detail=False, methods=["post"], url_path="fill-missing-order-limits")
+    def fill_missing_order_limits(self, request: HttpRequest):
+        """
+        Back-fill default OrderLimitPage rows for products.
+
+        Optional JSON body:
+          {
+            "product_codes": ["2023004-Leaflet-English", "..."],  # subset; if omitted, all products
+            "dry_run": true                                       # simulate without committing
+          }
+
+        Returns per-product orgs created and total count.
+        """
+        qs = Product.objects.all()
+        product_codes = request.data.get("product_codes")
+        if product_codes:
+            codes = [str(pc).strip() for pc in product_codes if str(pc).strip()]
+            qs = qs.filter(product_code__in=codes)
+
+        dry_run = bool(request.data.get("dry_run"))
+        total_created = 0
+        per_product: Dict[str, List[str]] = {}
+
+        with transaction.atomic():
+            for product in qs.iterator():
+                created = self.ensure_default_order_limits(product)
+                per_product[product.product_code] = created
+                total_created += len(created)
+
+            if dry_run:
+                transaction.set_rollback(True)
+
+        return Response(
+            {
+                "message": "Backfill complete.",
+                "order_limits_created": total_created,
+                "per_product": per_product,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class PresignedUrlMixin:
@@ -3193,6 +3338,11 @@ class ProductSearchListMixin(ProductListMixin):
     serializer_class = ProductSearchSerializer
 
 
+# --------------------------------------------------------------------------- #
+# Search (base) — unified q= across code/title with ranking                   #
+# --------------------------------------------------------------------------- #
+
+
 class BaseProductSearchView(APIView, ProductListMixin):
     pagination_class = CustomPagination
 
@@ -3202,10 +3352,148 @@ class BaseProductSearchView(APIView, ProductListMixin):
     def postprocess_response_data(self, response_data: dict, products) -> dict:
         return response_data
 
+    # ---------------------------
+    # Helpers (new)
+    # ---------------------------
+    @staticmethod
+    def _normalize_term(term: str) -> str:
+        try:
+            return normalize_product_code(term)
+        except NameError:
+            return re.sub(r"[-_\s]", "", (term or "")).upper()
+
+    def _base_scoped_queryset(self):
+        qs = Product.objects.all()
+        qs = self._annotate_norm_code(qs)
+        return qs.filter(self.get_default_query())
+
+    def _finalize_and_respond(
+        self,
+        qs,
+        request,
+        *,
+        ranked: bool,
+        product_code: str | None,
+        product_title: str | None,
+    ) -> Response:
+        # Clean + dedupe
+        qs = self._exclude_edge_spaces(qs)
+        qs = self._dedupe_by_norm_code(qs)
+
+        # Empty? -> 404 (consistent with prior behavior)
+        if not qs.exists():
+            return Response(
+                {"detail": ErrorMessage.PRODUCT_NOT_FOUND.value},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Sorting (rank-aware vs normal)
+        sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
+        if ranked:
+            if sort_by:
+                qs = qs.order_by("-rank", sort_by)
+            else:
+                qs = qs.order_by("-rank", "product_title", "-updated_at")
+        else:
+            qs = (
+                qs.order_by(sort_by)
+                if sort_by
+                else qs.order_by("product_title", "-updated_at")
+            )
+
+        # Serialize + paginate
+        data, paginator = self.paginate_and_serialize(
+            qs, request, serializer_class=ProductSearchSerializer
+        )
+
+        # Shape response
+        response_data = _prepare_response_data(qs, data, product_code, product_title)
+        response_data = self.postprocess_response_data(response_data, qs)
+        return paginator.get_paginated_response(
+            response_data, status_code=status.HTTP_200_OK
+        )
+
+    @staticmethod
+    def _annotate_rank_signals(qs, q: str, q_norm: str, looks_like_code: int):
+        """
+        Adds ranking signals for product_code, norm_code, and product_title.
+        """
+        return qs.annotate(
+            # product_code signals
+            exact_code=Case(
+                When(product_code__iexact=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            starts_code=Case(
+                When(product_code__istartswith=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            contains_code=Case(
+                When(product_code__icontains=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            # norm_code signals
+            exact_norm=Case(
+                When(norm_code__exact=q_norm, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            starts_norm=Case(
+                When(norm_code__startswith=q_norm, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            contains_norm=Case(
+                When(norm_code__contains=q_norm, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            # title signals
+            exact_title=Case(
+                When(product_title__iexact=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            starts_title=Case(
+                When(product_title__istartswith=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            contains_title=Case(
+                When(product_title__icontains=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            # lightweight bias if query is a single token like a code
+            code_bias=Value(looks_like_code, output_field=IntegerField()),
+        ).annotate(
+            rank=(
+                120 * F("exact_norm")
+                + 95 * F("starts_norm")
+                + 75 * F("contains_norm")
+                + 100 * F("exact_code")
+                + 80 * F("starts_code")
+                + 60 * F("contains_code")
+                + 70 * F("exact_title")
+                + 50 * F("starts_title")
+                + 30 * F("contains_title")
+                + 10 * F("code_bias")
+            )
+        )
+
+    # ---------------------------
+    # GET
+    # ---------------------------
     def get(self, request, *args, **kwargs) -> Response:
         try:
+            # Params
+            q = (request.GET.get("q") or "").strip()
             product_code = request.GET.get("product_code")
             product_title = request.GET.get("product_title")
+
             if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
                 return handle_error(
                     ErrorCode.INVALID_PARAMETER,
@@ -3219,51 +3507,43 @@ class BaseProductSearchView(APIView, ProductListMixin):
                     status_code=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Build from annotated, normalized base
-            products = Product.objects.all()
-            products = self._annotate_norm_code(products)
+            qs = self._base_scoped_queryset()
 
-            # Scope (admin/user) via default query
-            products = products.filter(self.get_default_query())
+            # 1) No unified query: legacy or plain listing
+            if not q:
+                # Legacy filters (optional)
+                if product_code:
+                    norm_in = self._normalize_term(product_code)
+                    qs = qs.filter(norm_code__icontains=norm_in)
+                if product_title:
+                    qs = qs.filter(product_title__icontains=product_title)
 
-            # Search: match against normalized code
-            if product_code:
-                normalized_input = normalize_product_code(product_code)
-                products = products.filter(norm_code__icontains=normalized_input)
-
-            if product_title:
-                products = products.filter(product_title__icontains=product_title)
-
-            # Drop edge-space codes and dedupe
-            products = self._exclude_edge_spaces(products)
-            products = self._dedupe_by_norm_code(products)
-
-            if not products.exists():
-                return Response(
-                    {"detail": ErrorMessage.PRODUCT_NOT_FOUND.value},
-                    status=status.HTTP_404_NOT_FOUND,
+                # Finalize response
+                return self._finalize_and_respond(
+                    qs,
+                    request,
+                    ranked=False,
+                    product_code=product_code,
+                    product_title=product_title,
                 )
 
-            # Uniform ?sort_by= (allowing extended fields)
-            sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
-            if sort_by:
-                products = products.order_by(sort_by)
-            else:
-                products = products.order_by("product_title", "-updated_at")
+            # 2) Unified q= path
+            q_norm = self._normalize_term(q)
+            looks_like_code = 1 if re.fullmatch(r"[A-Za-z0-9_-]+", q) else 0
 
-            data, paginator = self.paginate_and_serialize(
-                products, request, serializer_class=ProductSearchSerializer
+            qs = self._annotate_rank_signals(qs, q, q_norm, looks_like_code)
+            qs = qs.filter(
+                Q(product_code__icontains=q)
+                | Q(product_title__icontains=q)
+                | Q(norm_code__contains=q_norm)
             )
 
-            response_data = _prepare_response_data(
-                products, data, product_code, product_title
-            )
-            response_data = self.postprocess_response_data(response_data, products)
-
-            if paginator is None:
-                return Response(response_data, status=status.HTTP_200_OK)
-            return paginator.get_paginated_response(
-                response_data, status_code=status.HTTP_200_OK
+            return self._finalize_and_respond(
+                qs,
+                request,
+                ranked=True,
+                product_code=product_code,
+                product_title=product_title,
             )
 
         except DatabaseError:

@@ -261,91 +261,8 @@ class Product(Page):
         FieldPanel("suppress_event"),
     ]
 
-    def save(self, *args, **kwargs):
-        now = timezone.now()
-
-        if self._state.adding:
-            # new instance…
-            if self.created_at is None:
-                self.created_at = now
-            # only set updated_at on create if nobody passed one
-            if self.updated_at is None:
-                self.updated_at = now
-        else:
-            # existing instance: always bump updated_at
-            self.updated_at = now
-
-        # keep your product_code_no_dashes logic
-        if self.product_code:
-            self.product_code_no_dashes = (
-                str(self.product_code).replace("-", "").replace(" ", "")
-            )
-
-        super().save(*args, **kwargs)
-
-    def is_due_to_publish(self):
-        return (
-            self.status == "draft"
-            and self.publish_date is not None
-            and self.publish_date <= timezone.now()
-        )
-
-    def __str__(self):
-        return self.product_title
-
-    @staticmethod
-    def _get_core_code(code: str, required_length: int = 3) -> str:
-        """
-        Extract the first `required_length` chars of `code` if valid, else empty.
-        """
-        if not isinstance(code, str) or len(code) < required_length:
-            return ""
-        return code[:required_length]
-
-    @staticmethod
-    def _get_common_prefix(a: str, b: str, min_length: int = 3) -> str:
-        """
-        Longest common prefix between `a` and `b` if at least `min_length`.
-        """
-        a, b = a or "", b or ""
-        matched = takewhile(lambda pair: pair[0] == pair[1], zip(a, b))
-        prefix = "".join(ch for ch, _ in matched)
-        return prefix if len(prefix) >= min_length else ""
-
-    def _format_language(self, data: dict, domain: str, core: str) -> dict | None:
-        """
-        Build a language dict if its core matches, else None.
-        """
-        code = data.get("product_code")
-        if self._get_core_code(code) != core:
-            return None
-
-        title = data.get("product_title") or ""
-        if not title:
-            logger.warning("No title for %r", code)
-            return None
-
-        lang_name = data.get("language_name", "")
-        version = data.get("version_number", 0)
-        alt = data.get("update_ref__alternative_type")
-        ptype = data.get("update_ref__product_type")
-
-        # Legacy suffixing for migrated products
-        if version == 1 and alt:
-            suffix = ptype if alt == "not-accessible" and ptype else alt
-            if suffix:
-                lang_name = f"{lang_name}: {suffix}"
-
-        title_enc = quote(title, safe="")
-        code_enc = quote(code, safe="")
-        return {
-            "language_name": lang_name,
-            "product_url": f"{domain}/{title_enc}/{code_enc}",
-            "iso_language_code": data.get("iso_language_code"),
-        }
-
     # ---------------------------
-    # Save hooks
+    # Save hook
     # ---------------------------
     def save(self, *args, **kwargs):
         now = timezone.now()
@@ -380,70 +297,37 @@ class Product(Page):
 
     @staticmethod
     def _normalize_code(code: str) -> str:
-        """
-        Uppercase + strip spaces/dashes for pattern matching.
-        """
         if not isinstance(code, str):
             return ""
         return re.sub(r"[\s-]+", "", code.upper())
 
     @staticmethod
     def _is_standard_series_code(code: str) -> bool:
-        """
-        STANDARD series format: digits + 2 letters (lang) + 3 digits.
-        e.g., 2184668EN001
-        """
         norm = Product._normalize_code(code)
         return bool(re.match(r"^\d{4,}[A-Z]{2}\d{3}$", norm))
 
     @staticmethod
     def _standard_root(code: str) -> str:
-        """
-        For STANDARD codes, the 'root' is the leading digit run.
-        e.g., 2184668EN001 -> 2184668
-        """
         norm = Product._normalize_code(code)
         m = re.match(r"^(\d+)[A-Z]{2}\d{3}$", norm)
         return m.group(1) if m else ""
 
     @staticmethod
     def _irregular_root(code: str) -> str:
-        """
-        For IRREGULAR/MIGRATED codes, derive a stable root:
-        - MBG01RO -> MBG01
-        - MBG01BEN -> MBG01
-        - MBG01CHS -> MBG01
-        - MBG01DE -> MBG01
-        - VU360 -> VU
-        - VU359 -> VU
-        Falls back to leading letters if nothing else matches.
-        """
         norm = Product._normalize_code(code)
-
-        # MBG01RO / MBG01BEN / ... => group 1 is MBG01
         m = re.match(r"^([A-Z]{2,}\d{1,})[A-Z]{2,3}$", norm)
         if m:
             return m.group(1)
-
-        # VU360 / VU359 => group 1 is VU
         m = re.match(r"^([A-Z]{2,})\d+$", norm)
         if m:
             return m.group(1)
-
-        # Fallback: leading letters as minimal root
         m = re.match(r"^([A-Z]{2,})", norm)
         return m.group(1) if m else ""
 
     @staticmethod
     def _series_info(code: str) -> tuple[str, str]:
-        """
-        Returns (kind, root)
-          kind ∈ {"standard", "irregular", ""}
-          root: derived root string used for sibling matching
-        """
         if Product._is_standard_series_code(code):
             return "standard", Product._standard_root(code)
-        # Treat anything else as irregular/migrated
         return "irregular", Product._irregular_root(code)
 
     @staticmethod
@@ -456,19 +340,10 @@ class Product(Page):
     def _format_language(
         self, data: dict, domain: str, wanted_root: str, wanted_kind: str
     ) -> dict | None:
-        """
-        Build a language dict for a candidate if it matches this product's series root.
-
-        Suffix rule:
-          - STANDARD (e.g., 2184668EN001): NEVER append suffix; show plain language_name.
-          - IRREGULAR (e.g., MBG01RO): keep legacy suffix (": {suffix}") for version 1 when alt is present.
-        """
         code = data.get("product_code")
         if not code:
             return None
-
-        # The candidate must share the *same* derived root as the current product.
-        c_kind, c_root = self._series_info(code)
+        _, c_root = self._series_info(code)
         if c_root != wanted_root:
             return None
 
@@ -481,17 +356,10 @@ class Product(Page):
         alt = data.get("update_ref__alternative_type")
         ptype = data.get("update_ref__product_type")
 
-        # Suffixing behavior depends on *this product's* series kind
-        # (your requirement: standard → no suffix; irregular → keep legacy rule)
-        if wanted_kind == "irregular":
-            # Legacy suffixing for migrated products (unchanged rule)
-            if version == 1 and alt:
-                suffix = ptype if (alt == "not-accessible" and ptype) else alt
-                if suffix:
-                    lang_name = f"{lang_name}: {suffix}"
-        else:
-            # STANDARD: force plain language name (no suffix)
-            lang_name = f"{lang_name}"
+        if wanted_kind == "irregular" and version == 1 and alt:
+            suffix = ptype if (alt == "not-accessible" and ptype) else alt
+            if suffix:
+                lang_name = f"{lang_name}: {suffix}"
 
         title_enc = quote(title, safe="")
         code_enc = quote(code, safe="")
@@ -504,25 +372,11 @@ class Product(Page):
 
     @property
     def existing_languages(self) -> list[dict]:
-        """
-        Retrieve other live & latest products in this program for the *same series*:
-          - Prefer same product_key if that returns siblings.
-          - Otherwise, match by derived series root:
-              * STANDARD → numeric root (leading digits)
-              * IRREGULAR → heuristic root (e.g., MBG01 from MBG01RO; VU from VU360)
-
-        Suffix rule:
-          - STANDARD: show only `language_name` (no suffix).
-          - IRREGULAR: keep legacy suffix `: {suffix}` (version==1 & alt present).
-        """
-        # 1) Base domain
         try:
             domain = Config().get_hpub_base_api_url().rstrip("/")
         except Exception:
-            # Don't fail language rendering if config is missing
             domain = ""
 
-        # 2) Our code & series info
         code = getattr(self, "product_code", None)
         if not isinstance(code, str):
             return []
@@ -530,20 +384,15 @@ class Product(Page):
         if not root:
             return []
 
-        # 3) Base queryset: same program, live & latest
         qs = Product.objects.filter(
-            program_id=self.program_id,
-            is_latest=True,
-            status="live",
+            program_id=self.program_id, is_latest=True, status="live"
         ).exclude(pk=self.pk)
 
-        # 4) Prefer same product_key, but only if that yields *any* siblings
         if self.product_key:
             keyed = qs.filter(product_key=self.product_key)
             if keyed.exists():
                 qs = keyed
 
-        # 5) Fetch & format; root check is enforced inside _format_language
         vals = qs.values(
             "language_name",
             "product_title",

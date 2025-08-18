@@ -1,3 +1,9 @@
+# file: .gitignore
+
+/files/
+/config/*
+!/config/.env.example
+
 #django/python
 *.log
 *.pot

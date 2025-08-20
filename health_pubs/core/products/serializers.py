@@ -375,7 +375,17 @@ class ProductUpdateSearchSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ProductUpdate
-        fields = ("product_downloads", "summary_of_guidance")
+        fields = (
+            "summary_of_guidance",
+            "product_downloads",
+            "available_from_choice",
+            "order_from_date",
+            "available_until_choice",
+            "order_end_date",
+            "minimum_stock_level",
+            "run_to_zero",
+            "unit_of_measure",
+        )
 
     def get_product_downloads(self, obj):
         """Return the formatted product_downloads using the shared helper."""

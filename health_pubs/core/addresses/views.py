@@ -1,6 +1,6 @@
 import logging
 import uuid
-import os
+import os, re
 import sys
 import uuid
 from django.utils.timezone import now
@@ -176,9 +176,20 @@ class AddressViewSet(viewsets.ModelViewSet):
             root.add_child(instance=parent)
             return parent
 
+    def _normalize_postcode(self, postcode: str) -> str:
+        """
+        Clean up postcode:
+        - Remove leading/trailing spaces
+        - Collapse multiple spaces inside
+        - Convert to uppercase
+        """
+        if not postcode:
+            return ""
+        return re.sub(r"\s+", " ", postcode.strip()).upper()
+
     @action(detail=False, methods=["post"], url_path="verify-address")
     def verify_address(self, request):
-        postcode = request.data.get("postcode", "").upper()
+        postcode = self._normalize_postcode(request.data.get("postcode", ""))
         building = request.data.get("building_number", "")
         if not postcode or not building:
             return Response(

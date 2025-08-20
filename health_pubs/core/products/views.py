@@ -3251,7 +3251,8 @@ class ProductListMixin(PresignedUrlMixin):
 # --------------------------------------------------------------------------- #
 # Admin: List                                                                #
 # --------------------------------------------------------------------------- #
-@method_decorator(cache_page(CACHE_TTL), name="dispatch")
+
+
 class ProductAdminListView(ProductListMixin, APIView):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]

@@ -61,8 +61,6 @@ from rest_framework.filters import OrderingFilter, SearchFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from django.conf import settings
 from django.core.cache import cache
-from django.utils.decorators import method_decorator
-from django.views.decorators.cache import cache_page
 
 from core.utils.product_recommendation_system import get_recommended_products
 from core.vaccinations.models import Vaccination
@@ -99,6 +97,7 @@ from rest_framework.status import (
     HTTP_403_FORBIDDEN,
     HTTP_404_NOT_FOUND,
 )
+from django.utils.http import http_date
 from rest_framework.views import APIView
 from wagtail.models import Page
 from collections.abc import Mapping
@@ -544,6 +543,27 @@ def filter_live_languages(products_data):
             if lang["product_url"].split("/")[-1] in live_codes
         ]
     return products_data
+
+
+# --------------------------------------------------------------------------- #
+# Helper: invalidate caches after write                                       #
+# --------------------------------------------------------------------------- #
+
+
+def invalidate_product_caches(product_code: str | None = None):
+    """
+    Optional: If your cache backend supports pattern deletes (e.g., django-redis),
+    this purges list caches and the detail cache for the product.
+    If not supported, the short TTLs still keep things fresh quickly.
+    """
+    try:
+        cache.delete_pattern("products:*")  # list/search
+        cache.delete_pattern("prog_products:*")  # program lists (if used)
+        if product_code:
+            cache.delete_pattern(f"product_detail:*:{product_code}")
+    except AttributeError:
+        # Backend doesn't support delete_pattern — rely on TTL.
+        pass
 
 
 class CustomPagination(PageNumberPagination):
@@ -1862,40 +1882,63 @@ class PresignedUrlMixin:
         return item
 
 
-@method_decorator(cache_page(CACHE_TTL), name="dispatch")
+# --------------------------------------------------------------------------- #
+# Product detail (preview) — versioned server cache + browser no-store        #
+# --------------------------------------------------------------------------- #
 class ProductDetailView(ErrorHandlingMixin, PresignedUrlMixin, viewsets.ViewSet):
     """
-    GET /api/products/{product_code}/ → JSON with presigned URLs & metadata,
-    automatically cached per-URL+user for CACHE_TTL seconds.
+    GET /api/products/{product_code}/
+
+    - Server-side cache key is versioned by Product.updated_at (second precision).
+    - Browser/CDN caching disabled via Cache-Control: no-store (+ ETag/Last-Modified).
     """
 
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [AllowAny]
 
     def retrieve(self, request, product_code=None, *args, **kwargs):
-        # product_code may be URL-encoded
         code = unquote(product_code or "")
-        cache_key = f"product_detail:{request.user.id if request.user.is_authenticated else 'anon'}:{code}"
-        cached = cache.get(cache_key)
-        if cached:
-            return JsonResponse(cached, status=status.HTTP_200_OK)
 
-        logger.info("Retrieving product details for %s", code)
         product = Product.objects.filter(product_code=code).first()
         if not product:
             logger.warning("Product not found: %s", code)
             return handle_error(
                 ErrorCode.PRODUCT_NOT_FOUND,
                 ErrorMessage.PRODUCT_NOT_FOUND,
-                status_code=status.HTTP_404_NOT_FOUND,
+                status.HTTP_404_NOT_FOUND,
             )
 
+        ver = (
+            int(product.updated_at.timestamp())
+            if getattr(product, "updated_at", None)
+            else 0
+        )
+        cache_key = f"product_detail:v{ver}:{code}"
+
+        cached = cache.get(cache_key)
+        if cached:
+            resp = JsonResponse(cached, status=status.HTTP_200_OK)
+            resp["Cache-Control"] = "no-store"
+            resp["ETag"] = f'W/"{code}-{ver}"'
+            if product.updated_at:
+                resp["Last-Modified"] = http_date(product.updated_at.timestamp())
+            return resp
+
+        logger.info("Retrieving product details for %s", code)
         data = ProductSerializer(product, context={"request": request}).data
         self._process_presigned_urls(data)
-        cache.set(cache_key, data, CACHE_TTL)
 
-        logger.info("Returning details for product %s", code)
-        return JsonResponse(data, status=status.HTTP_200_OK)
+        # 1-second default if not provided
+        ttl = getattr(settings, "CACHE_TTL_DETAIL", 1)
+        if ttl and ttl > 0:
+            cache.set(cache_key, data, ttl)
+
+        resp = JsonResponse(data, status=status.HTTP_200_OK)
+        resp["Cache-Control"] = "no-store"
+        resp["ETag"] = f'W/"{code}-{ver}"'
+        if product.updated_at:
+            resp["Last-Modified"] = http_date(product.updated_at.timestamp())
+        return resp
 
 
 class ProductDetailDelete(ErrorHandlingMixin, View):
@@ -3094,18 +3137,18 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
 
 
 # --------------------------------------------------------------------------- #
-# Core mixin with sorting + normalization/dedupe                              #
+# Core mixin with sorting + normalization/dedupe + list caching               #
 # --------------------------------------------------------------------------- #
 class ProductListMixin(PresignedUrlMixin):
     """
-    Handles sorting, pagination + S3 presigning (both attachment and inline),
-    with per-request caching of raw data list.
+    Sorting, pagination, S3 presigning (attachment + inline),
+    with per-request caching of the serialized page data.
     Also normalizes/dedupes by product_code to avoid 'ABC' vs 'ABC ' duplicates.
     """
 
     serializer_class = ProductSerializer
     include_request_context = False
-    cache_timeout = CACHE_TTL
+    cache_timeout = getattr(settings, "CACHE_TTL_LIST", 30)
     pagination_class = CustomPagination
 
     # ---------------------------
@@ -3113,11 +3156,6 @@ class ProductListMixin(PresignedUrlMixin):
     # ---------------------------
     @staticmethod
     def _annotate_norm_code(qs):
-        """
-        Adds:
-          - code_trim: product_code with leading/trailing whitespace trimmed
-          - norm_code: UPPER(TRIM(product_code)) with '-', '_', and spaces removed
-        """
         return qs.annotate(
             code_trim=Trim(F("product_code")),
             norm_code=Upper(
@@ -3135,16 +3173,10 @@ class ProductListMixin(PresignedUrlMixin):
 
     @staticmethod
     def _exclude_edge_spaces(qs):
-        """
-        Keep only rows whose product_code equals its trimmed version (no leading/trailing spaces).
-        """
         return qs.filter(product_code=F("code_trim"))
 
     @staticmethod
     def _dedupe_by_norm_code(qs):
-        """
-        Keep only the latest row per normalized code, based on updated_at DESC.
-        """
         return (
             qs.annotate(
                 rn=Window(
@@ -3158,22 +3190,16 @@ class ProductListMixin(PresignedUrlMixin):
         )
 
     def clean_dedup_queryset(self, qs):
-        """
-        Pipeline: annotate -> exclude trailing/leading spaces -> dedupe by normalized code.
-        """
         qs = self._annotate_norm_code(qs)
         qs = self._exclude_edge_spaces(qs)
         qs = self._dedupe_by_norm_code(qs)
         return qs
 
     # ---------------------------
-    # Sorting helpers (uniform ?sort_by= across endpoints)
+    # Sorting helpers
     # ---------------------------
     @staticmethod
     def _normalize_sort_param(sort_by: Optional[str]) -> Optional[str]:
-        """
-        Normalize incoming sort string (strip leading whitespace) and validate against allowlist.
-        """
         if not sort_by:
             return None
         sort_by = sort_by.lstrip()
@@ -3181,35 +3207,34 @@ class ProductListMixin(PresignedUrlMixin):
 
     def get_sorted_queryset(self, queryset, request):
         sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
-        if sort_by:
-            return queryset.order_by(sort_by)
-        # Safe default ordering if none provided; stable, deterministic
-        return queryset.order_by("product_title", "-updated_at")
+        return (
+            queryset.order_by(sort_by)
+            if sort_by
+            else queryset.order_by("product_title", "-updated_at")
+        )
 
     # ---------------------------
-    # Pagination + presigning
+    # Pagination + presigning + cache
     # ---------------------------
     def get_cache_key(self, request, prefix="products"):
-        user_id = request.user.id if request.user.is_authenticated else "anon"
+        user_id = (
+            request.user.id
+            if getattr(request, "user", None) and request.user.is_authenticated
+            else "anon"
+        )
         return f"{prefix}:user:{user_id}:{request.get_full_path()}"
 
     def get_serializer_context(self):
-        """
-        Override DRF method signature: no args.
-        Only include 'request' if flagged.
-        """
         return {"request": self.request} if self.include_request_context else {}
 
     def paginate_and_serialize(
-        self,
-        queryset,
-        request,
-        serializer_class=None,
-        use_direct_update=False,
+        self, queryset, request, serializer_class=None, use_direct_update=False
     ):
         """
-        Returns (data_list, paginator).
-        Caches only the data_list, never a Response.
+        Returns (data_list, paginator). Caches only the serialized 'page' list, never a Response.
+        NOTE: We still call paginate_queryset even on cache hits to keep paginator state
+        (next/prev links, counts). If you want to avoid the DB hit entirely on cache hits,
+        cache pagination metadata too.
         """
         cache_key = self.get_cache_key(request)
         cached = cache.get(cache_key)
@@ -3225,11 +3250,9 @@ class ProductListMixin(PresignedUrlMixin):
             page, many=True, context=ctx
         )
 
-        # 1) Gather & presign "download" URLs
+        # 1) Gather & presign "download" URLs and inject (attachment style)
         urls = extract_s3_urls(serializer.data)
         presigned = generate_presigned_urls(urls)
-
-        # 2) Inject attachment-style presigned URLs into the serialized data
         if use_direct_update:
             _update_product_downloads_with_presigned_urls(page, presigned)
             serializer = (serializer_class or self.serializer_class)(
@@ -3240,23 +3263,24 @@ class ProductListMixin(PresignedUrlMixin):
 
         data = serializer.data
 
-        # 3) Inject inline presigned URLs (and merge metadata) for every item
+        # 2) Inline presigned URLs + merge metadata for each item
         for item in data:
             self._process_presigned_urls(item)
 
-        cache.set(cache_key, data, self.cache_timeout)
+        if self.cache_timeout and self.cache_timeout > 0:
+            cache.set(cache_key, data, self.cache_timeout)
+
         return data, paginator
 
 
 # --------------------------------------------------------------------------- #
-# Admin: List                                                                #
+# Admin: List (fresh)                                                         #
 # --------------------------------------------------------------------------- #
-
-
 class ProductAdminListView(ProductListMixin, APIView):
     authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsAuthenticated]
     include_request_context = True
+    cache_timeout = 0  # always fresh for admins
 
     def get(self, request, *args, **kwargs):
         logger.info("ProductAdminListView GET called")
@@ -3270,10 +3294,7 @@ class ProductAdminListView(ProductListMixin, APIView):
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
 
-            # Normalize + dedupe
             qs = self.clean_dedup_queryset(qs)
-
-            # Uniform ?sort_by=
             sorted_qs = self.get_sorted_queryset(qs, request)
 
             data, paginator = self.paginate_and_serialize(
@@ -3283,24 +3304,22 @@ class ProductAdminListView(ProductListMixin, APIView):
             return paginator.get_paginated_response(
                 data, status_code=status.HTTP_200_OK
             )
-
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return handle_exceptions(e)
 
 
 # --------------------------------------------------------------------------- #
-# Users: List (live, latest)                                                 #
+# Users: List (briefly cached)                                                #
 # --------------------------------------------------------------------------- #
-@method_decorator(cache_page(CACHE_TTL), name="dispatch")
 class ProductUsersListView(ProductListMixin, APIView):
     """
-    GET /api/v1/products/users/all/
-      ?page=1
-      &sort_by=-created_at
+    GET /api/v1/products/users/all/?page=1&sort_by=-created_at
     """
 
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
+    include_request_context = True
+    cache_timeout = getattr(settings, "CACHE_TTL_LIST", 30)
 
     def get(self, request, *args, **kwargs):
         try:
@@ -3318,9 +3337,8 @@ class ProductUsersListView(ProductListMixin, APIView):
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
             data = filter_live_languages(data)
             return paginator.get_paginated_response(data)
-
-        except Exception as e:
-            logger.exception(f"Unhandled exception in ProductUsersListView.get, {e}")
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Unhandled exception in ProductUsersListView.get, %s", e)
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,
@@ -3813,7 +3831,7 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
     pagination_class = CustomPagination
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
-    cache_timeout = CACHE_TTL
+    cache_timeout = settings.CACHE_TTL_LIST
 
     def get_cache_key(self, request, program_id):
         user_id = request.user.id if request.user.is_authenticated else "anon"

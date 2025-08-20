@@ -68,9 +68,13 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 
 if DEBUG:
-    CACHE_TTL = 0  # effectively disables caching
+    CACHE_TTL = 0
+    CACHE_TTL_DETAIL = 0
+    CACHE_TTL_LIST = 0
 else:
-    CACHE_TTL = 60 * 1  # 1 minute in prod
+    CACHE_TTL = 60
+    CACHE_TTL_DETAIL = 1  # 1s — effectively “negligible”
+    CACHE_TTL_LIST = 30  # list/search ok to be a bit cached
 
 
 PRESIGNED_URL_TTL = 60 * 60  # 1 hour

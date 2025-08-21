@@ -11,7 +11,7 @@ class invoicing_client(Enum):
 
 
 class product_group(Enum):
-    product_group_name = "Immunisation (HPISD-1)"
+    product_group_name = "Immunisation (HPISD-I)"
 
 
 class required_event_fields_draft(Enum):

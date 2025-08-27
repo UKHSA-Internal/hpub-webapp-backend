@@ -139,9 +139,9 @@ class AddressViewSet(viewsets.ModelViewSet):
         try:
             ok = verify_address(addr)
         except Exception as e:
-            logger.exception("Unexpected error verifying address")
+            logger.exception(f"Unexpected error verifying address, {e}")
             return Response(
-                {"error": "Address verification service error", "details": str(e)},
+                {"error": "Address verification service error"},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 

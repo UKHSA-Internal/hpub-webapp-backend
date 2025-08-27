@@ -135,11 +135,20 @@ class AddressViewSet(viewsets.ModelViewSet):
         if not Address.objects.filter(user_ref=user_ref).exists():
             addr.is_default = True
 
-        # external verify
-        if not verify_address(addr):
+        # external verify (now returns details on failure)
+        try:
+            ok = verify_address(addr)
+        except Exception as e:
+            logger.exception(f"Unexpected error verifying address: {e}")
             return Response(
-                {"error": "Address verification failed."},
-                status=status.HTTP_404_NOT_FOUND,
+                {"error": "Address verification service error"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        if not ok:
+            return Response(
+                {"error": "Address verification failed"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # always add_child() so Wagtail sets parent, path, depth
@@ -257,8 +266,9 @@ class AddressViewSet(viewsets.ModelViewSet):
         try:
             token = get_oauth_token()
         except Exception as e:
+            logger.exception(f"Error obtaining OAuth token: {e}")
             return Response(
-                {"error": "Failed to obtain token", "details": str(e)},
+                {"error": "Failed to obtain token"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
@@ -273,13 +283,15 @@ class AddressViewSet(viewsets.ModelViewSet):
             )
             resp.raise_for_status()
         except requests.HTTPError as e:
+            logger.error(f"HTTP error during geocoding: {e}")
             return Response(
-                {"error": "HTTP error", "details": str(e)},
+                {"error": "HTTP error"},
                 status=resp.status_code,
             )
         except Exception as e:
+            logger.exception(f"Unexpected error during geocoding: {e}")
             return Response(
-                {"error": "Unexpected error", "details": str(e)},
+                {"error": "Unexpected error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 

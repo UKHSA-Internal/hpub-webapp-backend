@@ -48,8 +48,8 @@ CORS_ALLOW_CREDENTIALS = True
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
     "x-session-id",
+    "idempotency-key",
 ]
-
 
 CSRF_TRUSTED_ORIGINS = config.get_csrf_trusted_origins()
 

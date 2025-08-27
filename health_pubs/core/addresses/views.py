@@ -135,11 +135,20 @@ class AddressViewSet(viewsets.ModelViewSet):
         if not Address.objects.filter(user_ref=user_ref).exists():
             addr.is_default = True
 
-        # external verify
-        if not verify_address(addr):
+        # external verify (now returns details on failure)
+        try:
+            ok = verify_address(addr)
+        except Exception as e:
+            logger.exception("Unexpected error verifying address")
             return Response(
-                {"error": "Address verification failed."},
-                status=status.HTTP_404_NOT_FOUND,
+                {"error": "Address verification service error", "details": str(e)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        if not ok:
+            return Response(
+                {"error": "Address verification failed"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # always add_child() so Wagtail sets parent, path, depth

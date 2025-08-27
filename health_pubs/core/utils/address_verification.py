@@ -42,7 +42,7 @@ def verify_address(address_instance):
     """Call the matchAddress API to verify the address."""
     full_address = f"{address_instance.address_line1}, {address_instance.address_line2 or ''}, {address_instance.postcode}"
 
-    match_address_payload = {
+    payload = {
         "operationId": "matchAddress",
         "callingApplication": "HPUB",
         "address": full_address.strip(", "),
@@ -50,28 +50,62 @@ def verify_address(address_instance):
         "fuzzy": True,
     }
 
-    token = get_oauth_token()
+    try:
+        token = get_oauth_token()
+    except Exception as e:
+        logger.error("Failed to obtain OAuth token: %s", e)
+        return False
+
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "User-Agent": "PythonDevApplication",
     }
 
-    match_address_url = f"{base_url}/matchAddress"
-    match_response = requests.post(
-        match_address_url, json=match_address_payload, headers=headers
-    )
-
-    if match_response.status_code == 200:
-        matched_addresses = match_response.json().get("matchedAddresses", [])[0]
-        if (
-            matched_addresses
-            and address_instance.postcode.strip().lower()
-            == matched_addresses.get("postcode").strip().lower()
-        ):
-            address_instance.verified = True
-            return True
-
-    else:
-        logger.warning("Failed to verify address: %s", match_response.json())
+    try:
+        resp = requests.post(
+            f"{base_url}/matchAddress",
+            json=payload,
+            headers=headers,
+            timeout=10,  # prevent hanging
+        )
+    except requests.RequestException as e:
+        logger.error("Request to matchAddress failed: %s", e)
         return False
+
+    if resp.status_code != 200:
+        # Fallback if body is not JSON
+        try:
+            details = resp.json()
+        except Exception:
+            details = resp.text
+        logger.warning(
+            "Address verification failed (HTTP %s): %s",
+            resp.status_code,
+            str(details)[:500],
+        )
+        return False
+
+    # Try parse JSON safely
+    try:
+        data = resp.json()
+    except Exception:
+        logger.error("Address verify API returned non-JSON: %s", resp.text[:200])
+        return False
+
+    matches = data.get("matchedAddresses", [])
+    if not matches:
+        logger.info("No matched addresses returned for %s", full_address)
+        return False
+
+    # Take first match and compare postcode
+    match = matches[0]
+    if (
+        match
+        and address_instance.postcode.strip().lower()
+        == (match.get("postcode") or "").strip().lower()
+    ):
+        address_instance.verified = True
+        return True
+
+    return False

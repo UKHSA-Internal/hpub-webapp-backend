@@ -68,14 +68,63 @@ USE_X_FORWARDED_HOST = True
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 
+# --- caching ---
 if DEBUG:
-    CACHE_TTL = 0
-    CACHE_TTL_DETAIL = 0
-    CACHE_TTL_LIST = 0
+    CACHE_TTL = 60
+    CACHE_TTL_DETAIL = 3
+    CACHE_TTL_LIST = 30
 else:
     CACHE_TTL = 60
-    CACHE_TTL_DETAIL = 1  # 1s — effectively “negligible”
-    CACHE_TTL_LIST = 30  # list/search ok to be a bit cached
+    CACHE_TTL_DETAIL = 60
+    CACHE_TTL_LIST = 30
+
+# --- presign/metadata feature flags ---
+PRESIGNED_URL_TTL = 3600
+PRESIGN_IN_LISTS = True
+
+# Minimal metadata is always on (size/type via S3 Head)
+FILE_METADATA_ENABLED = True  # governs enrichment
+FILE_METADATA_DEEP_PROBE_DOCS = True  # allow page count / page size for docs
+MAX_METADATA_BYTES = 2 * 1024 * 1024  # cap deep probes to ≤ 2MB (0/None => unlimited)
+
+# Per-request time budget for deep probes (ms); when exceeded -> fast path only
+FILE_METADATA_TIME_BUDGET_MS = 300
+
+# Limit deep metadata to specific slots to keep responses snappy
+FILE_METADATA_SLOTS = ["main_download_url"]  # deep probe only for these slots
+
+# Audio/video metadata via ffprobe against presigned URL
+FFPROBE_TIMEOUT_SECS = 3
+
+# Which file types your system handles
+DOC_FILE_TYPES = [
+    "pdf",
+    "pptx",
+    "txt",
+    "docx",
+    "doc",
+    "odt",
+    "ppt",
+    "xlsx",
+]
+
+# Doc types that benefit from deep probing (page count / size)
+DOC_DEEP_PROBE_EXTS = [
+    "pdf",
+    "pptx",
+    "docx",
+    "doc",
+    "odt",
+    "ppt",
+]
+
+# (Optional) Page counts for legacy DOC/ODT/PPT by converting to PDF (off by default)
+DOC_PAGECOUNT_VIA_LIBREOFFICE = False
+LIBREOFFICE_BIN = "/usr/bin/soffice"
+LIBREOFFICE_TIMEOUT_SECS = 25
+
+# Cache TTL (seconds) for file metadata (keyed by S3 ETag)
+FILE_METADATA_CACHE_TTL = 6 * 60 * 60  # 6h
 
 
 PRESIGNED_URL_TTL = 60 * 60  # 1 hour

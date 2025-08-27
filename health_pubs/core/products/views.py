@@ -1775,169 +1775,231 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
 
 
 class PresignedUrlMixin:
-    """Handles presigned URL extraction and injection, including metadata."""
+    """
+    Presigns S3 URLs and (optionally) enriches with metadata.
+    - Fast path: size/type only (S3 Head) for all downloads.
+    - Deep probes (page count / size; audio/video duration) limited by settings and time budget.
+    """
 
-    def _process_presigned_urls(self, response_data):
+    _ALL_SLOTS: tuple[str, ...] = (
+        "main_download_url",
+        "web_download_url",
+        "print_download_url",
+        "transcript_url",
+        "video_url",
+    )
+
+    # ----------------------------
+    # URL collection
+    # ----------------------------
+    def _collect_s3_urls(
+        self, product_downloads: Dict[str, Any], *, slots: List[str]
+    ) -> List[str]:
+        urls: List[str] = []
+
+        def add_dict(v: Any) -> None:
+            if isinstance(v, dict):
+                u = v.get("s3_bucket_url")
+                if u:
+                    urls.append(u)
+
+        for slot in slots:
+            val = product_downloads.get(slot)
+            if isinstance(val, dict):
+                add_dict(val)
+            elif isinstance(val, list):
+                for it in val:
+                    add_dict(it)
+
+        # de-dupe while preserving order
+        seen, out = set(), []
+        for u in urls:
+            if u and u not in seen:
+                seen.add(u)
+                out.append(u)
+        return out
+
+    # ----------------------------
+    # Single item enrichment
+    # ----------------------------
+    def _apply_metadata_and_presigned(
+        self,
+        item: Any,
+        presigned: Dict[str, str],
+        inline_presigned: Dict[str, str],
+        metadata_dict: Dict[str, Dict[str, Any]],
+    ) -> Any:
+        if isinstance(item, list):
+            return [
+                self._apply_metadata_and_presigned(
+                    i, presigned, inline_presigned, metadata_dict
+                )
+                for i in item
+            ]
+        if not isinstance(item, dict):
+            return item
+
+        s3_url = item.get("s3_bucket_url")
+        if not s3_url:
+            return item
+
+        p = presigned.get(s3_url)
+        if p:
+            item["URL"] = p
+            md = metadata_dict.get(p)
+            if md:
+                # always size/type if available
+                if "file_size" in md:
+                    item["file_size"] = md["file_size"]
+                if "file_type" in md:
+                    item["file_type"] = md["file_type"]
+                # opportunistic extras
+                for k in (
+                    "page_size",
+                    "number_of_pages",
+                    "dimensions",
+                    "duration",
+                    "number_of_slides",
+                    "number_of_paragraphs",
+                    "number_of_sheets",
+                    "number_of_paragraphs_odt",
+                ):
+                    if k in md:
+                        item[k] = md[k]
+
+        ip = inline_presigned.get(s3_url)
+        if ip:
+            item["inline_presigned_s3_url"] = ip
+
+        item["s3_bucket_url"] = s3_url
+        return item
+
+    # ----------------------------
+    # Public: enrich whole payload
+    # ----------------------------
+    def _process_presigned_urls(self, response_data: Dict[str, Any]) -> None:
         update_refs = response_data.get("update_ref")
         if not isinstance(update_refs, dict):
             return
 
         product_downloads = update_refs.get("product_downloads")
+        if isinstance(product_downloads, str):
+            try:
+                product_downloads = json.loads(product_downloads)
+                update_refs["product_downloads"] = product_downloads
+            except json.JSONDecodeError:
+                return
         if not isinstance(product_downloads, dict):
             return
 
-        # 1. Collect all S3 URLs
-        all_download_urls = self._collect_s3_urls(product_downloads)
-        logger.info(LOG_MSG_S3_URL_EXTRACTION, all_download_urls)
+        # slots
+        all_slots = list(self._ALL_SLOTS)
+        meta_slots = list(
+            getattr(settings, "FILE_METADATA_SLOTS", ["main_download_url"])
+        )
+        # keep only valid slot names
+        meta_slots = [s for s in meta_slots if s in all_slots]
 
-        # 2. Generate presigned URLs and inline presigned URLs
-        presigned_urls = generate_presigned_urls(all_download_urls)
-        inline_presigned_urls = generate_inline_presigned_urls(all_download_urls)
+        # 1) Collect S3 source URLs
+        urls_all = self._collect_s3_urls(product_downloads, slots=all_slots)
+        urls_meta = self._collect_s3_urls(product_downloads, slots=meta_slots)
 
-        # 3. Retrieve metadata for the presigned URLs
-        metadata_list = get_file_metadata(list(presigned_urls.values()))
-        metadata_dict = {meta["URL"]: meta for meta in metadata_list}
+        if not urls_all:
+            return
 
-        # 4. Process the main download
-        if "main_download_url" in product_downloads:
-            product_downloads["main_download_url"] = self._apply_metadata_and_presigned(
-                product_downloads.get("main_download_url"),
-                presigned_urls,
-                inline_presigned_urls,
-                metadata_dict,
-            )
+        # 2) Presign (attachment + inline)
+        presigned = generate_presigned_urls(urls_all)
+        inline_presigned = generate_inline_presigned_urls(urls_all)
 
-        # 5. Process other download types
-        for download_type in [
-            "web_download_url",
-            "print_download_url",
-            "transcript_url",
-        ]:
-            downloads = product_downloads.get(download_type, [])
-            if isinstance(downloads, list):
-                product_downloads[download_type] = [
-                    self._apply_metadata_and_presigned(
-                        item, presigned_urls, inline_presigned_urls, metadata_dict
-                    )
-                    for item in downloads
-                ]
-
-    def _collect_s3_urls(self, product_downloads):
-        urls = []
-
-        # Handle main_download_url as either a dict or a list of dicts
-        main = product_downloads.get("main_download_url")
-        if isinstance(main, dict):
-            urls.append(main.get("s3_bucket_url"))
-        elif isinstance(main, list):
-            for item in main:
-                if isinstance(item, dict) and item.get("s3_bucket_url"):
-                    urls.append(item["s3_bucket_url"])
-
-        # The rest stays the same…
-        for download_type in [
-            "web_download_url",
-            "print_download_url",
-            "transcript_url",
-        ]:
-            downloads = product_downloads.get(download_type, [])
-            if isinstance(downloads, list):
-                urls.extend(
-                    item.get("s3_bucket_url")
-                    for item in downloads
-                    if isinstance(item, dict) and item.get("s3_bucket_url")
-                )
-        return urls
-
-    def _apply_metadata_and_presigned(
-        self, item, presigned_urls, inline_presigned_urls, metadata_dict
-    ):
-        """
-        Update a single download entry, but also handle lists for main_download_url
-        """
-        # If it's a list, process each element
-        if isinstance(item, list):
-            return [
-                self._apply_metadata_and_presigned(
-                    i, presigned_urls, inline_presigned_urls, metadata_dict
-                )
-                for i in item
+        # 3) Metadata
+        metadata_dict: Dict[str, Dict[str, Any]] = {}
+        if getattr(settings, "FILE_METADATA_ENABLED", True):
+            # deep probe only on meta_slots; others will be fast path via S3 Head
+            # call twice so we don't waste deep probe budget on list items
+            deep_docs = bool(getattr(settings, "FILE_METADATA_DEEP_PROBE_DOCS", True))
+            presigned_meta_urls = [presigned[u] for u in urls_meta if u in presigned]
+            presigned_other_urls = [
+                presigned[u] for u in urls_all if u in presigned and u not in urls_meta
             ]
 
-        # … existing dict handling below
-        if not isinstance(item, dict):
-            return item
+            # deep probe ON for the meta set
+            metas = get_file_metadata(presigned_meta_urls, deep_for_doc_types=deep_docs)
+            # deep probe OFF for the rest (fast size/type only)
+            others = get_file_metadata(presigned_other_urls, deep_for_doc_types=False)
 
-        s3_url = item.get("s3_bucket_url", "")
-        if s3_url in presigned_urls:
-            presigned_url = presigned_urls[s3_url]
-            item["URL"] = presigned_url
-            if presigned_url in metadata_dict:
-                item.update(metadata_dict[presigned_url])
-            item["s3_bucket_url"] = s3_url
+            for m in metas + others:
+                if isinstance(m, dict) and m.get("URL"):
+                    metadata_dict[m["URL"]] = m
 
-        if s3_url in inline_presigned_urls:
-            item["inline_presigned_s3_url"] = inline_presigned_urls[s3_url]
-
-        return item
+        # 4) Apply to each slot
+        for slot in all_slots:
+            val = product_downloads.get(slot)
+            if val is not None:
+                product_downloads[slot] = self._apply_metadata_and_presigned(
+                    val, presigned, inline_presigned, metadata_dict
+                )
 
 
 # --------------------------------------------------------------------------- #
 # Product detail (preview) — versioned server cache + browser no-store        #
 # --------------------------------------------------------------------------- #
+
+
 class ProductDetailView(ErrorHandlingMixin, PresignedUrlMixin, viewsets.ViewSet):
-    """
-    GET /api/products/{product_code}/
-
-    - Server-side cache key is versioned by Product.updated_at (second precision).
-    - Browser/CDN caching disabled via Cache-Control: no-store (+ ETag/Last-Modified).
-    """
-
-    authentication_classes = [CustomTokenAuthentication]
+    authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
     def retrieve(self, request, product_code=None, *args, **kwargs):
         code = unquote(product_code or "")
-
         product = Product.objects.filter(product_code=code).first()
         if not product:
-            logger.warning("Product not found: %s", code)
             return handle_error(
                 ErrorCode.PRODUCT_NOT_FOUND,
                 ErrorMessage.PRODUCT_NOT_FOUND,
                 status.HTTP_404_NOT_FOUND,
             )
 
-        ver = (
-            int(product.updated_at.timestamp())
-            if getattr(product, "updated_at", None)
-            else 0
+        # version from product.updated_at and update_ref.updated_at if present
+        ver_sources = []
+        if getattr(product, "updated_at", None):
+            ver_sources.append(product.updated_at)
+        if getattr(product, "update_ref", None) and getattr(
+            product.update_ref, "updated_at", None
+        ):
+            ver_sources.append(product.update_ref.updated_at)
+        ver_ts = int(max(ver_sources).timestamp()) if ver_sources else 0
+
+        cache_key = f"product_detail:v{ver_ts}:{code}"
+
+        # bypass for staff or ?fresh=1
+        bypass = (request.GET.get("fresh") == "1") or getattr(
+            request.user, "is_staff", False
         )
-        cache_key = f"product_detail:v{ver}:{code}"
 
-        cached = cache.get(cache_key)
-        if cached:
-            resp = JsonResponse(cached, status=status.HTTP_200_OK)
-            resp["Cache-Control"] = "no-store"
-            resp["ETag"] = f'W/"{code}-{ver}"'
-            if product.updated_at:
-                resp["Last-Modified"] = http_date(product.updated_at.timestamp())
-            return resp
+        if not bypass:
+            cached = cache.get(cache_key)
+            if cached:
+                resp = JsonResponse(cached, status=status.HTTP_200_OK)
+                resp["Cache-Control"] = "no-store"
+                resp["ETag"] = f'W/"{code}-{ver_ts}"'
+                if ver_ts:
+                    resp["Last-Modified"] = http_date(ver_ts)
+                return resp
 
-        logger.info("Retrieving product details for %s", code)
         data = ProductSerializer(product, context={"request": request}).data
+
+        # single presign/metadata pass for **detail only**
         self._process_presigned_urls(data)
 
-        # 1-second default if not provided
-        ttl = getattr(settings, "CACHE_TTL_DETAIL", 1)
-        if ttl and ttl > 0:
+        ttl = getattr(settings, "CACHE_TTL_DETAIL", 60)
+        if ttl and ttl > 0 and not bypass:
             cache.set(cache_key, data, ttl)
 
         resp = JsonResponse(data, status=status.HTTP_200_OK)
         resp["Cache-Control"] = "no-store"
-        resp["ETag"] = f'W/"{code}-{ver}"'
-        if product.updated_at:
-            resp["Last-Modified"] = http_date(product.updated_at.timestamp())
+        resp["ETag"] = f'W/"{code}-{ver_ts}"'
+        if ver_ts:
+            resp["Last-Modified"] = http_date(ver_ts)
         return resp
 
 
@@ -2078,6 +2140,7 @@ class ProductStatusUpdateView(View):
                     ErrorMessage.DATABASE_ERROR,
                     status_code=500,
                 )
+            invalidate_product_caches(product.product_code)
 
             return JsonResponse(
                 {"message": "Product status updated successfully."}, status=HTTP_200_OK
@@ -2433,6 +2496,7 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                     "Product updated successfully for product_code: %s",
                     decoded_product_code,
                 )
+                invalidate_product_caches(product.product_code)
                 return JsonResponse(response_data, status=status.HTTP_200_OK)
 
             else:
@@ -2476,7 +2540,7 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         For other product types, the standard required downloads are enforced.
         """
         tag = product_tag.lower()
-        logger.info(
+        logger.debug(
             "Validating required downloads for product_type: %s, tag: %s",
             product_type,
             tag,
@@ -2821,7 +2885,7 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
             # ------------------------------------------------------------------
             # Case B: new page → create
             # ------------------------------------------------------------------
-            logger.info("full_external_keys for %s: %s", org_name, full_keys)
+            logger.debug("full_external_keys for %s: %s", org_name, full_keys)
             new_page = OrderLimitPage(
                 title=f"Order Limit for {org_name}",
                 slug=slugify(f"{org_name}-order-limit-{uuid.uuid4()}"),
@@ -2965,6 +3029,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
                 ErrorMessage.INTERNAL_SERVER_ERROR,
                 status_code=500,
             )
+        invalidate_product_caches(product_instance.product_code)
         return JsonResponse(ProductSerializer(product_instance).data, status=201)
 
     def get_program_and_language(self, program_name, language_id, is_uuid):
@@ -3042,7 +3107,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         while Product.objects.filter(product_code=product_code).exists():
             version_number += 1
             product_code = f"{short_program_id}{short_product_key}{short_language_code}{version_number:03}"
-        logger.info("Unique product code: %s", product_code)
+        logger.debug("Unique product code: %s", product_code)
         return product_code
 
     def get_or_create_parent_page(self):
@@ -3230,12 +3295,6 @@ class ProductListMixin(PresignedUrlMixin):
     def paginate_and_serialize(
         self, queryset, request, serializer_class=None, use_direct_update=False
     ):
-        """
-        Returns (data_list, paginator). Caches only the serialized 'page' list, never a Response.
-        NOTE: We still call paginate_queryset even on cache hits to keep paginator state
-        (next/prev links, counts). If you want to avoid the DB hit entirely on cache hits,
-        cache pagination metadata too.
-        """
         cache_key = self.get_cache_key(request)
         cached = cache.get(cache_key)
 
@@ -3250,22 +3309,21 @@ class ProductListMixin(PresignedUrlMixin):
             page, many=True, context=ctx
         )
 
-        # 1) Gather & presign "download" URLs and inject (attachment style)
-        urls = extract_s3_urls(serializer.data)
-        presigned = generate_presigned_urls(urls)
-        if use_direct_update:
-            _update_product_downloads_with_presigned_urls(page, presigned)
-            serializer = (serializer_class or self.serializer_class)(
-                page, many=True, context=ctx
-            )
-        else:
-            update_product_urls(serializer.data, presigned)
+        # ---- SINGLE presign pass for list/search ----
+        if getattr(settings, "PRESIGN_IN_LISTS", True):
+            urls = extract_s3_urls(serializer.data)
+            presigned = generate_presigned_urls(urls)
+            if use_direct_update:
+                _update_product_downloads_with_presigned_urls(
+                    page, presigned
+                )  # your existing function
+                serializer = (serializer_class or self.serializer_class)(
+                    page, many=True, context=ctx
+                )
+            else:
+                update_product_urls(serializer.data, presigned)
 
         data = serializer.data
-
-        # 2) Inline presigned URLs + merge metadata for each item
-        for item in data:
-            self._process_presigned_urls(item)
 
         if self.cache_timeout and self.cache_timeout > 0:
             cache.set(cache_key, data, self.cache_timeout)
@@ -3278,7 +3336,7 @@ class ProductListMixin(PresignedUrlMixin):
 # --------------------------------------------------------------------------- #
 class ProductAdminListView(ProductListMixin, APIView):
     authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAdminUser]
     include_request_context = True
     cache_timeout = 0  # always fresh for admins
 
@@ -3300,7 +3358,7 @@ class ProductAdminListView(ProductListMixin, APIView):
             data, paginator = self.paginate_and_serialize(
                 sorted_qs, request, use_direct_update=True
             )
-            logger.info("Returning %d products", len(data))
+            logger.debug("Returning %d products", len(data))
             return paginator.get_paginated_response(
                 data, status_code=status.HTTP_200_OK
             )

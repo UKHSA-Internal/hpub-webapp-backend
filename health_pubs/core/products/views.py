@@ -567,7 +567,9 @@ def invalidate_product_caches(product_code: str | None = None):
 
 
 class CustomPagination(PageNumberPagination):
-    page_size = 10  # Set pagination to 10 items per page
+    page_size = getattr(
+        settings, "PRODUCTS_PAGE_SIZE", 10
+    )  # Set pagination to 10 items per page
 
     def get_paginated_response(self, data, status_code=200):
         response = Response(
@@ -583,6 +585,11 @@ class CustomPagination(PageNumberPagination):
         response.status_code = status_code
 
         return response
+
+
+class AdminPagination(CustomPagination):
+    # Only the admin list should use this larger/smaller page size
+    page_size = getattr(settings, "ADMIN_PRODUCTS_PAGE_SIZE", 20)  # pick your number
 
 
 class ErrorHandlingMixin:
@@ -3339,6 +3346,7 @@ class ProductAdminListView(ProductListMixin, APIView):
     permission_classes = [IsAuthenticated, IsAdminUser]
     include_request_context = True
     cache_timeout = 0  # always fresh for admins
+    pagination_class = AdminPagination
 
     def get(self, request, *args, **kwargs):
         logger.info("ProductAdminListView GET called")
@@ -3367,7 +3375,7 @@ class ProductAdminListView(ProductListMixin, APIView):
 
 
 # --------------------------------------------------------------------------- #
-# Users: List (briefly cached)                                                #
+# Users: List (briefly cached)                                              #
 # --------------------------------------------------------------------------- #
 class ProductUsersListView(ProductListMixin, APIView):
     """

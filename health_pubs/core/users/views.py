@@ -878,7 +878,11 @@ class UserDetailView(GenericAPIView):
 
 
 class CustomPagination(PageNumberPagination):
-    page_size = 10  # Set pagination to 10 items per page
+    from django.conf import settings
+
+    page_size = getattr(
+        settings, "USERS_LIST_PAGE_SIZE", 10
+    )  # Set pagination to 10 items per page
 
     def get_paginated_response(self, data, status_code=200):
         response = Response(

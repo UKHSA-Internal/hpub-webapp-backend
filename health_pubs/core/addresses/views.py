@@ -14,6 +14,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils.text import slugify
+from django.conf import settings
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
@@ -34,7 +35,9 @@ logger = logging.getLogger(__name__)
 
 
 class CustomPagination(PageNumberPagination):
-    page_size = 10  # Set pagination to 10 items per page
+    page_size = getattr(
+        settings, "ADDRESSES_LIST_PAGE_SIZE", 10
+    )  # Set pagination to 10 items per page
 
     def get_paginated_response(self, data):
         response = Response(

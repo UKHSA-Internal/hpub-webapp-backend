@@ -43,7 +43,7 @@ $ ./database_access.sh
 
    Before running the project, ensure that you have the following:
 
-   1. Python (3.10+)
+   1. Python (3.10-3.12)
 
    2. PostgreSQL, Django
 
@@ -95,7 +95,7 @@ $ ./database_access.sh
 
 3. Install Dependencies
    - `python -m venv venv`
-   - `.\venv\Scripts\Activate.ps1`
+   - `source venv/bin/activate`
    - `pip install -r requirements.txt`
 4. Activate Your AWS Configuration
    - In your terminal Run `aws configure`

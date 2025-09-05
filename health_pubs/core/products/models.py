@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 
 # Compile once (safe, anchored patterns)
 _LANG_VER_SUFFIX = re.compile(r"([A-Z]{2,4})(\d{3})$")  # end-anchored: LANG+version
-_TRAIL_DIGITS = re.compile(r"(\d+)$")  # end-anchored: last digit run
+# Still safe and end-anchored; no catastrophic backtracking possible.
+_TRAIL_DIGITS = re.compile(r"(\d{1,16})$")
 
 
 class ProductUpdate(Page):

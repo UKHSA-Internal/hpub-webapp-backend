@@ -30,6 +30,10 @@ from .choices import (
 
 logger = logging.getLogger(__name__)
 
+# Compile once (safe, anchored patterns)
+_LANG_VER_SUFFIX = re.compile(r"([A-Z]{2,4})(\d{3})$")  # end-anchored: LANG+version
+_TRAIL_DIGITS = re.compile(r"(\d+)$")  # end-anchored: last digit run
+
 
 class ProductUpdate(Page):
     minimum_stock_level = models.IntegerField(blank=True, null=True)
@@ -304,27 +308,43 @@ class Product(Page):
     @staticmethod
     def _is_standard_series_code(code: str) -> bool:
         """
-        Match: <anything><digits><LANG{2..4}><version(3 digits)>
-        where LANG is the final 2–4 letters right before the last 3 digits.
-        Examples: 1354PEN001 (LANG=EN), 1354PFR001 (LANG=FR), 1354PENA001 (LANG=ENA), 2023ENGB007 (LANG=ENGB).
+        DoS-safe: O(n) scans with end-anchored searches only.
+        Matches codes that end with <LANG{2-4}><3 digits> and have a digit run
+        immediately before the LANG block.
+        Examples: 1354PEN001, 1354PFR001, 1354PENA001, 2023ENGB007
         """
         norm = Product._normalize_code(code)
-        return bool(re.match(r"^.*\d+[A-Z]{2,4}\d{3}$", norm))
+        if not norm:
+            return False
+
+        # (Optional) hard cap to avoid pathological input lengths
+        if len(norm) > 256:
+            return False
+
+        m = _LANG_VER_SUFFIX.search(norm)
+        if not m:
+            return False
+
+        prefix = norm[: m.start()]  # everything before LANG
+        return bool(_TRAIL_DIGITS.search(prefix))
 
     @staticmethod
     def _standard_root(code: str) -> str:
         """
-        Root = the digit run that appears *immediately before* the final 2–4 letter LANG chunk.
-        Examples:
-        1354PEN001  -> root='1354' (LANG=EN)
-        1354PFR001  -> root='1354' (LANG=FR)
-        1354PENA001 -> root='1354' (LANG=ENA)
-        2023ENGB007 -> root='2023' (LANG=ENGB)
-        12AB34EN001 -> root='34'   (LANG=EN)
+        DoS-safe: same anchored strategy.
+        Root = the digit run immediately before the final LANG block.
         """
         norm = Product._normalize_code(code)
-        m = re.match(r"^.*?(\d+)[A-Z]{2,4}\d{3}$", norm)
-        return m.group(1) if m else ""
+        if not norm:
+            return ""
+
+        m = _LANG_VER_SUFFIX.search(norm)
+        if not m:
+            return ""
+
+        prefix = norm[: m.start()]  # everything before LANG
+        d = _TRAIL_DIGITS.search(prefix)
+        return d.group(1) if d else ""
 
     @staticmethod
     def _series_info(code: str) -> tuple[str, str]:

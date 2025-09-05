@@ -303,14 +303,23 @@ class Product(Page):
 
     @staticmethod
     def _is_standard_series_code(code: str) -> bool:
+        # 4+ digits, then 2–3 letters, then 3 digits, e.g. 1354PEN001 / 1354PFR001 / 1234AB123
         norm = Product._normalize_code(code)
-        return bool(re.match(r"^\d{4,}[A-Z]{2}\d{3}$", norm))
+        return bool(re.match(r"^\d{4,}[A-Z]{2,3}\d{3}$", norm))
 
     @staticmethod
     def _standard_root(code: str) -> str:
+        # capture the leading digit-run as the series root
         norm = Product._normalize_code(code)
-        m = re.match(r"^(\d+)[A-Z]{2}\d{3}$", norm)
+        m = re.match(r"^(\d+)[A-Z]{2,3}\d{3}$", norm)
         return m.group(1) if m else ""
+
+    @staticmethod
+    def _series_info(code: str) -> tuple[str, str]:
+        # keep logic, but now the 3-letter middle segment is supported as "standard"
+        if Product._is_standard_series_code(code):
+            return "standard", Product._standard_root(code)
+        return "irregular", Product._irregular_root(code)
 
     @staticmethod
     def _irregular_root(code: str) -> str:
@@ -324,12 +333,6 @@ class Product(Page):
             return m.group(1)
         m = re.match(r"^([A-Z]{2,})", norm)
         return m.group(1) if m else ""
-
-    @staticmethod
-    def _series_info(code: str) -> tuple[str, str]:
-        if Product._is_standard_series_code(code):
-            return "standard", Product._standard_root(code)
-        return "irregular", Product._irregular_root(code)
 
     @staticmethod
     def _get_common_prefix(a: str, b: str, min_length: int = 3) -> str:

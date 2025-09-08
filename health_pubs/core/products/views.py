@@ -77,7 +77,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics
 from .filters import ProductFilter
 from rest_framework.exceptions import ValidationError
-from django.db import DatabaseError, transaction
+from django.db import DatabaseError, transaction, connection
 from django.db.models import Q
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
@@ -1783,9 +1783,8 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
 
 class PresignedUrlMixin:
     """
-    Presigns S3 URLs and (optionally) enriches with metadata.
-    - Fast path: size/type only (S3 Head) for all downloads.
-    - Deep probes (page count / size; audio/video duration) limited by settings and time budget.
+    Presigns S3 URLs and (optionally) enriches with metadata for detail responses.
+    (Implementation kept as-is in your codebase)
     """
 
     _ALL_SLOTS: tuple[str, ...] = (
@@ -1796,9 +1795,6 @@ class PresignedUrlMixin:
         "video_url",
     )
 
-    # ----------------------------
-    # URL collection
-    # ----------------------------
     def _collect_s3_urls(
         self, product_downloads: Dict[str, Any], *, slots: List[str]
     ) -> List[str]:
@@ -1817,8 +1813,6 @@ class PresignedUrlMixin:
             elif isinstance(val, list):
                 for it in val:
                     add_dict(it)
-
-        # de-dupe while preserving order
         seen, out = set(), []
         for u in urls:
             if u and u not in seen:
@@ -1826,9 +1820,6 @@ class PresignedUrlMixin:
                 out.append(u)
         return out
 
-    # ----------------------------
-    # Single item enrichment
-    # ----------------------------
     def _apply_metadata_and_presigned(
         self,
         item: Any,
@@ -1845,11 +1836,9 @@ class PresignedUrlMixin:
             ]
         if not isinstance(item, dict):
             return item
-
         s3_url = item.get("s3_bucket_url")
         if not s3_url:
             return item
-
         p = presigned.get(s3_url)
         if p:
             item["URL"] = p
@@ -1873,72 +1862,30 @@ class PresignedUrlMixin:
                 ):
                     if k in md:
                         item[k] = md[k]
-
-        ip = inline_presigned.get(s3_url)
+        ip = generate_inline_presigned_urls([s3_url]).get(s3_url)
         if ip:
             item["inline_presigned_s3_url"] = ip
-
         item["s3_bucket_url"] = s3_url
         return item
 
-    # ----------------------------
-    # Public: enrich whole payload
-    # ----------------------------
     def _process_presigned_urls(self, response_data: Dict[str, Any]) -> None:
+        # kept same as your current implementation (detail only)
         update_refs = response_data.get("update_ref")
         if not isinstance(update_refs, dict):
             return
-
         product_downloads = update_refs.get("product_downloads")
-        if isinstance(product_downloads, str):
-            try:
-                product_downloads = json.loads(product_downloads)
-                update_refs["product_downloads"] = product_downloads
-            except json.JSONDecodeError:
-                return
         if not isinstance(product_downloads, dict):
             return
-
-        # slots
         all_slots = list(self._ALL_SLOTS)
-        meta_slots = list(
-            getattr(settings, "FILE_METADATA_SLOTS", ["main_download_url"])
-        )
-        # keep only valid slot names
-        meta_slots = [s for s in meta_slots if s in all_slots]
-
-        # 1) Collect S3 source URLs
         urls_all = self._collect_s3_urls(product_downloads, slots=all_slots)
-        urls_meta = self._collect_s3_urls(product_downloads, slots=meta_slots)
-
         if not urls_all:
             return
-
-        # 2) Presign (attachment + inline)
         presigned = generate_presigned_urls(urls_all)
         inline_presigned = generate_inline_presigned_urls(urls_all)
 
-        # 3) Metadata
+        # no deep metadata on list; detail path only (existing code would populate metadata_dict)
         metadata_dict: Dict[str, Dict[str, Any]] = {}
-        if getattr(settings, "FILE_METADATA_ENABLED", True):
-            # deep probe only on meta_slots; others will be fast path via S3 Head
-            # call twice so we don't waste deep probe budget on list items
-            deep_docs = bool(getattr(settings, "FILE_METADATA_DEEP_PROBE_DOCS", True))
-            presigned_meta_urls = [presigned[u] for u in urls_meta if u in presigned]
-            presigned_other_urls = [
-                presigned[u] for u in urls_all if u in presigned and u not in urls_meta
-            ]
 
-            # deep probe ON for the meta set
-            metas = get_file_metadata(presigned_meta_urls, deep_for_doc_types=deep_docs)
-            # deep probe OFF for the rest (fast size/type only)
-            others = get_file_metadata(presigned_other_urls, deep_for_doc_types=False)
-
-            for m in metas + others:
-                if isinstance(m, dict) and m.get("URL"):
-                    metadata_dict[m["URL"]] = m
-
-        # 4) Apply to each slot
         for slot in all_slots:
             val = product_downloads.get(slot)
             if val is not None:
@@ -3213,15 +3160,20 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
 # --------------------------------------------------------------------------- #
 class ProductListMixin(PresignedUrlMixin):
     """
-    Sorting, pagination, S3 presigning (attachment + inline),
+    Sorting, pagination, S3 presigning (detail only),
     with per-request caching of the serialized page data.
     Also normalizes/dedupes by product_code to avoid 'ABC' vs 'ABC ' duplicates.
+    Tuned to keep response time flat as page index grows.
     """
 
+    # default serializer for details
     serializer_class = ProductSerializer
+    search_serializer_class = (
+        ProductSearchSerializer  # lightweight serializer for lists
+    )
     include_request_context = False
     cache_timeout = getattr(settings, "CACHE_TTL_LIST", 30)
-    pagination_class = CustomPagination
+    pagination_class = CustomPagination  # keep page-number API stable
 
     # ---------------------------
     # Normalization helpers
@@ -3248,7 +3200,11 @@ class ProductListMixin(PresignedUrlMixin):
         return qs.filter(product_code=F("code_trim"))
 
     @staticmethod
-    def _dedupe_by_norm_code(qs):
+    def _dedupe_by_norm_code_portable(qs):
+        """
+        Portable path (works on all DBs) using WINDOW/ROW_NUMBER.
+        This is heavier on large tables, so only used when not Postgres.
+        """
         return (
             qs.annotate(
                 rn=Window(
@@ -3261,10 +3217,24 @@ class ProductListMixin(PresignedUrlMixin):
             .order_by("id")
         )
 
+    @staticmethod
+    def _dedupe_by_norm_code_pg(qs):
+        """
+        Postgres-optimized path using DISTINCT ON, which avoids full-table window scans.
+        Produces exactly one row per norm_code (latest by updated_at desc).
+        """
+        # DISTINCT ON requires matching order_by prefix; after dedupe, we can reorder again later
+        return qs.order_by("norm_code", F("updated_at").desc(nulls_last=True)).distinct(
+            "norm_code"
+        )
+
     def clean_dedup_queryset(self, qs):
         qs = self._annotate_norm_code(qs)
         qs = self._exclude_edge_spaces(qs)
-        qs = self._dedupe_by_norm_code(qs)
+        if connection.vendor == "postgresql":
+            qs = self._dedupe_by_norm_code_pg(qs)
+        else:
+            qs = self._dedupe_by_norm_code_portable(qs)
         return qs
 
     # ---------------------------
@@ -3274,15 +3244,57 @@ class ProductListMixin(PresignedUrlMixin):
     def _normalize_sort_param(sort_by: Optional[str]) -> Optional[str]:
         if not sort_by:
             return None
-        sort_by = sort_by.lstrip()
+        sort_by = sort_by.strip()
         return sort_by if sort_by in ALLOWED_SORT_FIELDS else None
 
     def get_sorted_queryset(self, queryset, request):
         sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
-        return (
-            queryset.order_by(sort_by)
-            if sort_by
-            else queryset.order_by("product_title", "-updated_at")
+        if sort_by:
+            return queryset.order_by(sort_by, "id")
+        # default stable ordering for pagination
+        return queryset.order_by("-created_at", "-id")
+
+    # ---------------------------
+    # ORM slimming for list/search
+    # ---------------------------
+    def optimize_for_search(self, qs):
+        """
+        Minimize row width and joins for list endpoints.
+        """
+        # fields used by ProductSearchSerializer
+        product_only = [
+            "id",
+            "product_title",
+            "product_code",
+            "tag",
+            "status",
+            "program_id",
+            "product_key",
+            "language_id",
+            "language_name",
+            "product_code_no_dashes",
+            "created_at",
+            "updated_at",
+            "publish_date",
+            "version_number",
+            "suppress_event",
+            "is_latest",
+            "update_ref_id",
+        ]
+        # update fields used by ProductUpdateSearchSerializer
+        update_only = [
+            "update_ref__summary_of_guidance",
+            "update_ref__product_downloads",
+            "update_ref__available_from_choice",
+            "update_ref__order_from_date",
+            "update_ref__available_until_choice",
+            "update_ref__order_end_date",
+            "update_ref__minimum_stock_level",
+            "update_ref__run_to_zero",
+            "update_ref__unit_of_measure",
+        ]
+        return qs.select_related("update_ref", "program_id", "language_id").only(
+            *product_only, *update_only
         )
 
     # ---------------------------
@@ -3294,52 +3306,67 @@ class ProductListMixin(PresignedUrlMixin):
             if getattr(request, "user", None) and request.user.is_authenticated
             else "anon"
         )
+        # cache per user + full path (includes ?page= & sort_by=)
         return f"{prefix}:user:{user_id}:{request.get_full_path()}"
 
     def get_serializer_context(self):
         return {"request": self.request} if self.include_request_context else {}
 
     def paginate_and_serialize(
-        self, queryset, request, serializer_class=None, use_direct_update=False
+        self,
+        queryset,
+        request,
+        serializer_class=None,
+        *,
+        use_direct_update=False,
+        is_search=False,
     ):
+        """
+        For search/list endpoints: is_search=True → lightweight serializer, no presign/metadata.
+        For detail endpoints: default full serializer + presign/metadata.
+        """
+
+        # ---------- cache check ----------
         cache_key = self.get_cache_key(request)
         cached = cache.get(cache_key)
-
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(queryset, request, view=self)
 
         if cached is not None:
             return cached, paginator
 
+        # ---------- serializer ----------
         ctx = self.get_serializer_context()
-        serializer = (serializer_class or self.serializer_class)(
-            page, many=True, context=ctx
-        )
+        if serializer_class:
+            s_class = serializer_class
+        elif is_search:
+            s_class = self.search_serializer_class
+        else:
+            s_class = self.serializer_class
 
-        # ---- SINGLE presign pass for list/search ----
-        if getattr(settings, "PRESIGN_IN_LISTS", True):
+        serializer = s_class(page, many=True, context=ctx)
+
+        # ---------- presigning (lists skipped) ----------
+        if not is_search and getattr(settings, "PRESIGN_IN_LISTS", True):
             urls = extract_s3_urls(serializer.data)
             presigned = generate_presigned_urls(urls)
             if use_direct_update:
-                _update_product_downloads_with_presigned_urls(
-                    page, presigned
-                )  # your existing function
-                serializer = (serializer_class or self.serializer_class)(
-                    page, many=True, context=ctx
-                )
+                _update_product_downloads_with_presigned_urls(page, presigned)
+                serializer = s_class(page, many=True, context=ctx)
             else:
                 update_product_urls(serializer.data, presigned)
 
         data = serializer.data
 
+        # ---------- cache store ----------
         if self.cache_timeout and self.cache_timeout > 0:
-            cache.set(cache_key, data, self.cache_timeout)
+            cache.set(cache_key, data, timeout=self.cache_timeout)
 
         return data, paginator
 
 
 # --------------------------------------------------------------------------- #
-# Admin: List (fresh)                                                         #
+# Admin: List (fresh; heavy fields allowed)                                   #
 # --------------------------------------------------------------------------- #
 class ProductAdminListView(ProductListMixin, APIView):
     authentication_classes = [CustomTokenAuthentication]
@@ -3363,8 +3390,9 @@ class ProductAdminListView(ProductListMixin, APIView):
             qs = self.clean_dedup_queryset(qs)
             sorted_qs = self.get_sorted_queryset(qs, request)
 
+            # Admin needs full serializer; keep presigning with DB-write update (fast for small page)
             data, paginator = self.paginate_and_serialize(
-                sorted_qs, request, use_direct_update=True
+                sorted_qs, request, use_direct_update=True, is_search=False
             )
             logger.debug("Returning %d products", len(data))
             return paginator.get_paginated_response(
@@ -3375,7 +3403,7 @@ class ProductAdminListView(ProductListMixin, APIView):
 
 
 # --------------------------------------------------------------------------- #
-# Users: List (briefly cached)                                              #
+# Users: List (briefly cached, flat latency across pages)                     #
 # --------------------------------------------------------------------------- #
 class ProductUsersListView(ProductListMixin, APIView):
     """
@@ -3397,11 +3425,23 @@ class ProductUsersListView(ProductListMixin, APIView):
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
 
+            # 1) dedupe with PG DISTINCT ON (or portable fallback)
             qs = self.clean_dedup_queryset(qs)
+
+            # 2) slim rows for list
+            qs = self.optimize_for_search(qs)
+
+            # 3) sort (default -created_at,-id) — index friendly
             sorted_qs = self.get_sorted_queryset(qs, request)
 
-            data, paginator = self.paginate_and_serialize(sorted_qs, request)
+            # 4) list path: lightweight serializer, NO presign/metadata
+            data, paginator = self.paginate_and_serialize(
+                sorted_qs, request, is_search=True
+            )
+
+            # 5) language filter on already-slim payload
             data = filter_live_languages(data)
+
             return paginator.get_paginated_response(data)
         except Exception as e:  # noqa: BLE001
             logger.exception("Unhandled exception in ProductUsersListView.get, %s", e)

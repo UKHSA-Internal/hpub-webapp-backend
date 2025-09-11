@@ -55,7 +55,7 @@ jobs:
         id: latest_release
         run: |
           LATEST_RELEASE_TAG=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-            https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest \
+            https://api.github.com/repos/UKHSA-Internal/hpub-webapp-backend/releases/latest \
             | jq -r '.tag_name')
           HOTFIX_TAG="${LATEST_RELEASE_TAG}+hotfix"
           echo "HOTFIX_TAG=$HOTFIX_TAG" >> $GITHUB_ENV

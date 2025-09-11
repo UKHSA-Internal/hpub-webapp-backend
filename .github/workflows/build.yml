@@ -35,28 +35,6 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
-      
-      - name: Get latest GitHub release
-        id: latest_release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          LATEST_RELEASE_TAG=$(curl -s -H "Authorization: token $GH_TOKEN" \
-            https://api.github.com/repos/$REPO/releases/latest \
-            | jq -r '.tag_name')
-
-          VERSION_NUMBER=${LATEST_RELEASE_TAG#v}
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_NUMBER"
-          PATCH=$((PATCH + 1))
-
-          EXISTING_HOTFIXES=$(git fetch --tags && git tag -l "v${MAJOR}.${MINOR}.${PATCH}-hotfix*")
-          COUNT=$(echo "$EXISTING_HOTFIXES" | wc -l)
-          HOTFIX_NUMBER=$((COUNT + 1))
-          HOTFIX_TAG="v${MAJOR}.${MINOR}.${PATCH}-hotfix${HOTFIX_NUMBER}"
-          echo "HOTFIX_TAG=$HOTFIX_TAG" >> $GITHUB_ENV
-          echo "Latest release: $LATEST_RELEASE_TAG"
-          echo "New hotfix tag: $HOTFIX_TAG"
 
       - name: Unit tests
         if: ${{ env.RUN_UNIT_TESTS == 'true' }}

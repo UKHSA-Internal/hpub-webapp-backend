@@ -55,7 +55,7 @@ jobs:
         id: latest_release
         run: |
           LATEST_RELEASE_TAG=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest \
+            https://api.github.com/repos/UKHSA-Internal/hpub-webapp-backend/releases/latest \
             | jq -r '.tag_name')
 
           VERSION_NUMBER=${LATEST_RELEASE_TAG#v}

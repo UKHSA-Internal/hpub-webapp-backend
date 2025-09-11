@@ -54,7 +54,7 @@ jobs:
       - name: Get latest GitHub release
         id: latest_release
         run: |
-          LATEST_RELEASE_TAG=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+          LATEST_RELEASE_TAG=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             https://api.github.com/repos/UKHSA-Internal/hpub-webapp-backend/releases/latest \
             | jq -r '.tag_name')
           HOTFIX_TAG="${LATEST_RELEASE_TAG}+hotfix"

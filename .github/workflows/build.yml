@@ -51,25 +51,6 @@ jobs:
           role-session-name: build-${{ github.sha }}
           aws-region: ${{ env.AWS_REGION }}
       
-      - name: Get latest GitHub release
-        id: latest_release
-        run: |
-          LATEST_RELEASE_TAG=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/UKHSA-Internal/hpub-webapp-backend/releases/latest \
-            | jq -r '.tag_name')
-
-          VERSION_NUMBER=${LATEST_RELEASE_TAG#v}
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_NUMBER"
-          PATCH=$((PATCH + 1))
-
-          EXISTING_HOTFIXES=$(git fetch --tags && git tag -l "v${MAJOR}.${MINOR}.${PATCH}-hotfix*")
-          COUNT=$(echo "$EXISTING_HOTFIXES" | wc -l)
-          HOTFIX_NUMBER=$((COUNT + 1))
-          HOTFIX_TAG="v${MAJOR}.${MINOR}.${PATCH}-hotfix${HOTFIX_NUMBER}"
-          echo "HOTFIX_TAG=$HOTFIX_TAG" >> $GITHUB_ENV
-          echo "Latest release: $LATEST_RELEASE_TAG"
-          echo "New hotfix tag: $HOTFIX_TAG"
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -150,7 +131,7 @@ jobs:
       - name: Get latest GitHub release
         id: latest_release
         run: |
-          LATEST_RELEASE_TAG=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+          LATEST_RELEASE_TAG=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest \
             | jq -r '.tag_name')
 
@@ -195,7 +176,7 @@ jobs:
     strategy:
       max-parallel: 1
       matrix:
-        environment: ["dev", "test",]
+        environment: ["dev", "test"]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:
       contents: write

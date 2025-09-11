@@ -114,7 +114,6 @@ def prepare_order_data(order_instance):
 
     order_data = {
         "orderReference": str(order_instance.order_id),
-        "orderconfirmationreference": str(order_instance.order_confirmation_number),
         "deliveryContactFullName": f"{user_instance.first_name} {user_instance.last_name}",
         "deliveryContactEmail": user_info.get("email"),
         "deliveryContactPhone": user_info.get("mobile_number", ""),

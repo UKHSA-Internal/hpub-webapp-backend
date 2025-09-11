@@ -55,11 +55,21 @@ jobs:
         id: latest_release
         run: |
           LATEST_RELEASE_TAG=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/UKHSA-Internal/hpub-webapp-backend/releases/latest \
+            https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest \
             | jq -r '.tag_name')
-          HOTFIX_TAG="${LATEST_RELEASE_TAG}+hotfix"
+
+          VERSION_NUMBER=${LATEST_RELEASE_TAG#v}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_NUMBER"
+          PATCH=$((PATCH + 1))
+
+          EXISTING_HOTFIXES=$(git fetch --tags && git tag -l "v${MAJOR}.${MINOR}.${PATCH}-hotfix*")
+          COUNT=$(echo "$EXISTING_HOTFIXES" | wc -l)
+          HOTFIX_NUMBER=$((COUNT + 1))
+          HOTFIX_TAG="v${MAJOR}.${MINOR}.${PATCH}-hotfix${HOTFIX_NUMBER}"
           echo "HOTFIX_TAG=$HOTFIX_TAG" >> $GITHUB_ENV
-          echo "Latest release tag: $HOTFIX_TAG"
+          echo "Latest release: $LATEST_RELEASE_TAG"
+          echo "New hotfix tag: $HOTFIX_TAG"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -79,7 +89,7 @@ jobs:
           cache-to: type=inline
 
   release:
-    name: Tag and release container image main
+    name: Tag and release container image
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment: dev
@@ -143,9 +153,18 @@ jobs:
           LATEST_RELEASE_TAG=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
             https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest \
             | jq -r '.tag_name')
-          HOTFIX_TAG="${LATEST_RELEASE_TAG}+hotfix"
+
+          VERSION_NUMBER=${LATEST_RELEASE_TAG#v}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_NUMBER"
+          PATCH=$((PATCH + 1))
+
+          EXISTING_HOTFIXES=$(git fetch --tags && git tag -l "v${MAJOR}.${MINOR}.${PATCH}-hotfix*")
+          COUNT=$(echo "$EXISTING_HOTFIXES" | wc -l)
+          HOTFIX_NUMBER=$((COUNT + 1))
+          HOTFIX_TAG="v${MAJOR}.${MINOR}.${PATCH}-hotfix${HOTFIX_NUMBER}"
           echo "HOTFIX_TAG=$HOTFIX_TAG" >> $GITHUB_ENV
-          echo "Latest release tag: $HOTFIX_TAG"
+          echo "Latest release: $LATEST_RELEASE_TAG"
+          echo "New hotfix tag: $HOTFIX_TAG"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4

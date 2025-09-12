@@ -1,6 +1,6 @@
 import logging
 import uuid
-import os
+import os, re
 import sys
 import uuid
 from django.utils.timezone import now
@@ -17,12 +17,12 @@ from django.utils.text import slugify
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
+from core.utils.custom_token_authentication import CustomTokenAuthentication
+from core.users.permissions import IsAdminOrRegisteredUser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from wagtail.models import Page
 
-from core.users.permissions import IsAdminOrRegisteredUser
-from core.utils.custom_token_authentication import CustomTokenAuthentication
 from .models import Address
 from .serializers import AddressSerializer
 
@@ -54,6 +54,7 @@ class CustomPagination(PageNumberPagination):
 class AddressViewSet(viewsets.ModelViewSet):
     lookup_field = "address_id"
     authentication_classes = [CustomTokenAuthentication]
+
     permission_classes = [IsAuthenticated, IsAdminOrRegisteredUser]
     queryset = Address.objects.all()
     serializer_class = AddressSerializer
@@ -134,11 +135,20 @@ class AddressViewSet(viewsets.ModelViewSet):
         if not Address.objects.filter(user_ref=user_ref).exists():
             addr.is_default = True
 
-        # external verify
-        if not verify_address(addr):
+        # external verify (now returns details on failure)
+        try:
+            ok = verify_address(addr)
+        except Exception as e:
+            logger.exception(f"Unexpected error verifying address: {e}")
             return Response(
-                {"error": "Address verification failed."},
-                status=status.HTTP_404_NOT_FOUND,
+                {"error": "Address verification service error"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        if not ok:
+            return Response(
+                {"error": "Address verification failed"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # always add_child() so Wagtail sets parent, path, depth
@@ -175,9 +185,20 @@ class AddressViewSet(viewsets.ModelViewSet):
             root.add_child(instance=parent)
             return parent
 
+    def _normalize_postcode(self, postcode: str) -> str:
+        """
+        Clean up postcode:
+        - Remove leading/trailing spaces
+        - Collapse multiple spaces inside
+        - Convert to uppercase
+        """
+        if not postcode:
+            return ""
+        return re.sub(r"\s+", " ", postcode.strip()).upper()
+
     @action(detail=False, methods=["post"], url_path="verify-address")
     def verify_address(self, request):
-        postcode = request.data.get("postcode", "").upper()
+        postcode = self._normalize_postcode(request.data.get("postcode", ""))
         building = request.data.get("building_number", "")
         if not postcode or not building:
             return Response(
@@ -245,8 +266,9 @@ class AddressViewSet(viewsets.ModelViewSet):
         try:
             token = get_oauth_token()
         except Exception as e:
+            logger.exception(f"Error obtaining OAuth token: {e}")
             return Response(
-                {"error": "Failed to obtain token", "details": str(e)},
+                {"error": "Failed to obtain token"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
@@ -261,13 +283,15 @@ class AddressViewSet(viewsets.ModelViewSet):
             )
             resp.raise_for_status()
         except requests.HTTPError as e:
+            logger.error(f"HTTP error during geocoding: {e}")
             return Response(
-                {"error": "HTTP error", "details": str(e)},
+                {"error": "HTTP error"},
                 status=resp.status_code,
             )
         except Exception as e:
+            logger.exception(f"Unexpected error during geocoding: {e}")
             return Response(
-                {"error": "Unexpected error", "details": str(e)},
+                {"error": "Unexpected error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 

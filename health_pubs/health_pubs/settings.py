@@ -28,6 +28,7 @@ AWS_BUCKET_NAME = config.get_hpub_s3_bucket_name()
 ACCESS_TOKEN_LIFETIME = timedelta(minutes=30)
 REFRESH_TOKEN_LIFETIME = timedelta(days=1)
 REFRESH_TOKEN_MAX_AGE = 86400
+MAX_FEATURED_PROGRAMMES = 6
 # Quick-start development settings - unsuitable for production
 
 SECRET_KEY = DJANGO_SECRET
@@ -47,8 +48,8 @@ CORS_ALLOW_CREDENTIALS = True
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
     "x-session-id",
+    "idempotency-key",
 ]
-
 
 CSRF_TRUSTED_ORIGINS = config.get_csrf_trusted_origins()
 
@@ -67,9 +68,13 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 
 if DEBUG:
-    CACHE_TTL = 0  # effectively disables caching
+    CACHE_TTL = 0
+    CACHE_TTL_DETAIL = 0
+    CACHE_TTL_LIST = 0
 else:
-    CACHE_TTL = 60 * 5  # 5 minutes in prod
+    CACHE_TTL = 60
+    CACHE_TTL_DETAIL = 1  # 1s — effectively “negligible”
+    CACHE_TTL_LIST = 30  # list/search ok to be a bit cached
 
 
 PRESIGNED_URL_TTL = 60 * 60  # 1 hour

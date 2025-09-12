@@ -6,7 +6,7 @@ import shlex
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Dict, List, Tuple, Union, Optional
-from urllib.parse import urlparse, urlsplit, parse_qs
+from urllib.parse import urlparse, urlsplit, parse_qs, quote
 
 import magic
 import openpyxl
@@ -26,6 +26,12 @@ if not logger.handlers:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
 
+# Default MIME type when unknown
+DEFAULT_MIME = "application/octet-stream"
+
+# MIME prefixes
+VIDEO_MIME_PREFIX = "video/"
+
 # ISO A‐series sizes (in millimeters)
 ISO_A_SIZES_MM = {
     "A0": (841.0, 1189.0),
@@ -39,20 +45,6 @@ ISO_A_SIZES_MM = {
     "A8": (52.0, 74.0),
     "A9": (37.0, 52.0),
     "A10": (26.0, 37.0),
-}
-
-# Default MIME type when unknown
-DEFAULT_MIME = "application/octet-stream"
-
-# --- ISO A-series sizes in millimetres (for PDF/PPTX page/slide detection) ---
-ISO_A_SIZES_MM = {
-    "A0": (841, 1189),
-    "A1": (594, 841),
-    "A2": (420, 594),
-    "A3": (297, 420),
-    "A4": (210, 297),
-    "A5": (148, 210),
-    "A6": (105, 148),
 }
 
 
@@ -150,6 +142,19 @@ def _parse_s3_url(url: str) -> Tuple[Optional[str], Optional[str]]:
     return bucket_name, object_key
 
 
+def _normalize_url(url: str) -> str:
+    """
+    Percent-encode the path component of a URL (so '+' becomes '%2B', spaces to '%20', etc.).
+    Leaves the query string untouched.
+    """
+    try:
+        parts = urlsplit(url)
+        safe_path = quote(parts.path, safe="/%")
+        return parts._replace(path=safe_path).geturl()
+    except Exception:
+        return url
+
+
 def _fetch_via_head(url: str, session: requests.Session) -> Tuple[int, str]:
     """
     Attempt to retrieve size and content type using a HEAD request.
@@ -158,7 +163,7 @@ def _fetch_via_head(url: str, session: requests.Session) -> Tuple[int, str]:
     size = 0
     content_type = ""
     try:
-        resp = session.head(url, allow_redirects=True, timeout=15)
+        resp = session.head(_normalize_url(url), allow_redirects=True, timeout=15)
         resp.raise_for_status()
         head_cl = resp.headers.get("Content-Length")
         if head_cl:
@@ -187,7 +192,13 @@ def _fetch_via_range(
     content_type = current_type
     try:
         headers = {"Range": "bytes=0-0"}
-        resp = session.get(url, headers=headers, stream=True, timeout=15)
+        resp = session.get(
+            _normalize_url(url),
+            headers=headers,
+            stream=True,
+            allow_redirects=True,
+            timeout=15,
+        )
         resp.raise_for_status()
         content_range = resp.headers.get("Content-Range", "")
         if content_range and "/" in content_range:
@@ -197,6 +208,15 @@ def _fetch_via_range(
                 logger.info(f"Range → size={_hr(size)} for {url}")
             except ValueError as e:
                 logger.warning(f"Cannot parse Content-Range '{content_range}': {e}")
+        elif resp.status_code == 200:
+            # Some servers ignore Range and send the full response
+            cl = resp.headers.get("Content-Length")
+            if cl:
+                try:
+                    size = int(cl)
+                    logger.info(f"Range (200) → size={_hr(size)} for {url}")
+                except ValueError:
+                    pass
         if not content_type:
             ct = resp.headers.get("Content-Type", "")
             if ct:
@@ -217,13 +237,14 @@ def _fetch_via_stream(
     size = 0
     content_type = current_type
     try:
-        resp = session.get(url, stream=True, timeout=120)
+        resp = session.get(
+            _normalize_url(url), stream=True, allow_redirects=True, timeout=120
+        )
         resp.raise_for_status()
         bytes_accum = 0
         for chunk in resp.iter_content(chunk_size=8192):
-            if not chunk:
-                break
-            bytes_accum += len(chunk)
+            if chunk:
+                bytes_accum += len(chunk)
         size = bytes_accum
         logger.info(f"Streamed full file → size={_hr(size)} for {url}")
         if not content_type:
@@ -231,6 +252,14 @@ def _fetch_via_stream(
             if ct:
                 content_type = ct
                 logger.debug(f"Streamed → type={content_type} for {url}")
+        # Fallback: if server sent a length but stream yielded 0 (rare but possible)
+        if size == 0:
+            cl = resp.headers.get("Content-Length")
+            if cl:
+                try:
+                    size = int(cl)
+                except ValueError:
+                    pass
     except requests.RequestException as e:
         logger.error(f"Failed to stream {url}: {e}")
     except Exception as e:
@@ -267,7 +296,7 @@ def _fetch_remote_file_size_and_type(url: str) -> Dict[str, Union[int, str]]:
         "binary/octet-stream",
         "",
     ):
-        guessed = mimetypes.guess_type(urlsplit(url).path)[0]
+        guessed = mimetypes.guess_type(urlsplit(_normalize_url(url)).path)[0]
         if guessed:
             content_type = guessed
             logger.debug(f"Guessed MIME type '{content_type}' from extension for {url}")
@@ -300,13 +329,15 @@ def _get_local_file_info(local_path: Path) -> Tuple[int, str, Path]:
     return size, mime, local_path
 
 
-def _needs_deep_probe(mime: str, size: int) -> bool:
+def _needs_deep_probe(mime: str) -> bool:
     """
     Decide if a remote file should be downloaded for deeper probing.
 
     - Always probe PDFs, images, audio, and office‐type documents to get full metadata.
-    - Skip any 'video/' (or other extremely large types) to avoid big downloads.
+    - Skip any 'video/' to avoid large downloads.
     """
+    if mime.startswith(VIDEO_MIME_PREFIX):
+        return False
     deep_types = (
         "application/pdf",
         "audio/",
@@ -314,7 +345,7 @@ def _needs_deep_probe(mime: str, size: int) -> bool:
         "application/vnd.openxmlformats-officedocument",
         "application/vnd.oasis",
     )
-    return size > 0 and any(mime.startswith(t) for t in deep_types)
+    return any(mime.startswith(t) for t in deep_types)
 
 
 def _download_to_temp(url: str) -> Optional[Path]:
@@ -322,22 +353,22 @@ def _download_to_temp(url: str) -> Optional[Path]:
     Download remote file to a temporary file for deep probing.
     Returns Path to temp file or None on failure.
     """
-    logger.info(f"Downloading {url} for deep probing")
+    norm = _normalize_url(url)
+    logger.info(f"Downloading {norm} for deep probing")
     try:
-        resp = requests.get(url, stream=True, timeout=60)
+        resp = requests.get(norm, stream=True, timeout=60)
         resp.raise_for_status()
         with NamedTemporaryFile(delete=False, suffix=".tmp") as tmpf:
             for chunk in resp.iter_content(chunk_size=8192):
-                if not chunk:
-                    break
-                tmpf.write(chunk)
+                if chunk:
+                    tmpf.write(chunk)
             temp_path = Path(tmpf.name)
         logger.info(f"Downloaded to temp file: {temp_path}")
         return temp_path
     except requests.RequestException as e:
-        logger.warning(f"Download failed for {url}: {e}")
+        logger.warning(f"Download failed for {norm}: {e}")
     except Exception as e:
-        logger.critical(f"Temp file write error for {url}: {e}")
+        logger.critical(f"Temp file write error for {norm}: {e}")
     return None
 
 
@@ -556,7 +587,7 @@ def _extract_additional_metadata(
         return _extract_pdf_metadata(temp_path)
     if mime.startswith("audio/"):
         return _extract_audio_metadata(temp_path)
-    if mime.startswith("video/"):
+    if mime.startswith(VIDEO_MIME_PREFIX):
         return _extract_video_metadata(temp_path)
     if mime in (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -601,7 +632,7 @@ def _process_remote_file(url: str) -> Tuple[int, str, Optional[Path]]:
     logger.debug(f"Remote fetch → size={_hr(size)}, type={mime} for {url}")
 
     # 2) If this is a type that needs deep probing (PDF/images/audio/office), download it
-    if _needs_deep_probe(mime, size):
+    if _needs_deep_probe(mime):
         temp_probe_file = _download_to_temp(url)
 
     return size, mime, temp_probe_file
@@ -664,7 +695,7 @@ def _extract_all_metadata(
       - For other types, run the appropriate extractor on temp file.
     """
     extra: Dict[str, Union[str, int, float, tuple]] = {}
-    if mime.startswith("video/"):
+    if mime.startswith(VIDEO_MIME_PREFIX):
         source = temp_file if (temp_file and temp_file.exists()) else url
         extra = _extract_video_metadata(source)
     elif temp_file and temp_file.exists():

@@ -54,6 +54,8 @@ class OrderViewSet(viewsets.ModelViewSet):
     queryset = Order.objects.all()
     serializer_class = OrderSerializer
 
+    # ---------- Public endpoints ----------
+
     @action(detail=False, methods=["post"], url_path="admin")
     def create_for_admin(self, request, *args, **kwargs):
         return self._create_order(request, admin=True)
@@ -66,19 +68,13 @@ class OrderViewSet(viewsets.ModelViewSet):
         """
         Accepts a list of product_codes and user_ref.
         Returns, for each product:
-          - when the current 24h window started (window_start),
-          - when it will end (window_end),
-          - how many have been ordered in that window (already_ordered),
-          - and what remains (remaining).
+        - window_start/window_end (rolling 24h),
+        - already_ordered,
+        - remaining.
         """
-        user_ref = request.data.get("user_ref")
-        product_codes = request.data.get("product_codes")
-
-        if not user_ref or not product_codes:
-            return Response(
-                {"error": "user_ref and product_codes[] are required."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        user_ref, product_codes, err_resp = self._parse_limits_request(request)
+        if err_resp:
+            return err_resp
 
         try:
             user = self._get_user_or_error(user_ref)
@@ -86,61 +82,41 @@ class OrderViewSet(viewsets.ModelViewSet):
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         now = timezone.now()
-        results = []
+        window_cutoff = now - timedelta(hours=24)
+        org_id = getattr(
+            getattr(user, "organization_ref", None), "organization_id", None
+        )
+        est_key = getattr(
+            getattr(user, "establishment_ref", None), "full_external_key", None
+        )
+        org_obj = getattr(user, "organization_ref", None)
 
+        results = []
         for code in product_codes:
-            try:
-                product = Product.objects.get(product_code=code)
-            except Product.DoesNotExist:
-                # skip unknown codes
+            product = self._get_product_safe(code)
+            if not product:
                 continue
 
-            user_full_key = user.establishment_ref.full_external_key
-            user_org = user.organization_ref
+            # Resolve limit (establishment → org → default 0)
+            limit_page = self._fetch_limit_page(product, est_key, org_obj)
+            daily_limit = getattr(limit_page, "order_limit", 0)
 
-            limit_page = OrderLimitPage.objects.filter(
-                product_ref=product, full_external_keys__contains=[user_full_key]
-            ).first()
-
-            # Fallback: match by organization if no establishment-level limit
-            if not limit_page:
-                limit_page = OrderLimitPage.objects.filter(
-                    product_ref=product, organization_ref=user_org
-                ).first()
-
-            limit = limit_page.order_limit
-
-            # get all orders by this user for this product
-            user_org = user.organization_ref.organization_id
-            base_qs = Order.objects.filter(
-                user_ref__organization_ref__organization_id=user_org,
+            # Recent orders in this org for this product
+            recent_qs = Order.objects.filter(
+                user_ref__organization_ref__organization_id=org_id,
                 order_items__product_ref=product,
-            )
+                created_at__gte=window_cutoff,
+            ).order_by("created_at")
 
-            # keep only orders in the last 24h
-            window_cutoff = now - timedelta(hours=24)
-            recent = base_qs.filter(created_at__gte=window_cutoff)
-
-            if not recent.exists():
-                # no active window → start a new one now
-                window_start = now
-                already_ordered = 0
-            else:
-                # fixed window starts at the time of the earliest recent order
-                first = recent.order_by("created_at").first()
-                window_start = first.created_at
-                already_ordered = (
-                    recent.aggregate(total=Sum("order_items__quantity"))["total"] or 0
-                )
-
+            window_start, already_ordered = self._compute_window_stats(recent_qs, now)
             window_end = window_start + timedelta(hours=24)
-            remaining = max(limit - already_ordered, 0)
+            remaining = max(daily_limit - already_ordered, 0)
 
             results.append(
                 {
                     "product_code": code,
                     "title": product.title,
-                    "daily_limit": limit,
+                    "daily_limit": daily_limit,
                     "window_start": window_start,
                     "window_end": window_end,
                     "already_ordered": already_ordered,
@@ -150,159 +126,32 @@ class OrderViewSet(viewsets.ModelViewSet):
 
         return Response(results, status=status.HTTP_200_OK)
 
-    # Helper methods
-
-    def call_record_reorder_events(self, order_instance, request):
-        # Now, record reorder events (if any) for this order.
-        try:
-            self.record_reorder_events(order_instance, request)
-        except Exception as e:
-            logger.exception(
-                f"Failed to record reorder events for order {order_instance.order_id}: {e}"
-            )
-
-    def _get_or_create_analytics_index(self):
-        """
-        Fetch the Page with slug="event-analytics-index", or create it under
-        the root if it doesn't exist yet. Use select_for_update to avoid
-        concurrent creation collisions.
-        """
-        for attempt in range(3):
-            try:
-                with transaction.atomic():
-                    # Lock the root page to prevent concurrent creation
-                    root = Page.objects.select_for_update().get(
-                        pk=Page.objects.first().pk
-                    )
-                    analytics_index = Page.objects.filter(
-                        slug="event-analytics-index"
-                    ).first()
-                    if analytics_index:
-                        return analytics_index
-
-                    analytics_index = Page(
-                        title="Event Analytics",
-                        slug="event-analytics-index",
-                        # Use the EventAnalytics content type so add_child knows what to do
-                        content_type=ContentType.objects.get_for_model(EventAnalytics),
-                    )
-                    root.add_child(instance=analytics_index)
-                    root.save()
-                    logger.info("Parent page 'event-analytics-index' created.")
-                    return analytics_index
-            except IntegrityError as exc:
-                # If unique constraint violation on path, retry
-                cause = getattr(exc, "__cause__", None)
-                if (
-                    isinstance(cause, errors.UniqueViolation)
-                    and getattr(cause.diag, "constraint_name", "")
-                    == "wagtailcore_page_path_key"
-                    and attempt < 2
-                ):
-                    time.sleep(0.1 * (2**attempt))
-                    continue
-                logger.exception("Error creating or retrieving analytics index page.")
-                raise APIException(
-                    ErrorMessage.PAGE_CREATION_ERROR, ErrorCode.PAGE_CREATION_ERROR
-                )
-        # Fallback: try fetching without creating (should exist by now or raise)
-        analytics_index = Page.objects.filter(slug="event-analytics-index").first()
-        if analytics_index:
-            return analytics_index
-        raise APIException(
-            ErrorMessage.PAGE_CREATION_ERROR, ErrorCode.PAGE_CREATION_ERROR
-        )
-
-    def record_reorder_events(self, order_instance: Order, request):
-        """
-        For each order item in the given order, if the user has a previous order
-        for the same product, record a "reorder" EventAnalytics page under the
-        analytics index. Wrap in retry logic to mitigate concurrent path collisions.
-        """
-        session_id = request.headers.get("X-Session-ID", "unknown")
-        user = order_instance.user_ref
-
-        for attempt in range(3):
-            try:
-                with transaction.atomic():
-                    # Lock the analytics index page to ensure unique path allocation
-                    analytics_index = self._get_or_create_analytics_index()
-                    analytics_index = Page.objects.select_for_update().get(
-                        pk=analytics_index.pk
-                    )
-
-                    for item in order_instance.order_items.all():
-                        product = item.product_ref
-
-                        previous_orders = Order.objects.filter(
-                            user_ref=user, order_items__product_ref=product
-                        ).exclude(order_id=order_instance.order_id)
-                        if not previous_orders.exists():
-                            continue
-
-                        # Instantiate (but do NOT save yet)
-                        event_page = EventAnalytics(
-                            title=f"Reorder of {product.title}",
-                            slug=slugify(
-                                f"reorder-{product.product_code}-{uuid.uuid4()}"
-                            ),
-                            event_type="reorder",
-                            user_ref=user,
-                            session_id=session_id,
-                            metadata={
-                                "order_id": order_instance.order_id,
-                                "product_code": product.product_code,
-                                "quantity": item.quantity,
-                                "timestamp": timezone.now().isoformat(),
-                            },
-                        )
-
-                        # Add it as a child (this sets path, depth, etc. and saves)
-                        analytics_index.add_child(instance=event_page)
-
-                        logger.info(
-                            f"Recorded reorder event page (id={event_page.id}) "
-                            f"for user {user.user_id}, product {product.product_code}"
-                        )
-
-                    return  # Successfully recorded all reorder events; exit loop
-
-            except (IntegrityError, DjangoValidationError) as exc:
-                if self._is_collision(exc) and attempt < 2:
-                    time.sleep(0.1 * (2**attempt))
-                    continue
-                logger.exception(
-                    f"Failed to record reorder events retry attempt {attempt}: {exc}"
-                )
-                raise
+    # ---------- Core flow ----------
 
     def _create_order(self, request, admin=False):
-        # 1) Extract and validate raw inputs
         (
             data,
             items,
             address_ref,
-            user_ref,
-            user_data,
+            owner_user_ref,
+            delivery_user_data,
             err,
         ) = self._extract_and_validate_request(request, admin)
         if err:
             return err
 
-        # 2) Parent page
-        parent = self._get_parent_page(admin) if not err else None
+        parent = self._get_parent_page(admin)
 
-        # 3) Users
-        user_setup = self._prepare_users(admin, user_ref, user_data, data, parent)
+        # order_user (delivery) + limit_user (owner for caps)
+        user_setup = self._prepare_users(
+            admin, owner_user_ref, delivery_user_data, data, parent
+        )
         if isinstance(user_setup, Response):
             return user_setup
         order_user, limit_user = user_setup
 
-        # ✨ NEW: split items by which are within‐limit vs over‐limit
         allowed_items, skipped = self._filter_items_by_limit(items, limit_user)
-
         if not allowed_items:
-            # nothing at all is allowed → error on the first offending line
             first = skipped[0]
             raise DRFValidationError(
                 {
@@ -317,29 +166,122 @@ class OrderViewSet(viewsets.ModelViewSet):
                 }
             )
 
-        # 4) Address
         addr_result = self._resolve_address(address_ref, admin)
         if isinstance(addr_result, Response):
             return addr_result
         address = addr_result
 
-        # 5) Create using only the allowed items
         resp = self._attempt_create(
-            data, allowed_items, order_user, limit_user, address, parent, request, admin
+            data=data,
+            items=allowed_items,
+            order_user=order_user,
+            limit_user=limit_user,
+            address=address,
+            parent=parent,
+            request=request,
+            admin=admin,
         )
 
-        # 6) If we did send something, let client know which lines were skipped
         if isinstance(resp, Response) and resp.status_code == 201 and skipped:
             resp.data["skipped_items"] = skipped
 
         return resp
 
+    # ---------- Helpers: validation & limits ----------
+
+    def _parse_limits_request(self, request):
+        user_ref = request.data.get("user_ref")
+        product_codes = request.data.get("product_codes")
+        if not user_ref or not product_codes:
+            return (
+                None,
+                None,
+                Response(
+                    {"error": "user_ref and product_codes[] are required."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                ),
+            )
+        return user_ref, product_codes, None
+
+    def _get_product_safe(self, code):
+        try:
+            return Product.objects.get(product_code=code)
+        except Product.DoesNotExist:
+            return None
+
+    def _fetch_limit_page(self, product, est_key, org_obj):
+        if est_key:
+            lp = OrderLimitPage.objects.filter(
+                product_ref=product,
+                full_external_keys__contains=[est_key],
+            ).first()
+            if lp:
+                return lp
+        if org_obj:
+            return OrderLimitPage.objects.filter(
+                product_ref=product,
+                organization_ref=org_obj,
+            ).first()
+        return None
+
+    def _compute_window_stats(self, recent_qs, now):
+        if not recent_qs.exists():
+            return now, 0
+        first = recent_qs.first()
+        total = recent_qs.aggregate(total=Sum("order_items__quantity"))["total"] or 0
+        return first.created_at, total
+
+    def _extract_and_validate_request(self, request, admin):
+        data = request.data.copy()
+        items = data.pop("order_items", [])
+        address_ref = data.pop("address_ref", None)
+        user_ref = data.pop("user_ref", None)
+        user_data = data.pop("user_info", None) if admin else None
+
+        # product-live check
+        for it in items:
+            code = it.get("product_code")
+            if not self._is_product_live(code):
+                resp = JsonResponse(
+                    {
+                        "error_code": ErrorCode.PRODUCT_NOT_LIVE.value,
+                        "error_message": ErrorMessage.product_not_live(code),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+                return None, None, None, None, None, resp
+
+        if admin:
+            if not user_ref:
+                return (
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    handle_error(
+                        ErrorCode.USER_REF_REQUIRED,
+                        ErrorMessage.USER_REF_REQUIRED,
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                    ),
+                )
+            if not user_data:
+                return (
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    handle_error(
+                        ErrorCode.USER_INFO_REQUIRED,
+                        ErrorMessage.USER_INFO_REQUIRED,
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                    ),
+                )
+
+        return data, items, address_ref, user_ref, user_data, None
+
     def _filter_items_by_limit(self, items_data, user_instance):
-        """
-        Returns two lists:
-          • allowed_items: those with qty ≤ remaining today
-          • skipped_items: those over the limit, annotated with details
-        """
         window_start = timezone.now() - timedelta(hours=24)
         allowed_items, skipped_items = [], []
 
@@ -353,7 +295,6 @@ class OrderViewSet(viewsets.ModelViewSet):
             limit_page = OrderLimitPage.objects.filter(
                 product_ref=product, full_external_keys__contains=[user_full_key]
             ).first()
-
             if not limit_page:
                 limit_page = OrderLimitPage.objects.filter(
                     product_ref=product, organization_ref=user_org
@@ -390,56 +331,7 @@ class OrderViewSet(viewsets.ModelViewSet):
 
         return allowed_items, skipped_items
 
-    def _extract_and_validate_request(self, request, admin):
-        data = request.data.copy()
-        items = data.pop("order_items", [])
-        address_ref = data.pop("address_ref", None)
-        user_ref = data.pop("user_ref", None)
-        user_data = data.pop("user_info", None) if admin else None
-
-        # product-live check
-        for it in items:
-            code = it.get("product_code")
-            if not self._is_product_live(code):
-                resp = JsonResponse(
-                    {
-                        "error_code": ErrorCode.PRODUCT_NOT_LIVE.value,
-                        "error_message": ErrorMessage.product_not_live(code),
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-                return None, None, None, None, None, resp
-
-        # admin-only presence checks
-        if admin:
-            if not user_ref:
-                return (
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    handle_error(
-                        ErrorCode.USER_REF_REQUIRED,
-                        ErrorMessage.USER_REF_REQUIRED,
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                    ),
-                )
-            if not user_data:
-                return (
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    handle_error(
-                        ErrorCode.USER_INFO_REQUIRED,
-                        ErrorMessage.USER_INFO_REQUIRED,
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                    ),
-                )
-
-        return data, items, address_ref, user_ref, user_data, None
+    # ---------- Helpers: users & addresses ----------
 
     def _get_parent_page(self, admin):
         if admin:
@@ -447,31 +339,44 @@ class OrderViewSet(viewsets.ModelViewSet):
         return self._get_or_create_parent_page_or_error()
 
     def _prepare_users(self, admin, user_ref, user_data, data, parent):
+        """
+        Returns (order_user, limit_user)
+
+        Admin=True:
+          - order_user = delivery user (from user_info)
+          - limit_user = owner (user_ref)
+          - data["full_external_key"] = owner's key
+
+        Admin=False:
+          - order_user = limit_user = user_ref
+        """
         try:
             if admin:
-                delivery = self._get_or_create_user(user_data, parent)
-                delivery.refresh_from_db()
+                delivery_user = self._get_or_create_user(user_data, parent)
+                delivery_user.refresh_from_db()
+
                 owner = self._get_existing_user(user_ref)
-                if not getattr(owner.establishment_ref, "full_external_key", None):
+                est_key = getattr(
+                    getattr(owner, "establishment_ref", None), "full_external_key", None
+                )
+                if not est_key:
                     return JsonResponse(
                         {
                             "error": "User's establishment_ref or full_external_key is missing."
                         },
                         status=status.HTTP_404_NOT_FOUND,
                     )
-                data["full_external_key"] = owner.establishment_ref.full_external_key
-                primary, limiter = delivery, owner
-            else:
-                primary = self._get_user_or_error(user_ref)
-                if not primary.establishment_ref:
-                    return JsonResponse(
-                        {"error": "User's establishment_ref is missing."},
-                        status=status.HTTP_404_NOT_FOUND,
-                    )
-                data["full_external_key"] = primary.establishment_ref.full_external_key
-                limiter = primary
+                data["full_external_key"] = est_key
+                return delivery_user, owner
 
-            return primary, limiter
+            primary = self._get_user_or_error(user_ref)
+            if not getattr(primary, "establishment_ref", None):
+                return JsonResponse(
+                    {"error": "User's establishment_ref is missing."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            data["full_external_key"] = primary.establishment_ref.full_external_key
+            return primary, primary
 
         except IntegrityError:
             code = (
@@ -484,12 +389,12 @@ class OrderViewSet(viewsets.ModelViewSet):
                 if admin
                 else ErrorMessage.INTERNAL_SERVER_ERROR
             )
-            status_code = (
+            sc = (
                 status.HTTP_400_BAD_REQUEST
                 if admin
                 else status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-            return handle_error(code, msg, status_code=status_code)
+            return handle_error(code, msg, status_code=sc)
         except Exception:
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
@@ -511,15 +416,11 @@ class OrderViewSet(viewsets.ModelViewSet):
                 )
             raise DRFValidationError({"address_ref": ErrorMessage.ADDRESS_NOT_FOUND})
 
+    # ---------- Helpers: order creation ----------
+
     def _attempt_create(
         self, data, items, order_user, limit_user, address, parent, request, admin=False
     ):
-        """
-        Wrap order creation, item creation, quantity updates, and notification
-        in a single retryable block.  After saving the order we generate
-        the confirmation payload exactly once and then call GOV.UK Notify
-        with that same payload.
-        """
         for attempt in range(3):
             try:
                 with transaction.atomic():
@@ -530,9 +431,19 @@ class OrderViewSet(viewsets.ModelViewSet):
                     self._create_order_items(items, order, locked, order_user)
                     self._update_product_quantities(items)
 
-                # outside the inner atomic, once the order is definitely committed:
                 confirmation = generate_order_confirmation(order)
-                # ensure the DB uses exactly that confirmation number
+
+                # For admin, always override shipping with delivery user + address
+                if admin:
+                    confirmation["shipping_address"] = self._shipping_dict(
+                        address, order_user
+                    )
+                else:
+                    if isinstance(confirmation.get("shipping_address"), str):
+                        confirmation["shipping_address"] = self._shipping_dict(
+                            address, order.user_ref
+                        )
+
                 if (
                     order.order_confirmation_number
                     != confirmation["confirmation_number"]
@@ -542,7 +453,12 @@ class OrderViewSet(viewsets.ModelViewSet):
                     ]
                     order.save(update_fields=["order_confirmation_number"])
 
-                self._notify_with_payload(order, request, confirmation, admin)
+                self._notify_with_payload(
+                    order=order,
+                    request=request,
+                    confirmation=confirmation,
+                    admin=admin,
+                )
                 return Response(
                     self.get_serializer(order).data, status=status.HTTP_201_CREATED
                 )
@@ -559,34 +475,60 @@ class OrderViewSet(viewsets.ModelViewSet):
                     )
                 raise DRFValidationError({"detail": ErrorMessage.ORDER_CREATION_ERROR})
 
-        # fallback
         return handle_error(
             ErrorCode.INTERNAL_SERVER_ERROR,
             ErrorMessage.INTERNAL_SERVER_ERROR,
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
+    def _shipping_dict(self, address: "Address", person: "User") -> dict:
+        """
+        Notify-friendly shipping dict using delivery person (user_info) + address.
+        Ensures keys: first_name, last_name, name, telephone,
+                      address_line_1/2/3, city, county, postcode, country
+        """
+
+        def clean(v):
+            return (v or "").strip()
+
+        full_name = f"{clean(getattr(person, 'first_name', ''))} {clean(getattr(person, 'last_name', ''))}".strip()
+        return {
+            "first_name": clean(getattr(person, "first_name", "")),
+            "last_name": clean(getattr(person, "last_name", "")),
+            "name": full_name,
+            "telephone": clean(getattr(person, "mobile_number", "")),
+            "address_line_1": clean(getattr(address, "address_line1", ""))
+            if address
+            else "",
+            "address_line_2": clean(getattr(address, "address_line2", ""))
+            if address
+            else "",
+            "address_line_3": clean(getattr(address, "address_line3", ""))
+            if address
+            else "",
+            "city": clean(getattr(address, "city", "")) if address else "",
+            "county": clean(getattr(address, "county", "")) if address else "",
+            "postcode": clean(getattr(address, "postcode", "")) if address else "",
+            "country": clean(getattr(address, "country", "")) if address else "",
+        }
+
     def _notify_with_payload(self, order, request, confirmation, admin=False):
         """
-        Sends the confirmation email using *exactly* the confirmation payload
-        we just generated and wrote to the DB.
+        Always send to order.user_ref (delivery user in admin flow, self otherwise)
+        and greet with that recipient's name.
         """
         recipient = order.user_ref
+        recipient_email = getattr(recipient, "email", None) or getattr(
+            getattr(request, "user", None), "email", None
+        )
 
-        # Pick the right sender name
-        if admin and hasattr(request, "user"):
-            sender_full_name = (
-                f"{request.user.first_name} {request.user.last_name}".strip()
-            )
-            sender_name = request.user.first_name.strip()
-        else:
-            sender_full_name = f"{recipient.first_name} {recipient.last_name}".strip()
-            sender_name = recipient.first_name.strip() or recipient.first_name
+        sender_full_name = f"{(recipient.first_name or '').strip()} {(recipient.last_name or '').strip()}".strip()
+        sender_name = (recipient.first_name or sender_full_name or "Customer").strip()
 
         try:
             send_notification(
                 "email",
-                recipient.email,
+                recipient_email,
                 sender_name,
                 sender_full_name,
                 confirmation["confirmation_number"],
@@ -596,13 +538,14 @@ class OrderViewSet(viewsets.ModelViewSet):
                 confirmation["shipping_address"],
             )
         except Exception as e:
-            logger.warning(f"Email send failed for order {order.order_id}: {e}")
+            logger.warning("Email send failed for order %s: %s", order.order_id, e)
 
-        # Still record any reorder events
         try:
             self.record_reorder_events(order, request)
         except Exception as e:
-            logger.error(f"Analytics failed for order {order.order_id}: {e}")
+            logger.error("Analytics failed for order %s: %s", order.order_id, e)
+
+    # ---------- Helpers: DB + utils ----------
 
     def _is_collision(self, exc):
         return (isinstance(exc, IntegrityError) and self._is_path_collision(exc)) or (
@@ -627,11 +570,12 @@ class OrderViewSet(viewsets.ModelViewSet):
             product = Product.objects.get(product_code=product_code)
             return product.status == "live"
         except Product.DoesNotExist:
-            logger.warning(f"Product with code {product_code} does not exist.")
+            logger.warning("Product with code %s does not exist.", product_code)
             return False
         except Exception as e:
             logger.exception(
-                f"Unexpected error occurred while checking if product is live: {e}",
+                "Unexpected error occurred while checking if product is live: %s",
+                e,
                 extra={
                     "product_code": product_code,
                     "traceback": traceback.format_exc(),
@@ -643,76 +587,89 @@ class OrderViewSet(viewsets.ModelViewSet):
         logger.info("Updating product quantities...")
         for item in items_data:
             product = item.get("product_ref")
-            logger.info(f"Product: {product}")
             if product is None:
                 logger.error("Product reference is None.")
                 continue
-
             product_code = product.product_code
             quantity_ordered = item.get("quantity")
-
             try:
                 if product.update_ref:
                     current_quantity_available = product.update_ref.quantity_available
                     new_quantity_available = (
                         current_quantity_available - quantity_ordered
                     )
-
                     product.update_ref.quantity_available = new_quantity_available
                     product.update_ref.save()
-
                     logger.info(
-                        f"Updated quantity_available for product_code {product_code}: {new_quantity_available}"
+                        "Updated quantity_available for product_code %s: %s",
+                        product_code,
+                        new_quantity_available,
                     )
                 else:
                     logger.error(
-                        f"No update_ref found for product_code: {product_code}"
+                        "No update_ref found for product_code: %s", product_code
                     )
-
             except Product.DoesNotExist:
-                logger.error(f"Product not found for product_code: {product_code}")
+                logger.error("Product not found for product_code: %s", product_code)
             except Exception as e:
                 logger.exception(
-                    f"Unexpected error while updating quantities for product {product_code}: {e}",
-                    extra={
-                        "product_code": product_code,
-                        "traceback": traceback.format_exc(),
-                    },
+                    "Unexpected error while updating quantities for product %s: %s",
+                    product_code,
+                    e,
+                    extra={"traceback": traceback.format_exc()},
                 )
                 raise APIException(ErrorMessage.INTERNAL_SERVER_ERROR)
 
     def _get_or_create_user(self, user_data, parent_page):
-        # 1) Look up any existing user by email…
-        user = User.objects.filter(email=user_data["email"]).first()
-        role = Role.objects.filter(name="User").first()
+        """
+        Delivery user from user_info:
+          - Always sync first_name, last_name, mobile_number if payload provides values.
+        """
+        email = (user_data.get("email") or "").strip().lower()
+        first = (user_data.get("first_name") or "").strip()
+        last = (user_data.get("last_name") or "").strip()
+        mobile = (user_data.get("mobile_number") or "").strip()
+
+        if not email:
+            raise DRFValidationError(
+                {"user_info.email": "Email is required for delivery user."}
+            )
+
+        user = User.objects.filter(email=email).first()
+        role = Role.objects.filter(name__iexact="User").first()
         if not role:
             raise NotFound(detail="Role ‘User’ not found.")
 
         if user:
-            # 2) If they exist but have no user_id, give them one—but first
-            #    patch any Orders that point at the old blank ID
-            if not user.user_id:
+            if not getattr(user, "user_id", None):
                 new_uuid = str(uuid.uuid4())
                 with transaction.atomic():
-                    # move all orders with user_ref_id='' → new_uuid
                     Order.objects.filter(user_ref_id="").update(user_ref_id=new_uuid)
-                    # now that no child rows point at the old key, update the User
                     User.objects.filter(pk=user.pk).update(user_id=new_uuid)
-                # refresh the Python object
                 user.user_id = new_uuid
+
+            updates = {}
+            if first and user.first_name != first:
+                updates["first_name"] = first
+            if last and user.last_name != last:
+                updates["last_name"] = last
+            if mobile and user.mobile_number != mobile:
+                updates["mobile_number"] = mobile
+            if updates:
+                User.objects.filter(pk=user.pk).update(**updates)
+                user.refresh_from_db()
             return user
 
-        # 3) Otherwise create a brand‑new delivery user as before
         unique_slug = self.get_unique_slug(
-            slugify(f"user-{user_data.get('email','default')}" + str(datetime.now()))
+            slugify(f"user-{email}-{datetime.now().timestamp()}")
         )
         user = User(
             user_id=str(uuid.uuid4()),
-            first_name=user_data["first_name"],
-            last_name=user_data["last_name"],
+            first_name=first,
+            last_name=last,
             role_ref=role,
-            email=user_data["email"],
-            mobile_number=user_data["mobile_number"],
+            email=email,
+            mobile_number=mobile,
             slug=unique_slug,
             title="user_info_title",
         )
@@ -721,15 +678,9 @@ class OrderViewSet(viewsets.ModelViewSet):
         return user
 
     def _get_existing_user(self, user_ref_id):
-        """
-        Retrieves an existing user by ID.
-        """
         return User.objects.get(user_id=user_ref_id)
 
     def _create_address(self, address_data, user_instance, parent_page):
-        """
-        Creates and returns a new address instance.
-        """
         address_serializer = AddressSerializer(data=address_data)
         address_serializer.is_valid(raise_exception=True)
 
@@ -746,8 +697,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             user_ref=user_instance,
             slug=self.get_unique_slug(
                 slugify(
-                    f"address-{address_data.get('postcode', 'default')}"
-                    + str(datetime.now())
+                    f"address-{address_data.get('postcode', 'default')}{datetime.now()}"
                 )
             ),
             title=address_data.get("address_line1", "Address Title"),
@@ -755,27 +705,21 @@ class OrderViewSet(viewsets.ModelViewSet):
         parent_page.add_child(instance=address_instance)
         address_instance.save()
         address_instance.refresh_from_db()
-        logger.info(f"Address created: ID={address_instance.id}")
+        logger.info("Address created: ID=%s", address_instance.id)
         return address_instance
 
     def _create_order_instance(self, data, user_instance, address_ref, parent_page):
-        """
-        Creates and returns a new order instance.
-        """
         unique_slug = self.get_unique_slug(
             slugify("orders_title" + str(datetime.now()))
         )
-        # Generate the confirmation number here
         confirmation_number = generate_confirmation_number()
-        order_id = data.get("order_id")
-        if order_id is None:
-            order_id = str(uuid.uuid4())
+        order_id = data.get("order_id") or str(uuid.uuid4())
 
         order_instance = Order(
             title="Order Title",
             slug=unique_slug,
             order_id=order_id,
-            user_ref=user_instance,
+            user_ref=user_instance,  # delivery user when admin=True
             address_ref=address_ref,
             order_confirmation_number=confirmation_number,
             order_origin=data.get("order_origin"),
@@ -786,41 +730,38 @@ class OrderViewSet(viewsets.ModelViewSet):
         parent_page.add_child(instance=order_instance)
         order_instance.save()
         order_instance.refresh_from_db()
-        logger.info(f"Order created: ID={order_instance.id}")
+        logger.info("Order created: ID=%s", order_instance.id)
         return order_instance
 
     def _create_order_items(
         self, items_data, order_instance, parent_page, user_instance
     ):
-        """
-        Creates order items and associates them with the order.
-        """
-        logger.info(f"Creating order items for order {order_instance.order_id}...")
-
+        logger.info("Creating order items for order %s...", order_instance.order_id)
         for item_data in items_data:
             product_code = item_data.get("product_code")
-
+            product_instance = None
             if product_code:
                 try:
                     product_instance = Product.objects.get(product_code=product_code)
-
                     item_data["product_ref"] = product_instance
-                    # del item_data["product_code"]
                 except Product.DoesNotExist:
-                    logger.warning(f"Product not found: {product_code}")
+                    logger.warning("Product not found: %s", product_code)
                     return {"error": f"Product with code {product_code} not found."}
             else:
                 item_data["product_ref"] = None
 
-            item_slug = slugify(
+            base_slug = (
                 f"{order_instance.slug}-{product_instance.product_code}"
-                + str(datetime.now())
+                if product_instance
+                else f"{order_instance.slug}-unknown"
             )
+            item_slug = slugify(base_slug + str(datetime.now()))
             item_title = (
                 f"{order_instance.title} - {product_instance.title}"
-                if product_code
+                if product_instance
                 else "Unknown Product"
             )
+
             order_item_instance = OrderItem(
                 order_ref=order_instance,
                 slug=item_slug,
@@ -832,34 +773,112 @@ class OrderViewSet(viewsets.ModelViewSet):
             parent_page.add_child(instance=order_item_instance)
             order_item_instance.save()
             order_item_instance.refresh_from_db()
-            logger.info(f"Order item created: ID={order_item_instance.id}")
+            logger.info("Order item created: ID=%s", order_item_instance.id)
 
-    def _send_order_confirmation(self, order_instance):
-        """
-        Sends order confirmation via GOV.UK Notify API.
-        """
-        confirmation_message = generate_order_confirmation(
-            order_instance
-        )  # Generate the confirmation message
+    # ---------- Analytics ----------
 
-        logging.info(f"confirmation_message: {confirmation_message}")
-
-        user_instance = order_instance.user_ref  # Get the user instance from the order
-
-        if user_instance and user_instance.email:
-            # Send the notification using the generated confirmation_message
-            send_notification(
-                "email",
-                user_instance.email,
-                user_instance.first_name,
-                confirmation_message["confirmation_number"],
-                confirmation_message["order_date"],
-                confirmation_message["items_table"],
-                confirmation_message["total_items"],
-                confirmation_message["shipping_address"],
+    def call_record_reorder_events(self, order_instance, request):
+        try:
+            self.record_reorder_events(order_instance, request)
+        except Exception as e:
+            logger.exception(
+                "Failed to record reorder events for order %s: %s",
+                order_instance.order_id,
+                e,
             )
 
-            # logger.info(response, status_code)
+    def _get_or_create_analytics_index(self):
+        for attempt in range(3):
+            try:
+                with transaction.atomic():
+                    root = Page.objects.select_for_update().get(
+                        pk=Page.objects.first().pk
+                    )
+                    analytics_index = Page.objects.filter(
+                        slug="event-analytics-index"
+                    ).first()
+                    if analytics_index:
+                        return analytics_index
+                    analytics_index = Page(
+                        title="Event Analytics",
+                        slug="event-analytics-index",
+                        content_type=ContentType.objects.get_for_model(EventAnalytics),
+                    )
+                    root.add_child(instance=analytics_index)
+                    root.save()
+                    logger.info("Parent page 'event-analytics-index' created.")
+                    return analytics_index
+            except IntegrityError as exc:
+                cause = getattr(exc, "__cause__", None)
+                if (
+                    isinstance(cause, errors.UniqueViolation)
+                    and getattr(cause.diag, "constraint_name", "")
+                    == "wagtailcore_page_path_key"
+                    and attempt < 2
+                ):
+                    time.sleep(0.1 * (2**attempt))
+                    continue
+                logger.exception("Error creating or retrieving analytics index page.")
+                raise APIException(
+                    ErrorMessage.PAGE_CREATION_ERROR, ErrorCode.PAGE_CREATION_ERROR
+                )
+        analytics_index = Page.objects.filter(slug="event-analytics-index").first()
+        if analytics_index:
+            return analytics_index
+        raise APIException(
+            ErrorMessage.PAGE_CREATION_ERROR, ErrorCode.PAGE_CREATION_ERROR
+        )
+
+    def record_reorder_events(self, order_instance: Order, request):
+        session_id = request.headers.get("X-Session-ID", "unknown")
+        user = order_instance.user_ref
+        for attempt in range(3):
+            try:
+                with transaction.atomic():
+                    analytics_index = self._get_or_create_analytics_index()
+                    analytics_index = Page.objects.select_for_update().get(
+                        pk=analytics_index.pk
+                    )
+                    for item in order_instance.order_items.all():
+                        product = item.product_ref
+                        previous_orders = Order.objects.filter(
+                            user_ref=user, order_items__product_ref=product
+                        ).exclude(order_id=order_instance.order_id)
+                        if not previous_orders.exists():
+                            continue
+                        event_page = EventAnalytics(
+                            title=f"Reorder of {product.title}",
+                            slug=slugify(
+                                f"reorder-{product.product_code}-{uuid.uuid4()}"
+                            ),
+                            event_type="reorder",
+                            user_ref=user,
+                            session_id=session_id,
+                            metadata={
+                                "order_id": order_instance.order_id,
+                                "product_code": product.product_code,
+                                "quantity": item.quantity,
+                                "timestamp": timezone.now().isoformat(),
+                            },
+                        )
+                        analytics_index.add_child(instance=event_page)
+                        logger.info(
+                            "Recorded reorder event page (id=%s) for user %s, product %s",
+                            event_page.id,
+                            user.user_id,
+                            product.product_code,
+                        )
+                    return
+            except (IntegrityError, DjangoValidationError) as exc:
+                if self._is_collision(exc) and attempt < 2:
+                    time.sleep(0.1 * (2**attempt))
+                    continue
+                logger.exception(
+                    "Failed to record reorder events retry attempt %s: %s", attempt, exc
+                )
+                raise
+
+    # ---------- Misc CRUD ----------
 
     def _get_or_create_parent_page_or_error(self):
         try:
@@ -874,15 +893,10 @@ class OrderViewSet(viewsets.ModelViewSet):
         if not user_ref:
             logger.warning("User reference not provided.")
             raise DRFValidationError({"user_ref": ErrorMessage.USER_NOT_PROVIDED})
-
         try:
-            user = User.objects.get(user_id=user_ref)
-            # if not user.is_authorized:
-            #     logger.warning(f"User with ID {user_ref} is not authorized.")
-            #     raise PermissionDenied(ErrorMessage.USER_NOT_AUTHORIZED)
-            return user
+            return User.objects.get(user_id=user_ref)
         except User.DoesNotExist:
-            logger.warning(f"No user found with ID {user_ref}")
+            logger.warning("No user found with ID %s", user_ref)
             raise DRFValidationError({"user_ref": ErrorMessage.USER_NOT_FOUND})
 
     def _get_establishment_ref(self, organization_ref):
@@ -892,66 +906,19 @@ class OrderViewSet(viewsets.ModelViewSet):
             else None
         )
 
-    def _create_address_if_needed(self, address_data, user_instance, parent_page):
-        if not address_data:
-            return None
-
-        address_serializer = AddressSerializer(data=address_data)
-        if not address_serializer.is_valid():
-            logger.warning(f"Address data is invalid: {address_serializer.errors}")
-            raise DRFValidationError(address_serializer.errors)
-
-        try:
-            address_instance = Address(
-                **address_data,
-                user_ref=user_instance,
-                slug=self.get_unique_slug(
-                    slugify(
-                        f"address-{address_data.get('postcode', 'default')}"
-                        + str(datetime.now())
-                    )
-                ),
-                title=address_data.get("address_line1", "Address Title"),
-            )
-            parent_page.add_child(instance=address_instance)
-            address_instance.save()
-            return address_instance
-        except IntegrityError:
-            logger.exception(
-                "Integrity error occurred while creating address.",
-                extra={
-                    "address_data": address_data,
-                    "user_id": getattr(user_instance, "id", None),
-                    "parent_page_id": getattr(parent_page, "id", None),
-                },
-            )
-            raise DRFValidationError(ErrorMessage.ADDRESS_CREATION_ERROR)
-        except Exception as e:
-            logger.exception(
-                f"Unexpected error occurred while creating address: {e}",
-                extra={
-                    "address_data": address_data,
-                    "user_id": getattr(user_instance, "id", None),
-                    "parent_page_id": getattr(parent_page, "id", None),
-                    "traceback": traceback.format_exc(),
-                },
-            )
-            raise APIException(ErrorMessage.INTERNAL_SERVER_ERROR)
-
     def _get_product_or_none(self, product_code):
         if not product_code:
             return None
         try:
             return Product.objects.get(product_code=product_code)
         except Product.DoesNotExist:
-            logger.warning(f"Product with code {product_code} does not exist.")
+            logger.warning("Product with code %s does not exist.", product_code)
             raise DRFValidationError({"product_code": ErrorMessage.PRODUCT_NOT_FOUND})
 
     def get_unique_slug(self, base_slug):
         queryset = Order.objects.filter(slug__startswith=base_slug)
         if not queryset.exists():
             return base_slug
-
         num = queryset.count() + 1
         return f"{base_slug}-{num}"
 
@@ -972,57 +939,44 @@ class OrderViewSet(viewsets.ModelViewSet):
 
     def list(self, request, *args, **kwargs):
         user_id = request.query_params.get("user_id")
-        if user_id:
-            queryset = self.queryset.filter(user_ref__user_id=user_id)
-        else:
-            queryset = self.queryset
-
+        queryset = (
+            self.queryset.filter(user_ref__user_id=user_id)
+            if user_id
+            else self.queryset
+        )
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
 
     @action(detail=False, methods=["get"], url_path="get-all-orders")
     def get_all_orders(self, request):
         try:
-            # Fetch all orders, you can add filtering or pagination if needed
             orders = Order.objects.all()
-
-            # Serialize the data
             serializer = self.get_serializer(orders, many=True)
-
-            # Return the serialized data
             return Response(serializer.data, status=status.HTTP_200_OK)
         except Exception as e:
-            # Handle any unexpected errors
             return Response(
                 {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
     def update(self, request, *args, **kwargs):
-        # Get the order_id from kwargs
         order_id = kwargs.get("pk")
-
-        # Get the order instance using the order_id
         instance = self.get_queryset().filter(order_id=order_id).first()
-
         if not instance:
             return Response(
                 {"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND
             )
-
-        # Serialize the data
         serializer = self.get_serializer(instance, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
             return Response(serializer.data, status=status.HTTP_200_OK)
-
-        logger.warning(f"Update errors: {serializer.errors}")
+        logger.warning("Update errors: %s", serializer.errors)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
         try:
             self.perform_destroy(instance)
-            logger.info(f"Order with ID {instance.id} deleted successfully.")
+            logger.info("Order with ID %s deleted successfully.", instance.id)
             return Response(status=status.HTTP_204_NO_CONTENT)
         except Exception:
             logger.exception("Unexpected error occurred while deleting order.")

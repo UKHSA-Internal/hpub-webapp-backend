@@ -43,13 +43,20 @@ STATUS_MAPPING = {
 
 
 def skip_if_suppressed(fn):
-    """Skip handler if instance.suppress_event is True."""
-
     @wraps(fn)
     def wrapper(sender, instance, **kwargs):
+        # Block event if suppress_event or download-only tag
         if getattr(instance, "suppress_event", False):
             logger.info(
                 "Event suppressed for product %s (suppress_event=True)",
+                instance.product_code,
+            )
+            return
+        # Skip event if download-only
+        tag = (getattr(instance, "tag", None) or "").strip().lower()
+        if tag == "download-only":
+            logger.info(
+                "Event not sent for product %s: tag is 'download-only'",
                 instance.product_code,
             )
             return
@@ -85,6 +92,12 @@ def prepare_product_data(product_instance, required_fields_enum, status):
             "status": normalised,
         }
 
+    resource_type = getattr(update, "product_type", "")
+    if resource_type.lower() == "stickers":
+        UOM = 1
+    else:
+        UOM = getattr(update, "unit_of_measure", "")
+
     # DRAFT: full draft payload
     if status == "draft":
         return {
@@ -92,7 +105,7 @@ def prepare_product_data(product_instance, required_fields_enum, status):
             "title": product_instance.product_title,
             "status": normalised,
             "maxOrder": [],
-            "uom": getattr(update, "unit_of_measure", ""),
+            "uom": UOM,
             "runToZero": getattr(update, "run_to_zero", False),
             "costCentre": "",
             "localCode": "",
@@ -114,7 +127,7 @@ def prepare_product_data(product_instance, required_fields_enum, status):
             {"companyKeys": ol.full_external_keys, "quantity": ol.order_limit}
             for ol in product_instance.order_limits.all()
         ],
-        "uom": getattr(update, "unit_of_measure", ""),
+        "uom": UOM,
         "runToZero": getattr(update, "run_to_zero", False),
         "costCentre": getattr(update, "cost_centre", ""),
         "localCode": getattr(update, "local_code", ""),

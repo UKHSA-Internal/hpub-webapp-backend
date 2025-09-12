@@ -13,12 +13,10 @@ from .views import (
     BulkProgramUploadViewSet,
 )
 
-# 1) Explicitly pin the two custom list actions up front
 featured_programs = ProgramListViewSet.as_view({"get": "featured_programs"})
 filtered_programs = ProgramListViewSet.as_view({"get": "programs_with_related"})
 
 router = DefaultRouter()
-# 2) Register all of your ViewSets—order here doesn't matter now that the custom paths are first
 router.register(r"programs", ProgramListViewSet, basename="program")
 router.register(
     r"programs/name", ProgramNameCheckViewSet, basename="program-name-check"
@@ -30,20 +28,24 @@ router.register(
 )
 
 urlpatterns = [
-    # these two will always be matched before any "/programs/<pk>/" catch-all
+    # 1) your other custom endpoints
     path(
         "programs/create/",
         ProgramCreateViewSet.as_view({"post": "create"}),
         name="programs-create",
     ),
     path("programs/featured/", featured_programs, name="programs-featured"),
-    path("programs/filtered-programmes/", filtered_programs, name="programs-filtered"),
-    # now drop in the router’s automatically generated routes
-    *router.urls,
-    # plus your bulk-upload endpoint
+    path(
+        "programs/filtered-programmes/",
+        filtered_programs,
+        name="programs-filtered",
+    ),
+    # 2) now your bulk-upload *before* the router’s catch‑alls
     path(
         "programs/bulk-upload/",
         BulkProgramUploadViewSet.as_view(),
         name="programs-bulk-upload",
     ),
+    # 3) finally, drop in all of the router‑generated routes
+    *router.urls,
 ]

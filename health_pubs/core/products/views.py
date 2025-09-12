@@ -2,8 +2,10 @@ import datetime
 import json
 import logging
 import re
+import os
 import uuid
-from typing import Optional, Union
+import difflib
+from typing import Any, Iterable, Mapping, Optional, Set, Union, Dict, List, Tuple
 from urllib.parse import unquote
 from django.utils import timezone
 import time
@@ -12,7 +14,26 @@ from psycopg2 import errors as pg_errors
 from collections import defaultdict
 from datetime import timedelta
 
+from django.db.models import (
+    Q,
+    F,
+    Value,
+    IntegerField,
+    Case,
+    When,
+    Window,
+)
+from django.db.models.functions import (
+    Upper,
+    Trim,
+    Replace,
+)
+from django.db.models.functions.window import RowNumber
+
+
 import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 from core.audiences.models import Audience
 from core.diseases.models import Disease
 from core.diseases.serializers import DiseaseSerializer
@@ -40,15 +61,17 @@ from rest_framework.filters import OrderingFilter, SearchFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from django.conf import settings
 from django.core.cache import cache
-from django.utils.decorators import method_decorator
-from django.views.decorators.cache import cache_page
 
 from core.utils.product_recommendation_system import get_recommended_products
 from core.vaccinations.models import Vaccination
 from core.vaccinations.serializers import VaccinationSerializer
 from core.where_to_use.models import WhereToUse
 from django.contrib.contenttypes.models import ContentType
-from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.core.exceptions import (
+    ObjectDoesNotExist,
+    ValidationError,
+    ImproperlyConfigured,
+)
 from rest_framework.filters import OrderingFilter, SearchFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics
@@ -74,19 +97,24 @@ from rest_framework.status import (
     HTTP_403_FORBIDDEN,
     HTTP_404_NOT_FOUND,
 )
+from django.utils.http import http_date
 from rest_framework.views import APIView
 from wagtail.models import Page
-
+from collections.abc import Mapping
+from django.http import HttpRequest
 from .models import Product, ProductUpdate
 from .serializers import (
     ProductSearchSerializer,
     ProductSerializer,
     ProductUpdateSerializer,
+    RelatedProductSerializer,
 )
+from wagtail.models import Page
+from treebeard.mp_tree import MP_Node
 from django.core.serializers.json import DjangoJSONEncoder
 
 from configs.get_secret_config import Config
-
+from django.core.exceptions import ValidationError
 
 config = Config()
 
@@ -99,8 +127,11 @@ UNEXPECTED_ERROR_MSG = "An unexpected error occurred."
 INTERNAL_ERROR_MSG = "An unexpected error occurred while searching for products."
 PRODUCT_NOT_FOUND_LOG_MSG = "No product found with product_code: %s"
 
-# Global constant for valid sort fields
-VALID_SORT_FIELDS = [
+
+# --------------------------------------------------------------------------- #
+# Global constant for valid sort fields                                       #
+# --------------------------------------------------------------------------- #
+VALID_SORT_FIELDS: List[str] = [
     "product_title",
     "-product_title",
     "created_at",
@@ -114,10 +145,54 @@ VALID_SORT_FIELDS = [
 ]
 
 
+# Expandable internal allow-list we’ll reuse everywhere
+ALLOWED_SORT_FIELDS: set[str] = set(
+    VALID_SORT_FIELDS
+    + [
+        "norm_code",
+        "-norm_code",
+        "product_code_no_dashes",
+        "-product_code_no_dashes",
+        "program_name",
+        "-program_name",
+    ]
+)
+
+
 _DIGITS = list("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 _BASE = len(_DIGITS)
+
+_DIGIT_MAP = {ch: i for i, ch in enumerate(_DIGITS)}
+_VALID_KEY_RE = re.compile(r"^[A-Z0-9]+$")
 # default TTLs (in seconds)
 CACHE_TTL = getattr(settings, "CACHE_TTL")
+
+# Remove hyphens, underscores, and whitespace, then uppercase.
+PRODUCT_CODE_NORMALIZE_RE = re.compile(r"[-_\s]+")
+
+CANONICAL_TAGS = {"download-only", "download-or-order", "order-only"}
+
+
+def normalize_tag(raw: str) -> str:
+    if not raw:
+        return ""
+    cleaned = raw.strip().lower().replace("_", "-")
+    # fix extremely common misspellings manually if needed
+    if cleaned == "donwload-only":
+        cleaned = "download-only"
+    # fuzzy-match to canonical tags (optional, helpful for other typos)
+    if cleaned not in CANONICAL_TAGS:
+        close = difflib.get_close_matches(cleaned, CANONICAL_TAGS, n=1, cutoff=0.8)
+        if close:
+            cleaned = close[0]
+    return cleaned
+
+
+def normalize_product_code(value: str) -> str:
+    """Normalize a product code the same way as DB normalization."""
+    if not value:
+        return ""
+    return PRODUCT_CODE_NORMALIZE_RE.sub("", value).upper()
 
 
 def generate_product_key(last_key: str | None) -> str:
@@ -160,34 +235,61 @@ def generate_product_key(last_key: str | None) -> str:
     return "".join(_DIGITS[pos] for pos in positions)
 
 
-def get_next_product_key(program_name: str) -> str:
-    """
-    Looks up all existing keys for this program, finds the
-    max in our custom ordering, and returns the next one.
-    """
-    # pull all keys into Python so we can do a proper numeric max
-    keys = list(
-        Product.objects.filter(program_name=program_name).values_list(
-            "product_key", flat=True
-        )
-    )
-
-    last = max(keys, key=lambda k: _key_to_int(k)) if keys else None
-    next_key = generate_product_key(last)
-    logging.info("get_next_product_key: %r → %r", last, next_key)
-    return next_key
+def _normalize_key(key: str) -> str:
+    if key is None:
+        return ""
+    return str(key).strip().upper()
 
 
 def _key_to_int(key: str) -> int:
     """
-    Converts a key like '1', '9', 'A', 'Z', '11', '1Z', etc.
-    into a plain integer so we can compare them properly.
+    Convert a base-36-like key (A-Z,0-9) into an integer.
+    Raises ValueError for invalid tokens (callers should pre-filter).
     """
+    s = _normalize_key(key)
+    if not s or not _VALID_KEY_RE.match(s):
+        raise ValueError(f"invalid product_key '{key}'")
     value = 0
-    for ch in key:
-        idx = _DIGITS.index(ch)
-        value = value * _BASE + idx
+    for ch in s:
+        value = value * _BASE + _DIGIT_MAP[ch]
     return value
+
+
+def get_next_product_key(program_name: str) -> str:
+    """
+    Fetch existing keys for this program, ignore malformed ones,
+    and compute the next key from the max valid key.
+    """
+    keys_qs = Product.objects.filter(program_name=program_name).values_list(
+        "product_key", flat=True
+    )
+
+    valid_keys, invalid_keys = [], []
+    for raw in keys_qs:
+        s = _normalize_key(raw)
+        if s and _VALID_KEY_RE.match(s):
+            valid_keys.append(s)
+        else:
+            invalid_keys.append(raw)
+
+    if invalid_keys:
+        logging.warning(
+            "get_next_product_key: ignoring %d invalid product_key(s) for program '%s' "
+            "(showing up to 5): %s",
+            len(invalid_keys),
+            program_name,
+            invalid_keys[:5],
+        )
+
+    last = max(valid_keys, key=_key_to_int) if valid_keys else None
+    next_key = generate_product_key(last)  # should handle None
+    logging.info(
+        "get_next_product_key: %r → %r (from %d valid keys)",
+        last,
+        next_key,
+        len(valid_keys),
+    )
+    return next_key
 
 
 def get_next_version_number(program_id, product_key, iso_language_code):
@@ -443,6 +545,27 @@ def filter_live_languages(products_data):
     return products_data
 
 
+# --------------------------------------------------------------------------- #
+# Helper: invalidate caches after write                                       #
+# --------------------------------------------------------------------------- #
+
+
+def invalidate_product_caches(product_code: str | None = None):
+    """
+    Optional: If your cache backend supports pattern deletes (e.g., django-redis),
+    this purges list caches and the detail cache for the product.
+    If not supported, the short TTLs still keep things fresh quickly.
+    """
+    try:
+        cache.delete_pattern("products:*")  # list/search
+        cache.delete_pattern("prog_products:*")  # program lists (if used)
+        if product_code:
+            cache.delete_pattern(f"product_detail:*:{product_code}")
+    except AttributeError:
+        # Backend doesn't support delete_pattern — rely on TTL.
+        pass
+
+
 class CustomPagination(PageNumberPagination):
     page_size = 10  # Set pagination to 10 items per page
 
@@ -526,206 +649,625 @@ class ErrorHandlingMixin:
 
 
 class ProductUtilsMixin:
-    """
-    Common helper methods for creating/updating products in bulk.
-    """
+    DATE_INPUT_FORMATS = ("%Y-%m-%d", "%m/%d/%Y")
+    DATETIME_INPUT_FORMATS = (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+    )
+    DATE_SENTINELS = {"immediately", "no_end_date", "specific_date"}
 
-    def skip_row(self, index, message):
-        logger.warning(f"Skipping row {index + 1}: {message}")
-        return {"skipped": True, "error": {"row": index + 1, "error": message}}
+    # ------------------------------------------------------------------ #
+    # Low-level normalization helpers                                     #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _none_if_na(value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(
+            value, (pd._libs.missing.NAType, pd._libs.tslibs.nattype.NaTType)
+        ):
+            return None
+        if pd.isna(value):
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
-    def safe_add_child(self, parent, instance):
-        parent.add_child(instance=instance)
-        return instance
-
-    def clean_row_data(self, row):
-        row["run_to_zero"] = self._clean_run_to_zero(row.get("run_to_zero"))
-        row = self._clean_invalid_strings(row)
-        # normalize the available_until_choice field
-        row["available_until_choice"] = self._clean_available_until_choice(
-            row.get("available_until_choice")
-        )
-        for key in ("local_code", "cost_centre"):  # remove numeric fallback
-            val = row.get(key)
-            if isinstance(val, (int, float)) or (
-                isinstance(val, str) and val.replace(".", "", 1).isdigit()
-            ):
+    def _clean_invalid_strings(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        SENTINELS = {"-", "nan", "n/a", "na"}
+        for key, val in row.items():
+            if isinstance(val, str) and val.strip().lower() in SENTINELS:
                 row[key] = None
-
-        for key in [
-            "unit_of_measure",
-            "programme_id",
-            "language_id",
-            "audience_id",
-            "where_to_use_id",
-            "vaccination_id",
-            "disease_id",
-            "minimum_stock_level",
-        ]:
-            row[key] = self._clean_numeric_field(row.get(key))
         return row
 
-    def _clean_available_until_choice(self, val):
-        """
-        Map the human-readable Excel choice "No end date" to the backend key "no_end_date".
-        Leave any other value untouched.
-        """
-        if isinstance(val, str) and val.strip().lower() == "no end date":
-            return "no_end_date"
-        return val
-
-    def _clean_numeric_field(self, value):
-        if not pd.notna(value):
+    @staticmethod
+    def _clean_numeric_field(value: Any) -> Optional[str]:
+        if value is None:
             return None
         try:
             if isinstance(value, str):
                 v = value.strip()
                 if "," in v:
-                    return ",".join(str(int(float(x))) for x in v.split(","))
+                    parts = [str(int(float(x))) for x in v.split(",") if x.strip()]
+                    return ",".join(parts) if parts else None
                 if v.replace(".", "", 1).isdigit():
                     return str(int(float(v)))
-            if isinstance(value, (int, float)):
+            elif isinstance(value, (int, float)) and not pd.isna(value):
                 return str(int(float(value)))
-        except Exception as e:
-            logger.error(f"Error cleaning numeric field: {e}")
+        except Exception:
+            logger.exception("Error normalising numeric field %r", value)
         return None
 
-    def _clean_run_to_zero(self, val):
-        if isinstance(val, str):
-            return {"y": True, "n": False}.get(val.strip().lower(), False)
-        return bool(val) if isinstance(val, bool) else False
+    @staticmethod
+    def _clean_alphanumeric_code(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        v = str(value).strip()
+        if not v:
+            return None
+        if v.isdigit():
+            return f"{int(v):03d}"
+        return v.upper()
 
-    def _clean_invalid_strings(self, row):
-        for k, v in row.items():
-            if isinstance(v, str) and v.strip().lower() in {"-", "nan", "n/a"}:
-                row[k] = None
-        return row
+    @staticmethod
+    def _clean_local_code(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        try:
+            num = float(value)
+            if num.is_integer():
+                return f"{int(num):04d}"
+        except Exception:
+            pass
+        v = str(value).strip()
+        if not v:
+            return None
+        if v.lower() == "i":
+            return "0001"
+        return v.upper()
 
-    def convert_created_date(self, val):
-        # Turn pandas Timestamp into datetime
-        if isinstance(val, pd.Timestamp):
-            dt = val.to_pydatetime()
-        # Already a datetime
-        elif isinstance(val, datetime.datetime):
-            dt = val
-        # Parse string
-        elif isinstance(val, str):
-            for fmt in ("%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S"):
+    @classmethod
+    def _coerce_date(cls, value: Any) -> Optional[datetime.date]:
+        value = cls._none_if_na(value)
+        if value is None:
+            return None
+        if isinstance(value, (pd.Timestamp, datetime.datetime)):
+            return value.date()
+        if isinstance(value, datetime.date) and not isinstance(
+            value, datetime.datetime
+        ):
+            return value
+        if isinstance(value, str):
+            if value.strip().lower() in cls.DATE_SENTINELS:
+                return None
+            for fmt in cls.DATE_INPUT_FORMATS:
                 try:
-                    dt = datetime.datetime.strptime(val, fmt)
+                    return datetime.datetime.strptime(value, fmt).date()
+                except ValueError:
+                    continue
+        logger.warning("Could not parse date %r — defaulting to today()", value)
+        return datetime.date.today()
+
+    @classmethod
+    def _coerce_datetime(cls, value: Any) -> datetime.datetime:
+        value = cls._none_if_na(value)
+        if isinstance(value, pd.Timestamp):
+            dt = value.to_pydatetime()
+        elif isinstance(value, datetime.datetime):
+            dt = value
+        elif isinstance(value, str):
+            for fmt in cls.DATETIME_INPUT_FORMATS:
+                try:
+                    dt = datetime.datetime.strptime(value, fmt)
                     break
                 except ValueError:
                     continue
             else:
-                raise ValueError(f"Unsupported 'created' format: {val!r}")
+                logger.warning("Unsupported datetime %r — using now()", value)
+                dt = timezone.now()
         else:
-            raise ValueError(f"Unsupported 'created' format: {val!r}")
+            dt = timezone.now()
 
-        # If naïve, make it aware in your default timezone
         if timezone.is_naive(dt):
             dt = timezone.make_aware(dt, timezone.get_default_timezone())
-
         return dt
 
-    def get_publish_date(self, raw):
-        if raw and raw != "-":
-            if isinstance(raw, datetime.date):
-                return raw
-            if isinstance(raw, str):
-                for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
-                    try:
-                        return datetime.datetime.strptime(raw, fmt).date()
-                    except ValueError:
-                        continue
-        return datetime.date.today()
+    # ------------------------------------------------------------------ #
+    # New small helpers used to reduce complexity in key methods         #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _bool_from_str(value: Any) -> bool:
+        return str(value or "").strip().lower() in {"y", "yes", "true", "1"}
 
-    def get_or_create_root_page(self):
+    @staticmethod
+    def _normalize_choice(val: Any, mapping: Dict[str, str]) -> Optional[str]:
+        if not isinstance(val, str):
+            return None
+        return mapping.get(val.strip().lower())
+
+    def _get_valid_product_types(self) -> List[str]:
         try:
-            return Page.objects.get(slug="products-root")
-        except Page.DoesNotExist:
-            site_root = Page.get_first_root_node()
-            if not site_root:
-                raise ImproperlyConfigured("Cannot find a root page in Wagtail.")
-            root = ProductUpdate(title="Products Root", slug="products-root")
-            site_root.add_child(instance=root)
-            return root
+            choices = ProductUpdate._meta.get_field("product_type").choices
+            return [val for val, _ in choices]
+        except Exception:
+            return []
 
-    def assign_m2m_fields(self, instance, m2m_mapping, row, add_only=False):
-        names = {}
-        for col, (attr_name, model, lookup_field, resp_key) in m2m_mapping.items():
-            raw = row.get(col)
-            manager = getattr(instance, attr_name)
-            if not raw:
-                if not add_only:
-                    manager.clear()
-                names[resp_key] = []
-                continue
-            ids = [v.strip() for v in str(raw).split(",") if v.strip()]
-            objs = list(model.objects.filter(**{f"{lookup_field}__in": ids}))
-            if add_only:
-                existing_ids = set(
-                    str(x) for x in manager.values_list(lookup_field, flat=True)
-                )
-                to_add = [
-                    o for o in objs if str(getattr(o, lookup_field)) not in existing_ids
-                ]
-                if to_add:
-                    manager.add(*to_add)
+    # ---- tiny helpers for product_type normalization ----
+    @staticmethod
+    def _to_clean_lower(raw: Any) -> Optional[str]:
+        """Return a stripped, lowercase string or None."""
+        if not isinstance(raw, str):
+            return None
+        s = raw.strip()
+        return s.lower() if s else None
+
+    def _build_product_type_lookup(self) -> Dict[str, str]:
+        """
+        Build a case-insensitive lookup of valid product types.
+        Also maps naïve singular/plural toggles to the canonical choice.
+        """
+        lookup: Dict[str, str] = {}
+        for choice in self._get_valid_product_types():
+            c_low = choice.lower()
+            lookup[c_low] = choice
+            # naive plural/singular bridging
+            if c_low.endswith("s"):
+                lookup[c_low[:-1]] = choice  # singular maps to canonical
             else:
-                manager.set(objs)
-            names[resp_key] = [
-                getattr(o, "name", str(getattr(o, lookup_field))) for o in objs
-            ]
-        instance.save()
-        return names
+                lookup[c_low + "s"] = choice  # plural maps to canonical
+        return lookup
 
-    def create_product_update(self, row):
-        run = bool(row.get("run_to_zero", False))
+    def _normalize_product_type(self, raw: Any) -> Optional[str]:
+        """
+        Return the canonical product_type (matching model choices) or None.
+        Complexity reduced by using a precomputed lookup.
+        """
+        val = self._to_clean_lower(raw)
+        if not val:
+            return None
+
+        # If choices not available, bail early
+        valid_lookup = self._build_product_type_lookup()
+        if not valid_lookup:
+            return None
+
+        return valid_lookup.get(val)
+
+    def _clean_numeric_columns(self, row: Dict[str, Any], cols: set) -> None:
+        for col in cols:
+            row[col] = self._clean_numeric_field(row.get(col))
+
+    def _coerce_row_dates(self, row: Dict[str, Any], cols: Iterable[str]) -> None:
+        for col in cols:
+            row[col] = self._coerce_date(row.get(col))
+
+    @staticmethod
+    def _set_email_aliases(row: Dict[str, Any]) -> None:
+        if row.get("stock_owner"):
+            row["stock_owner_email_address"] = row.get("stock_owner")
+        if row.get("stock_referral"):
+            row["order_referral_email_address"] = row.get("stock_referral")
+
+    # -------- Helpers for create_order_limits --------
+    @staticmethod
+    def _default_limits() -> Dict[str, int]:
+        return {
+            "Private": 5,
+            "Private company": 5,
+            "Private health": 5,
+            "Education": 100,
+            "Government": 100,
+            "Local government": 500,
+            "Social care": 500,
+            "Stakeholder": 100,
+            "Voluntary services": 100,
+            "NHS": 500,
+        }
+
+    def _parse_supplied_limits(self, row: Mapping[str, Any]) -> Dict[str, int]:
+        supplied: Dict[str, int] = {}
+        raw_names = row.get("organization_names")
+        sheet_limit = row.get("order_limit_value")
+        if raw_names and sheet_limit not in (None, ""):
+            try:
+                limit_val = int(str(sheet_limit).strip())
+                for name in str(raw_names).split(","):
+                    nm = name.strip()
+                    if nm:
+                        supplied[nm] = limit_val
+            except ValueError:
+                logger.warning(
+                    "Invalid order_limit_value %r — skipping explicit limits",
+                    sheet_limit,
+                )
+        return supplied
+
+    @staticmethod
+    def _lookup_org_by_name(name: str):
+        # Case-insensitive lookup, but we will use the exact DB value (org.name)
+        return Organization.objects.filter(name__iexact=name).first()
+
+    def _create_order_limit_page(
+        self, product: "Product", org: "Organization", lim_val: int
+    ) -> bool:
+        # idempotency guard — avoid duplicates
+        if OrderLimitPage.objects.filter(
+            product_ref=product, organization_ref=org
+        ).exists():
+            return False
+        ol = OrderLimitPage(
+            title=f"Order limit for {org.name}",
+            slug=f"ol-{org.id}-{uuid.uuid4().hex[:6]}",
+            order_limit_id=str(uuid.uuid4()),
+            order_limit=lim_val,
+            product_ref=product,
+            organization_ref=org,
+        )
+        res = self.safe_add_child(product, ol)
+        if isinstance(res, dict) and res.get("skip"):
+            return False
+        return True
+
+    # -------- Helpers for _process_row --------
+    @staticmethod
+    def _normalize_tag_and_status(row: Dict[str, Any]) -> Tuple[str, bool, bool]:
+        tag_raw = row.get("tag") or ""
+        normalized_tag = normalize_tag(str(tag_raw))
+        row["tag"] = normalized_tag
+        status_val = str(row.get("status") or "").strip().lower()
+        is_download_only = normalized_tag == "download-only"
+        is_live = status_val == "live"
+        return normalized_tag, is_download_only, is_live
+
+    def _try_update_existing_product(
+        self,
+        code: Optional[str],
+        row: Mapping[str, Any],
+        is_live: bool,
+        is_download_only: bool,
+        m2m_map: Dict[str, Tuple[str, Any, str, str]],
+    ) -> Optional[Dict[str, Any]]:
+        if not code:
+            return None
+
+        existing = Product.objects.filter(product_code=code).first()
+        if not existing:
+            return None
+
+        SIMPLE_FIELDS = [
+            "title",
+            "status",
+            "file_url",
+            "tag",
+            "product_key",
+            "language_name",
+            "publish_date",
+        ]
+        for field in SIMPLE_FIELDS:
+            incoming_key = {
+                "file_url": "gov_related_article",
+                "summary_of_guidance": "guidance",
+            }.get(field, field)
+            incoming = row.get(incoming_key)
+            if incoming is not None and not getattr(existing, field):
+                setattr(existing, field, incoming)
+        existing.save()
+
+        if existing.update_ref:
+            self.assign_m2m_fields(existing.update_ref, m2m_map, row, add_only=True)
+
+        order_limits_created = 0
+        if is_live and not is_download_only:
+            ols = self.create_order_limits(existing, row)
+            order_limits_created = len(ols)
+
+        return {
+            "skip": False,
+            "updated": True,
+            "order_limits": order_limits_created,
+            "warnings": [],
+            "errors": [],
+        }
+
+    def _collect_expected_required_fields(
+        self, row: Mapping[str, Any], is_live: bool, is_download_only: bool
+    ) -> Set[str]:
+        if not is_live:
+            return set()
+
+        if is_download_only:
+            expected = {
+                "product_key",
+                "title",
+                "language_id",
+                "gov_related_article",
+                "product_code",
+                "programme_id",
+                "status",
+                "created",
+                "language_name",
+                "product_type",
+                "guidance",
+                "alternative_type",
+                "tag",
+                "user_id",
+                "vaccinations_ids",
+                "disease_ids",
+                "audience_ids",
+                "where_to_use_ids",
+            }
+        else:
+            expected = {
+                "product_key",
+                "title",
+                "language_id",
+                "gov_related_article",
+                "product_code",
+                "programme_id",
+                "status",
+                "created",
+                "unit_of_measure",
+                "minimum_stock_level",
+                "available_from_choice",
+                "available_until_choice",
+                "order_from_date",
+                "product_type",
+                "audience_ids",
+                "where_to_use_ids",
+                "stock_owner_email_address",
+                "order_referral_email_address",
+                "run_to_zero",
+                "alternative_type",
+                "local_code",
+                "cost_centre",
+                "tag",
+                "user_id",
+                "language_name",
+                "guidance",
+                "vaccinations_ids",
+                "disease_ids",
+                "order_limit_value",
+                "organization_names",
+            }
+            if self._must_have_order_until(row):
+                expected.add("order_until_date")
+        return expected
+
+    @staticmethod
+    def _is_missing(val: Any) -> bool:
+        return val is None or (isinstance(val, str) and not val.strip())
+
+    def _validate_missing_fields(
+        self,
+        idx: int,
+        row: Mapping[str, Any],
+        expected_required: Set[str],
+        warnings: List[str],
+    ) -> None:
+        missing = [f for f in expected_required if self._is_missing(row.get(f))]
+        if missing:
+            msg = f"Row {idx+1} missing expected fields: {', '.join(sorted(missing))}"
+            logger.warning(msg)
+            warnings.append(msg)
+
+    def _resolve_foreign_keys(
+        self, row: Mapping[str, Any], is_live: bool, warnings: List[str]
+    ) -> Tuple[Optional["Program"], Optional["LanguagePage"], str]:
+        program = None
+        pid = row.get("programme_id")
+        if pid:
+            program = Program.objects.filter(program_id=str(pid)).first()
+            if is_live and not program:
+                msg = f"Program {pid} not found"
+                logger.warning(msg)
+                warnings.append(msg)
+
+        language = None
+        lid = row.get("language_id")
+        if lid:
+            language = LanguagePage.objects.filter(language_id=lid).first()
+            if is_live and not language:
+                msg = f"Language {lid} not found"
+                logger.warning(msg)
+                warnings.append(msg)
+
+        iso_code = language.iso_language_code if language else ""
+        return program, language, iso_code
+
+    def _attach_pu_and_product(
+        self,
+        row: Mapping[str, Any],
+        root: "Page",
+        m2m_map: Dict[str, Tuple[str, Any, str, str]],
+        program: Optional["Program"],
+        language: Optional["LanguagePage"],
+        iso_code: str,
+        created_dt: datetime.datetime,
+        pub_date: datetime.date,
+        is_live: bool,
+        is_download_only: bool,
+    ) -> Tuple[bool, int, List[str], List[str]]:
+        warnings: List[str] = []
+        errors: List[str] = []
+        order_limits_created = 0
+        created = False
+
+        pu = self.create_product_update(row)
+        res_pu = self.safe_add_child(root, pu)
+        if isinstance(res_pu, dict) and res_pu.get("skip"):
+            error = "Failed to attach ProductUpdate"
+            logger.error(error)
+            errors.append(error)
+            return created, order_limits_created, warnings, errors
+
+        pu = res_pu
+        self.assign_m2m_fields(pu, m2m_map, row, add_only=False)
+
+        prod = self.create_product(
+            row, program, language, iso_code, pu, created_dt, pub_date
+        )
+        try:
+            prod.full_clean()
+        except ValidationError as ve:
+            warning = f"Product validation warnings: {ve}"
+            logger.warning(warning)
+            warnings.append(warning)
+
+        res_prod = self.safe_add_child(pu, prod)
+        if isinstance(res_prod, dict) and res_prod.get("skip"):
+            error = "Failed to attach Product"
+            logger.error(error)
+            errors.append(error)
+            return created, order_limits_created, warnings, errors
+
+        prod = res_prod
+        if is_live and not is_download_only:
+            ols = self.create_order_limits(prod, row)
+            order_limits_created = len(ols)
+        created = True
+
+        return created, order_limits_created, warnings, errors
+
+    # ------------------------------------------------------------------ #
+    # Refactored: clean_row_data (<= 15)                                  #
+    # ------------------------------------------------------------------ #
+    def clean_row_data(self, row: Mapping[str, Any]) -> Dict[str, Any]:
+        # base cleaning
+        row = {k: self._none_if_na(v) for k, v in row.items()}
+        row = self._clean_invalid_strings(row)
+
+        # booleans & enums
+        row["run_to_zero"] = self._bool_from_str(row.get("run_to_zero"))
+        row["product_type"] = self._normalize_product_type(row.get("product_type"))
+
+        if row.get("alternative_type") is not None:
+            alt = str(row["alternative_type"]).strip()
+            row["alternative_type"] = alt or None
+
+        row["available_from_choice"] = self._normalize_choice(
+            row.get("available_from_choice") or row.get("available_from_date"),
+            {"immediately": "immediately", "specific_date": "specific_date"},
+        )
+        row["available_until_choice"] = self._normalize_choice(
+            row.get("available_until_choice") or row.get("available_until_date"),
+            {"no_end_date": "no_end_date", "specific_date": "specific_date"},
+        )
+
+        # numerics
+        NUMERIC_COLS = {
+            "unit_of_measure",
+            "programme_id",
+            "language_id",
+            "audience_ids",
+            "where_to_use_ids",
+            "vaccinations_ids",
+            "disease_ids",
+            "minimum_stock_level",
+            "order_limit_value",
+        }
+        self._clean_numeric_columns(row, NUMERIC_COLS)
+
+        # codes
+        row["local_code"] = self._clean_local_code(row.get("local_code"))
+        row["cost_centre"] = self._clean_alphanumeric_code(row.get("cost_centre"))
+
+        # dates
+        row["created"] = self._coerce_datetime(row.get("created"))
+        row["version_date"] = self._coerce_date(row.get("version_date"))
+        self._coerce_row_dates(
+            row, ("order_from_date", "order_until_date", "order_end_date")
+        )
+
+        # email aliases
+        self._set_email_aliases(row)
+
+        logger.debug("Cleaned row data: %s", row)
+        return row
+
+    # ------------------------------------------------------------------ #
+    # Unchanged: Wagtail-safe add_child                                   #
+    # ------------------------------------------------------------------ #
+    def safe_add_child(self, parent: Page, instance: Page) -> Page:
+        try:
+            return parent.add_child(instance=instance)
+        except AttributeError as exc:
+            if "'NoneType' object has no attribute '_inc_path'" in str(exc):
+                logger.info(
+                    "Parent %r has no children yet; assigning first-child path manually",
+                    parent,
+                )
+                token_size = getattr(MP_Node, "_path_step", 4)
+                seg = str(1).zfill(token_size)
+                instance.depth = parent.depth + 1
+                instance.path = parent.path + seg
+                instance.save()
+                return instance
+            raise
+
+    # ------------------------------------------------------------------ #
+    # Unchanged: factories                                                #
+    # ------------------------------------------------------------------ #
+    def create_product_update(self, row: Mapping[str, Any]) -> ProductUpdate:
         return ProductUpdate(
-            title=str(row.get("title", "")),
+            title=str(row.get("title") or "Unnamed update"),
             slug=f"update-{uuid.uuid4().hex[:8]}",
             minimum_stock_level=row.get("minimum_stock_level"),
             quantity_available=row.get("quantity_available", 0),
-            run_to_zero=run,
+            run_to_zero=row.get("run_to_zero", False),
             available_from_choice=row.get("available_from_choice"),
-            available_until_choice=row.get("available_until_choice"),
             order_from_date=row.get("order_from_date"),
-            order_end_date=row.get("order_end_date"),
+            available_until_choice=row.get("available_until_choice"),
+            order_end_date=row.get("order_until_date") or row.get("order_end_date"),
             product_type=row.get("product_type"),
             alternative_type=row.get("alternative_type"),
             cost_centre=row.get("cost_centre"),
             local_code=row.get("local_code"),
             unit_of_measure=row.get("unit_of_measure"),
             summary_of_guidance=row.get("guidance"),
-            stock_owner_email_address=row.get("stock_owner"),
-            order_referral_email_address=row.get("stock_referral"),
-            product_downloads=row.get("product_downloads", {}),
+            stock_owner_email_address=row.get("stock_owner_email_address"),
+            order_referral_email_address=row.get("order_referral_email_address"),
+            product_downloads={
+                "main_download_url": row.get("main_download_file_name", {}),
+                "web_download_url": row.get("web_download_file_name", {}),
+                "print_download_url": row.get("print_download_file_name", {}),
+                "transcript_download_url": row.get("print_download_file_name", {}),
+                "video_url": row.get("video_urls", ""),
+            },
         )
 
     def create_product(
-        self, row, program, language, iso_code, pu, created_at, publish_date
-    ):
+        self,
+        row: Mapping[str, Any],
+        program: Optional[Program],
+        language: Optional[LanguagePage],
+        iso_code: str,
+        pu: ProductUpdate,
+        created_at: datetime.datetime,
+        publish_date: datetime.date,
+    ) -> Product:
         user = None
-        uid = row.get("user_id")
-        if uid:
-            user = User.objects.filter(user_id=uid).first()
-        slug_base = str(row.get("title", ""))
+        if row.get("user_id"):
+            user = User.objects.filter(user_id=str(row["user_id"])).first()
+
+        slug_base = str(row.get("title") or "")
         return Product(
-            title=str(row.get("title", "")),
+            title=slug_base,
             slug=f"{slugify(slug_base)}-{uuid.uuid4().hex[:6]}",
             user_ref=user,
             product_id=str(uuid.uuid4()),
-            program_name=program.programme_name if program else "",
-            product_title=str(row.get("title", "")),
+            program_name=(program.programme_name if program else ""),
+            product_title=slug_base,
             status=row.get("status"),
-            product_code=row.get("product_code"),
+            product_code=row.get("product_code").strip(),
             file_url=row.get("gov_related_article"),
-            tag=row.get("tag"),
+            tag=str(row.get("tag") or "").strip().lower(),
             product_key=row.get("product_key"),
             program_id=program,
             language_id=language,
             version_number="001",
-            iso_language_code=iso_code,
+            iso_language_code=iso_code.upper(),
             language_name=row.get("language_name"),
             update_ref=pu,
             created_at=created_at,
@@ -734,222 +1276,502 @@ class ProductUtilsMixin:
             suppress_event=False,
         )
 
-    def create_order_limits(self, product, row):
-        """
-        Create OrderLimitPage entries for any orgs explicitly passed in the sheet,
-        then fill in the remaining categories with our defaults.
-        """
-        DEFAULT_LIMITS = {
-            "Private": 5,
-            "Private Company": 5,
-            "Private Health": 5,
-            "Education": 100,
-            "Government": 100,
-            "Local Government": 500,
-            "Social Care": 500,
-            "Stake Holder": 100,
-            "Voluntary Service": 100,
-            "NHS": 500,
-        }
+    def assign_m2m_fields(
+        self,
+        instance,
+        m2m_map: Dict[str, Tuple[str, Any, str, str]],
+        row: Mapping[str, Any],
+        *,
+        add_only: bool = False,
+    ) -> Dict[str, List[str]]:
+        names: Dict[str, List[str]] = {}
+        for col, (attr_name, model, lookup, resp_key) in m2m_map.items():
+            raw = row.get(col)
+            mgr = getattr(instance, attr_name)
+            if not raw:
+                if not add_only:
+                    mgr.clear()
+                names[resp_key] = []
+                continue
 
-        saved = []
+            ids = [s.strip() for s in str(raw).split(",") if s.strip()]
+            objs = list(model.objects.filter(**{f"{lookup}__in": ids}))
 
-        # Parse any explicitly supplied limits from the sheet
-        supplied = {}
-        raw_names = row.get("organization_names")
-        sheet_limit = row.get("order_limit_value")
-        if raw_names and pd.notna(sheet_limit):
-            for name in str(raw_names).split(","):
-                nm = name.strip()
-                if nm:
-                    supplied[nm] = int(sheet_limit)
+            if add_only:
+                existing = {str(x) for x in mgr.values_list(lookup, flat=True)}
+                mgr.add(*[o for o in objs if str(getattr(o, lookup)) not in existing])
+            else:
+                mgr.set(objs)
 
-        # Helper to create one OrderLimitPage
-        def _make_limit(nm, lim_val):
-            org = Organization.objects.filter(name=nm).first()
+            names[resp_key] = [
+                getattr(o, "name", str(getattr(o, lookup))) for o in objs
+            ]
+
+        instance.save()
+        return names
+
+    # ------------------------------------------------------------------ #
+    # Refactored: create_order_limits (<= 15)                             #
+    # ------------------------------------------------------------------ #
+    def create_order_limits(
+        self, product: "Product", row: Mapping[str, Any]
+    ) -> List[str]:
+        saved: List[str] = []
+        supplied = self._parse_supplied_limits(row)
+        defaults = self._default_limits()
+
+        # 1) Explicit/supplied limits from sheet
+        for nm, lim_val in supplied.items():
+            org = self._lookup_org_by_name(nm)
             if not org:
-                logger.warning(f"Org '{nm}' not found, skipping limit")
-                return
-            ol = OrderLimitPage(
-                title=f"Order limit for {nm}",
-                slug=f"ol-{org.id}-{uuid.uuid4().hex[:6]}",
-                order_limit_id=str(uuid.uuid4()),
-                order_limit=lim_val,
-                product_ref=product,
-                organization_ref=org,
-            )
-            self.safe_add_child(product, ol)
-            saved.append(nm)
+                logger.warning("Organization %r not found — skipping", nm)
+                continue
+            if self._create_order_limit_page(product, org, lim_val):
+                # Use the exact DB value (no case mutation)
+                saved.append(org.name)
 
-        # 1) Create pages for any limits explicitly supplied
-        for nm, lim in supplied.items():
-            _make_limit(nm, lim)
-
-        # 2) Fill in the rest from our DEFAULT_LIMITS
-        for nm, default_lim in DEFAULT_LIMITS.items():
-            if nm not in supplied:
-                _make_limit(nm, default_lim)
+        # 2) Fill in defaults for any organizations not explicitly supplied
+        for nm, lim_val in defaults.items():
+            if nm in supplied:
+                continue
+            org = self._lookup_org_by_name(nm)
+            if not org:
+                logger.warning("Organization %r not found — skipping default", nm)
+                continue
+            if self._create_order_limit_page(product, org, lim_val):
+                saved.append(org.name)
 
         return saved
 
+    # ------------------------------------------------------------------ #
+    # Root and conditions                                                 #
+    # ------------------------------------------------------------------ #
+    def get_or_create_root_page(self) -> Page:
+        try:
+            return Page.objects.get(slug="products-root")
+        except Page.DoesNotExist:
+            site_root = Page.get_first_root_node()
+            if not site_root:
+                raise ImproperlyConfigured("No root Page in Wagtail.")
+            root = ProductUpdate(title="Products Root", slug="products-root")
+            site_root.add_child(instance=root)
+            return root
+
+    def _must_have_order_until(self, row: Mapping[str, Any]) -> bool:
+        return str(row.get("available_until_choice") or "").lower() == "specific_date"
+
+    # ------------------------------------------------------------------ #
+    # Refactored: _process_row (<= 15)                                    #
+    # ------------------------------------------------------------------ #
+    def _process_row(
+        self,
+        idx: int,
+        row: Mapping[str, Any],
+        root: Page,
+        m2m_map: Dict[str, Tuple[str, Any, str, str]],
+    ) -> Dict[str, Any]:
+        warnings: List[str] = []
+        errors: List[str] = []
+        created = False
+        updated = False
+        order_limits_created = 0
+
+        try:
+            # normalize tag/status and email aliases
+            self._set_email_aliases(row)
+            normalized_tag, is_download_only, is_live = self._normalize_tag_and_status(
+                row
+            )
+
+            logger.debug(
+                "Processing row %d: tag=%s, is_download_only=%s, is_live=%s; row=%r",
+                idx + 1,
+                normalized_tag,
+                is_download_only,
+                is_live,
+                row,
+            )
+
+            # If product already exists by exact code, update it and return
+            code = row.get("product_code").strip() if row.get("product_code") else None
+            handled = self._try_update_existing_product(
+                code, row, is_live, is_download_only, m2m_map
+            )
+            if handled:
+                handled["warnings"].extend(warnings)
+                handled["errors"].extend(errors)
+                return handled
+
+            # Validate required fields (collect warnings only)
+            expected = self._collect_expected_required_fields(
+                row, is_live, is_download_only
+            )
+            self._validate_missing_fields(idx, row, expected, warnings)
+
+            # Timestamps
+            created_dt = self._coerce_datetime(row.get("created"))
+            pub_date = (
+                self._coerce_date(row.get("version_date")) or datetime.date.today()
+            )
+
+            # Resolve FKs
+            program, language, iso_code = self._resolve_foreign_keys(
+                row, is_live, warnings
+            )
+
+            # Create PU -> Product, assign M2M, OLs
+            created, order_limits_created, w2, e2 = self._attach_pu_and_product(
+                row=row,
+                root=root,
+                m2m_map=m2m_map,
+                program=program,
+                language=language,
+                iso_code=iso_code,
+                created_dt=created_dt,
+                pub_date=pub_date,
+                is_live=is_live,
+                is_download_only=is_download_only,
+            )
+            warnings.extend(w2)
+            errors.extend(e2)
+
+        except Exception as exc:
+            logger.exception("Row %d unexpected error", idx + 1)
+            errors.append(str(exc))
+
+        return {
+            "skip": False,
+            "created": created,
+            "updated": updated,
+            "order_limits": order_limits_created,
+            "warnings": warnings,
+            "errors": errors,
+        }
+
+    # ------------------------------------------------------------------ #
+    # NEW: external-key based defaults (robust backfill)                 #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _default_limits_by_external() -> Dict[str, int]:
+        """
+        Map Organization.external_key -> default limit.
+        Based on your DB:
+          NH (NHS), VS (Voluntary Service), LG, SH, GV, ED, PH, PC, SC, PRI.
+        Excludes CR/CRC intentionally.
+        """
+        return {
+            "NH": 500,  # NHS
+            "VS": 100,  # Voluntary Service
+            "LG": 500,  # Local Government
+            "SH": 100,  # Stake Holder
+            "GV": 100,  # Government
+            "ED": 100,  # Education
+            "PH": 5,  # Private Health
+            "PC": 5,  # Private Company
+            "SC": 500,  # Social Care
+            "PRI": 5,  # Private
+        }
+
+    def ensure_default_order_limits(self, product: "Product") -> List[str]:
+        """
+        Create any missing defaults for this product using Organization.external_key.
+        Returns list of created organization names (idempotent).
+        """
+        created: List[str] = []
+        defaults = self._default_limits_by_external()
+
+        # orgs already present for this product
+        existing_org_ids = set(
+            OrderLimitPage.objects.filter(product_ref=product).values_list(
+                "organization_ref_id", flat=True
+            )
+        )
+
+        # candidate orgs by external_key
+        target_orgs = list(
+            Organization.objects.filter(external_key__in=list(defaults.keys()))
+        )
+
+        for org in target_orgs:
+            if org.id in existing_org_ids:
+                continue
+            lim = defaults.get(org.external_key)
+            if lim is None:
+                continue
+            if self._create_order_limit_page(product, org, lim):
+                created.append(org.name)
+
+        return created
+
 
 class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes: List = []
+    permission_classes: List = []
 
     @action(detail=False, methods=["post"], url_path="bulk-upload")
-    def bulk_upload(self, request):
-        # Load and validate spreadsheet
+    def bulk_upload(self, request: HttpRequest):
         df, error_resp = self._load_dataframe(request)
         if error_resp:
             return error_resp
 
-        # Retrieve root page
-        root, error_resp = self._get_root_page()
-        if error_resp:
-            return error_resp
+        try:
+            root = self.get_or_create_root_page()
+        except Exception as exc:
+            logger.exception("Unable to get/create products root")
+            return Response(
+                {
+                    "error": "Cannot find or create products root page.",
+                    "details": str(exc),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
-        # Mapping for m2m fields
         m2m_map = {
-            "audience_id": ("audience_ref", Audience, "audience_id", "audience_names"),
-            "where_to_use_id": (
+            "audience_ids": ("audience_ref", Audience, "audience_id", "audience_names"),
+            "where_to_use_ids": (
                 "where_to_use_ref",
                 WhereToUse,
                 "where_to_use_id",
                 "where_to_use_names",
             ),
-            "vaccination_id": (
+            "vaccinations_ids": (
                 "vaccination_ref",
                 Vaccination,
                 "vaccination_id",
                 "vaccination_names",
             ),
-            "disease_id": ("diseases_ref", Disease, "disease_id", "disease_names"),
+            "disease_ids": ("diseases_ref", Disease, "disease_id", "disease_names"),
         }
 
-        skipped = []
-        created_count = 0
-        order_limits_count = 0
+        summary = []
+        created, updated, order_limits = 0, 0, 0
+        for idx, row_series in df.iterrows():
+            row = self.clean_row_data(row_series.to_dict())
+            try:
+                with transaction.atomic():
+                    result = self._process_row(idx, row, root, m2m_map)
+            except Exception as exc:
+                logger.exception("Row %d catastrophic error", idx + 1)
+                result = {
+                    "skip": False,
+                    "created": False,
+                    "updated": False,
+                    "order_limits": 0,
+                    "warnings": [],
+                    "errors": [str(exc)],
+                }
 
-        # Process rows atomically
-        with transaction.atomic():
-            for idx, row_series in df.iterrows():
-                row = row_series.to_dict()
-                result = self._process_row(idx, row, root, m2m_map)
-                if result.get("skip"):
-                    skipped.append(result)
-                else:
-                    created_count += 1
-                    order_limits_count += result.get("order_limits", 0)
+            if result.get("updated"):
+                updated += 1
+            elif result.get("created"):
+                created += 1
+            order_limits += result.get("order_limits", 0)
+
+            # 7. Log every row that neither created nor updated
+            if not result.get("created") and not result.get("updated"):
+                log_path = os.path.join(settings.BASE_DIR, "products_not_created.log")
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                with open(log_path, "a", encoding="utf-8") as fh:
+                    fh.write(
+                        json.dumps(
+                            {
+                                "row": idx + 1,
+                                "product_code": row.get("product_code"),
+                                "warnings": result.get("warnings", []),
+                                "errors": result.get("errors", []),
+                            }
+                        )
+                        + "\n"
+                    )
+
+            summary.append(
+                {
+                    "row": idx + 1,
+                    "created": result.get("created", False),
+                    "updated": result.get("updated", False),
+                    "order_limits": result.get("order_limits", 0),
+                    "warnings": result.get("warnings", []),
+                    "errors": result.get("errors", []),
+                }
+            )
 
         return Response(
             {
                 "message": "Bulk upload complete.",
-                "created_products": created_count,
-                "skipped_rows": skipped,
-                "order_limits_created": order_limits_count,
+                "created_products": created,
+                "updated_products": updated,
+                "order_limits_created": order_limits,
+                "row_summary": summary,
             },
             status=status.HTTP_201_CREATED,
         )
 
-    def _load_dataframe(self, request):
+    @staticmethod
+    def _load_dataframe(request: HttpRequest):
         file = request.FILES.get("product_excel")
         if not file:
             return None, Response(
-                {"error": "No merged Excel file uploaded."},
+                {"error": "No Excel file uploaded (field 'product_excel')."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         try:
             file.seek(0)
-            df = pd.read_excel(file, engine="openpyxl").where(
-                pd.notna(pd.read_excel(file, engine="openpyxl")), None
-            )
-        except Exception as e:
-            logger.exception("Error reading uploaded file")
+            df = pd.read_excel(file, engine="openpyxl", keep_default_na=True)
+            df = df.replace({pd.NA: None, pd.NaT: None})
+            df = df.where(pd.notna(df), None)
+        except Exception as exc:
+            logger.exception("Error parsing spreadsheet")
             return None, Response(
-                {"error": "Could not parse spreadsheet", "details": str(e)},
+                {"error": "Could not parse spreadsheet.", "details": str(exc)},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if df.empty:
             return None, Response(
-                {"message": "Uploaded spreadsheet contains no data rows."},
+                {"error": "Uploaded spreadsheet has no data rows."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return df, None
 
-    def _get_root_page(self):
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="related-products/(?P<product_code>[\w-]+)",
+    )
+    def related_publications(self, request, product_code=None):
+        """
+        Return related publications grouped by product_type, with up to 2 per group,
+        and a 'has_more' flag indicating if more related items exist.
+        """
         try:
-            root = self.get_or_create_root_page()
-            return root, None
-        except Exception:
-            return None, Response(
-                {"error": "Unable to find or create products root page."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            product = Product.objects.get(product_code=product_code)
+        except Product.DoesNotExist:
+            return Response({"error": "Product not found."}, status=404)
+
+        product_update = product.update_ref
+        if not product_update:
+            return Response(
+                {"error": "No associated product update found."}, status=404
             )
 
-    def _process_row(self, idx, row, root, m2m_map):
-        """
-        Handles creation or skipping of a single product row.
-        Returns a dict with skip=True and error info or skip=False and order_limits count.
-        """
-        try:
-            # Required fields
-            for field in (
-                "product_key",
-                "title",
-                "language_id",
-                "gov_related_article",
-                "product_code",
-            ):
-                if not row.get(field):
-                    raise ValueError(f"Missing required {field}")
+        # Find same disease/topic
+        disease_ids = list(
+            product_update.diseases_ref.values_list("disease_id", flat=True)
+        )
+        disease_ids = list(map(str, disease_ids))  # ensure correct type
 
-            row = self.clean_row_data(row)
-            created_dt = self.convert_created_date(row.get("created"))
-            pub_date = self.get_publish_date(row.get("version_date"))
+        products = (
+            Product.objects.select_related("update_ref")
+            .filter(update_ref__diseases_ref__in=disease_ids)
+            .exclude(product_code=product_code)
+            .distinct()
+        )
 
-            # Program lookup
-            program = None
-            pid = row.get("programme_id")
-            if pid:
-                program = Program.objects.filter(program_id=str(int(pid))).first()
-                if not program:
-                    raise ValueError(f"Program {pid} not found")
+        if not products.exists():
+            return Response({})
 
-            # Language lookup
-            language = LanguagePage.objects.filter(
-                language_id=row["language_id"]
-            ).first()
-            if not language:
-                raise ValueError(f"Language {row['language_id']} not found")
-            iso_code = language.iso_language_code.upper()
-
-            code = row["product_code"]
-            if Product.objects.filter(product_code=code).exists():
-                return {
-                    "skip": True,
-                    "row": idx + 1,
-                    "error": f"Product with code {code} already exists.",
+        # Prepare similarity
+        df = pd.DataFrame(
+            [
+                {
+                    "product_code": p.product_code,
+                    "product_title": p.product_title,
+                    "summary_of_guidance": p.update_ref.summary_of_guidance
+                    if p.update_ref
+                    else "",
+                    "product_type": p.update_ref.product_type if p.update_ref else "",
                 }
+                for p in products
+            ]
+        )
 
-            # Create product update
-            pu = self.create_product_update(row)
-            self.safe_add_child(root, pu)
-            self.assign_m2m_fields(pu, m2m_map, row, add_only=False)
+        df["text"] = (
+            df["product_title"].fillna("")
+            + " "
+            + df["summary_of_guidance"].fillna("")
+            + " "
+            + df["product_type"].fillna("")
+        )
 
-            # Create main product
-            prod = self.create_product(
-                row, program, language, iso_code, pu, created_dt, pub_date
-            )
-            self.safe_add_child(root, prod)
+        ref_text = (
+            product.product_title
+            + " "
+            + (product_update.summary_of_guidance or "")
+            + " "
+            + (product_update.product_type or "")
+        )
+        texts = [ref_text] + df["text"].tolist()
 
-            # Create order limits
-            ols = self.create_order_limits(prod, row)
-            return {"skip": False, "order_limits": len(ols)}
+        vectorizer = TfidfVectorizer(stop_words="english")
+        tfidf_matrix = vectorizer.fit_transform(texts)
+        cosine_sim = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:]).flatten()
 
-        except Exception as e:
-            logger.exception(f"Row {idx+1} error: {e}")
-            return {"skip": True, "row": idx + 1, "error": str(e)}
+        df["similarity_score"] = cosine_sim
+
+        # Filter low similarity
+        df = df[df["similarity_score"] > 0.18]
+
+        # Grouped output with 'has_more'
+        grouped = {}
+        ITEMS_PER_TYPE = 2  # Change to 3 if you prefer
+
+        for product_type, group in df.groupby("product_type"):
+            group_sorted = group.sort_values("similarity_score", ascending=False)
+            codes = group_sorted["product_code"].tolist()
+            top_codes = codes[:ITEMS_PER_TYPE]
+            has_more = len(codes) > ITEMS_PER_TYPE
+            related_objs = Product.objects.filter(product_code__in=top_codes)
+            serializer = RelatedProductSerializer(related_objs, many=True)
+            grouped[product_type] = {
+                "items": serializer.data,
+                "has_more": has_more,
+                "total_count": len(codes),
+            }
+
+        return Response(grouped)
+
+    # ------------------------------------------------------------------ #
+    # NEW: API — fill missing order limits using external_key            #
+    # ------------------------------------------------------------------ #
+    @action(detail=False, methods=["post"], url_path="fill-missing-order-limits")
+    def fill_missing_order_limits(self, request: HttpRequest):
+        """
+        Back-fill default OrderLimitPage rows for products.
+
+        Optional JSON body:
+          {
+            "product_codes": ["2023004-Leaflet-English", "..."],  # subset; if omitted, all products
+            "dry_run": true                                       # simulate without committing
+          }
+
+        Returns per-product orgs created and total count.
+        """
+        qs = Product.objects.all()
+        product_codes = request.data.get("product_codes")
+        if product_codes:
+            codes = [str(pc).strip() for pc in product_codes if str(pc).strip()]
+            qs = qs.filter(product_code__in=codes)
+
+        dry_run = bool(request.data.get("dry_run"))
+        total_created = 0
+        per_product: Dict[str, List[str]] = {}
+
+        with transaction.atomic():
+            for product in qs.iterator():
+                created = self.ensure_default_order_limits(product)
+                per_product[product.product_code] = created
+                total_created += len(created)
+
+            if dry_run:
+                transaction.set_rollback(True)
+
+        return Response(
+            {
+                "message": "Backfill complete.",
+                "order_limits_created": total_created,
+                "per_product": per_product,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class PresignedUrlMixin:
@@ -1002,11 +1824,17 @@ class PresignedUrlMixin:
 
     def _collect_s3_urls(self, product_downloads):
         urls = []
-        main_download = product_downloads.get("main_download_url")
-        if isinstance(main_download, dict):
-            s3_url = main_download.get("s3_bucket_url")
-            if s3_url:
-                urls.append(s3_url)
+
+        # Handle main_download_url as either a dict or a list of dicts
+        main = product_downloads.get("main_download_url")
+        if isinstance(main, dict):
+            urls.append(main.get("s3_bucket_url"))
+        elif isinstance(main, list):
+            for item in main:
+                if isinstance(item, dict) and item.get("s3_bucket_url"):
+                    urls.append(item["s3_bucket_url"])
+
+        # The rest stays the same…
         for download_type in [
             "web_download_url",
             "print_download_url",
@@ -1015,11 +1843,9 @@ class PresignedUrlMixin:
             downloads = product_downloads.get(download_type, [])
             if isinstance(downloads, list):
                 urls.extend(
-                    [
-                        item.get("s3_bucket_url")
-                        for item in downloads
-                        if isinstance(item, dict) and item.get("s3_bucket_url")
-                    ]
+                    item.get("s3_bucket_url")
+                    for item in downloads
+                    if isinstance(item, dict) and item.get("s3_bucket_url")
                 )
         return urls
 
@@ -1027,8 +1853,18 @@ class PresignedUrlMixin:
         self, item, presigned_urls, inline_presigned_urls, metadata_dict
     ):
         """
-        Helper to update a download item with both presigned URLs and file metadata.
+        Update a single download entry, but also handle lists for main_download_url
         """
+        # If it's a list, process each element
+        if isinstance(item, list):
+            return [
+                self._apply_metadata_and_presigned(
+                    i, presigned_urls, inline_presigned_urls, metadata_dict
+                )
+                for i in item
+            ]
+
+        # … existing dict handling below
         if not isinstance(item, dict):
             return item
 
@@ -1036,13 +1872,8 @@ class PresignedUrlMixin:
         if s3_url in presigned_urls:
             presigned_url = presigned_urls[s3_url]
             item["URL"] = presigned_url
-
-            # Merge metadata if available
-            if metadata_dict and presigned_url in metadata_dict:
-                # Merge existing metadata into the item.
-                meta = metadata_dict[presigned_url]
-                item.update(meta)
-            # Always keep the original S3 URL for reference.
+            if presigned_url in metadata_dict:
+                item.update(metadata_dict[presigned_url])
             item["s3_bucket_url"] = s3_url
 
         if s3_url in inline_presigned_urls:
@@ -1051,40 +1882,63 @@ class PresignedUrlMixin:
         return item
 
 
-@method_decorator(cache_page(CACHE_TTL), name="dispatch")
+# --------------------------------------------------------------------------- #
+# Product detail (preview) — versioned server cache + browser no-store        #
+# --------------------------------------------------------------------------- #
 class ProductDetailView(ErrorHandlingMixin, PresignedUrlMixin, viewsets.ViewSet):
     """
-    GET /api/products/{product_code}/ → JSON with presigned URLs & metadata,
-    automatically cached per-URL+user for CACHE_TTL seconds.
+    GET /api/products/{product_code}/
+
+    - Server-side cache key is versioned by Product.updated_at (second precision).
+    - Browser/CDN caching disabled via Cache-Control: no-store (+ ETag/Last-Modified).
     """
 
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [AllowAny]
 
     def retrieve(self, request, product_code=None, *args, **kwargs):
-        # product_code may be URL-encoded
         code = unquote(product_code or "")
-        cache_key = f"product_detail:{request.user.id if request.user.is_authenticated else 'anon'}:{code}"
-        cached = cache.get(cache_key)
-        if cached:
-            return JsonResponse(cached, status=status.HTTP_200_OK)
 
-        logger.info("Retrieving product details for %s", code)
         product = Product.objects.filter(product_code=code).first()
         if not product:
             logger.warning("Product not found: %s", code)
             return handle_error(
                 ErrorCode.PRODUCT_NOT_FOUND,
                 ErrorMessage.PRODUCT_NOT_FOUND,
-                status_code=status.HTTP_404_NOT_FOUND,
+                status.HTTP_404_NOT_FOUND,
             )
 
+        ver = (
+            int(product.updated_at.timestamp())
+            if getattr(product, "updated_at", None)
+            else 0
+        )
+        cache_key = f"product_detail:v{ver}:{code}"
+
+        cached = cache.get(cache_key)
+        if cached:
+            resp = JsonResponse(cached, status=status.HTTP_200_OK)
+            resp["Cache-Control"] = "no-store"
+            resp["ETag"] = f'W/"{code}-{ver}"'
+            if product.updated_at:
+                resp["Last-Modified"] = http_date(product.updated_at.timestamp())
+            return resp
+
+        logger.info("Retrieving product details for %s", code)
         data = ProductSerializer(product, context={"request": request}).data
         self._process_presigned_urls(data)
-        cache.set(cache_key, data, CACHE_TTL)
 
-        logger.info("Returning details for product %s", code)
-        return JsonResponse(data, status=status.HTTP_200_OK)
+        # 1-second default if not provided
+        ttl = getattr(settings, "CACHE_TTL_DETAIL", 1)
+        if ttl and ttl > 0:
+            cache.set(cache_key, data, ttl)
+
+        resp = JsonResponse(data, status=status.HTTP_200_OK)
+        resp["Cache-Control"] = "no-store"
+        resp["ETag"] = f'W/"{code}-{ver}"'
+        if product.updated_at:
+            resp["Last-Modified"] = http_date(product.updated_at.timestamp())
+        return resp
 
 
 class ProductDetailDelete(ErrorHandlingMixin, View):
@@ -2282,44 +3136,105 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return None
 
 
-class ProductListMixin:
+# --------------------------------------------------------------------------- #
+# Core mixin with sorting + normalization/dedupe + list caching               #
+# --------------------------------------------------------------------------- #
+class ProductListMixin(PresignedUrlMixin):
     """
-    Handles sorting, pagination + S3 presigning,
-    with per‑request caching of raw data list.
+    Sorting, pagination, S3 presigning (attachment + inline),
+    with per-request caching of the serialized page data.
+    Also normalizes/dedupes by product_code to avoid 'ABC' vs 'ABC ' duplicates.
     """
 
     serializer_class = ProductSerializer
     include_request_context = False
-    cache_timeout = CACHE_TTL
+    cache_timeout = getattr(settings, "CACHE_TTL_LIST", 30)
     pagination_class = CustomPagination
 
+    # ---------------------------
+    # Normalization helpers
+    # ---------------------------
+    @staticmethod
+    def _annotate_norm_code(qs):
+        return qs.annotate(
+            code_trim=Trim(F("product_code")),
+            norm_code=Upper(
+                Replace(
+                    Replace(
+                        Replace(Trim(F("product_code")), Value("-"), Value("")),
+                        Value("_"),
+                        Value(""),
+                    ),
+                    Value(" "),
+                    Value(""),
+                )
+            ),
+        )
+
+    @staticmethod
+    def _exclude_edge_spaces(qs):
+        return qs.filter(product_code=F("code_trim"))
+
+    @staticmethod
+    def _dedupe_by_norm_code(qs):
+        return (
+            qs.annotate(
+                rn=Window(
+                    expression=RowNumber(),
+                    partition_by=[F("norm_code")],
+                    order_by=F("updated_at").desc(nulls_last=True),
+                )
+            )
+            .filter(rn=1)
+            .order_by("id")
+        )
+
+    def clean_dedup_queryset(self, qs):
+        qs = self._annotate_norm_code(qs)
+        qs = self._exclude_edge_spaces(qs)
+        qs = self._dedupe_by_norm_code(qs)
+        return qs
+
+    # ---------------------------
+    # Sorting helpers
+    # ---------------------------
+    @staticmethod
+    def _normalize_sort_param(sort_by: Optional[str]) -> Optional[str]:
+        if not sort_by:
+            return None
+        sort_by = sort_by.lstrip()
+        return sort_by if sort_by in ALLOWED_SORT_FIELDS else None
+
+    def get_sorted_queryset(self, queryset, request):
+        sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
+        return (
+            queryset.order_by(sort_by)
+            if sort_by
+            else queryset.order_by("product_title", "-updated_at")
+        )
+
+    # ---------------------------
+    # Pagination + presigning + cache
+    # ---------------------------
     def get_cache_key(self, request, prefix="products"):
-        user_id = request.user.id if request.user.is_authenticated else "anon"
+        user_id = (
+            request.user.id
+            if getattr(request, "user", None) and request.user.is_authenticated
+            else "anon"
+        )
         return f"{prefix}:user:{user_id}:{request.get_full_path()}"
 
     def get_serializer_context(self):
-        """
-        Override DRF method signature: no args.
-        Only include 'request' if flagged.
-        """
         return {"request": self.request} if self.include_request_context else {}
 
-    def get_sorted_queryset(self, queryset, request):
-        sort_by = request.GET.get("sort_by", "").lstrip()
-        if sort_by in VALID_SORT_FIELDS:
-            return queryset.order_by(sort_by)
-        return queryset
-
     def paginate_and_serialize(
-        self,
-        queryset,
-        request,
-        serializer_class=None,
-        use_direct_update=False,
+        self, queryset, request, serializer_class=None, use_direct_update=False
     ):
         """
-        Returns (data_list, paginator).
-        Caches only the data_list, never a Response.
+        Returns (data_list, paginator). Caches only the serialized 'page' list, never a Response.
+        NOTE: We still call paginate_queryset even on cache hits to keep paginator state
+        (next/prev links, counts). If you want to avoid the DB hit entirely on cache hits,
+        cache pagination metadata too.
         """
         cache_key = self.get_cache_key(request)
         cached = cache.get(cache_key)
@@ -2335,11 +3250,9 @@ class ProductListMixin:
             page, many=True, context=ctx
         )
 
-        # 1) Gather & presign S3 URLs
+        # 1) Gather & presign "download" URLs and inject (attachment style)
         urls = extract_s3_urls(serializer.data)
         presigned = generate_presigned_urls(urls)
-
-        # 2) Inject presigned URLs
         if use_direct_update:
             _update_product_downloads_with_presigned_urls(page, presigned)
             serializer = (serializer_class or self.serializer_class)(
@@ -2349,15 +3262,25 @@ class ProductListMixin:
             update_product_urls(serializer.data, presigned)
 
         data = serializer.data
-        cache.set(cache_key, data, self.cache_timeout)
+
+        # 2) Inline presigned URLs + merge metadata for each item
+        for item in data:
+            self._process_presigned_urls(item)
+
+        if self.cache_timeout and self.cache_timeout > 0:
+            cache.set(cache_key, data, self.cache_timeout)
+
         return data, paginator
 
 
-@method_decorator(cache_page(CACHE_TTL), name="dispatch")
+# --------------------------------------------------------------------------- #
+# Admin: List (fresh)                                                         #
+# --------------------------------------------------------------------------- #
 class ProductAdminListView(ProductListMixin, APIView):
     authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsAuthenticated]
     include_request_context = True
+    cache_timeout = 0  # always fresh for admins
 
     def get(self, request, *args, **kwargs):
         logger.info("ProductAdminListView GET called")
@@ -2371,7 +3294,9 @@ class ProductAdminListView(ProductListMixin, APIView):
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
 
+            qs = self.clean_dedup_queryset(qs)
             sorted_qs = self.get_sorted_queryset(qs, request)
+
             data, paginator = self.paginate_and_serialize(
                 sorted_qs, request, use_direct_update=True
             )
@@ -2379,25 +3304,26 @@ class ProductAdminListView(ProductListMixin, APIView):
             return paginator.get_paginated_response(
                 data, status_code=status.HTTP_200_OK
             )
-
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return handle_exceptions(e)
 
 
-@method_decorator(cache_page(CACHE_TTL), name="dispatch")
+# --------------------------------------------------------------------------- #
+# Users: List (briefly cached)                                                #
+# --------------------------------------------------------------------------- #
 class ProductUsersListView(ProductListMixin, APIView):
     """
-    GET /api/v1/products/users/all/
-      ?page=1
-      &sort_by=-created_at
+    GET /api/v1/products/users/all/?page=1&sort_by=-created_at
     """
 
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
+    include_request_context = True
+    cache_timeout = getattr(settings, "CACHE_TTL_LIST", 30)
 
     def get(self, request, *args, **kwargs):
         try:
-            qs = Product.objects.filter(is_latest=True, status="live").distinct()
+            qs = Product.objects.filter(is_latest=True, status="live")
             if not qs.exists():
                 return handle_error(
                     ErrorCode.PRODUCT_NOT_FOUND,
@@ -2405,13 +3331,14 @@ class ProductUsersListView(ProductListMixin, APIView):
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
 
+            qs = self.clean_dedup_queryset(qs)
             sorted_qs = self.get_sorted_queryset(qs, request)
-            data, paginator = self.paginate_and_serialize(sorted_qs, request)
 
+            data, paginator = self.paginate_and_serialize(sorted_qs, request)
             data = filter_live_languages(data)
             return paginator.get_paginated_response(data)
-
-        except Exception:
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Unhandled exception in ProductUsersListView.get, %s", e)
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,
@@ -2419,12 +3346,20 @@ class ProductUsersListView(ProductListMixin, APIView):
             )
 
 
+# --------------------------------------------------------------------------- #
+# Search (base)                                                              #
+# --------------------------------------------------------------------------- #
 class ProductSearchListMixin(ProductListMixin):
     """
     Mixin for search endpoints. Uses ProductSearchSerializer.
     """
 
     serializer_class = ProductSearchSerializer
+
+
+# --------------------------------------------------------------------------- #
+# Search (base) — unified q= across code/title with ranking                   #
+# --------------------------------------------------------------------------- #
 
 
 class BaseProductSearchView(APIView, ProductListMixin):
@@ -2436,52 +3371,218 @@ class BaseProductSearchView(APIView, ProductListMixin):
     def postprocess_response_data(self, response_data: dict, products) -> dict:
         return response_data
 
+    # ---------------------------
+    # Helpers (new)
+    # ---------------------------
+    @staticmethod
+    def _normalize_term(term: str) -> str:
+        try:
+            return normalize_product_code(term)
+        except NameError:
+            return re.sub(r"[-_\s]", "", (term or "")).upper()
+
+    def _base_scoped_queryset(self):
+        qs = Product.objects.all()
+        qs = self._annotate_norm_code(qs)
+        return qs.filter(self.get_default_query())
+
+    def _finalize_and_respond(
+        self,
+        qs,
+        request,
+        *,
+        ranked: bool,
+        product_code: str | None,
+        product_title: str | None,
+    ) -> Response:
+        # Clean + dedupe
+        qs = self._exclude_edge_spaces(qs)
+        qs = self._dedupe_by_norm_code(qs)
+
+        # Empty? -> 404 (consistent with prior behavior)
+        if not qs.exists():
+            return Response(
+                {"detail": ErrorMessage.PRODUCT_NOT_FOUND.value},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Sorting (rank-aware vs normal)
+        sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
+        if ranked:
+            if sort_by:
+                qs = qs.order_by("-rank", sort_by)
+            else:
+                qs = qs.order_by("-rank", "product_title", "-updated_at")
+        else:
+            qs = (
+                qs.order_by(sort_by)
+                if sort_by
+                else qs.order_by("product_title", "-updated_at")
+            )
+
+        # Serialize + paginate
+        data, paginator = self.paginate_and_serialize(
+            qs, request, serializer_class=ProductSearchSerializer
+        )
+
+        # Shape response
+        response_data = _prepare_response_data(qs, data, product_code, product_title)
+        response_data = self.postprocess_response_data(response_data, qs)
+        return paginator.get_paginated_response(
+            response_data, status_code=status.HTTP_200_OK
+        )
+
+    @staticmethod
+    def _annotate_rank_signals(qs, q: str, q_norm: str, looks_like_code: int):
+        """
+        Adds ranking signals for product_code, norm_code, and product_title.
+        """
+        return qs.annotate(
+            # product_code signals
+            exact_code=Case(
+                When(product_code__iexact=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            starts_code=Case(
+                When(product_code__istartswith=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            contains_code=Case(
+                When(product_code__icontains=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            # norm_code signals
+            exact_norm=Case(
+                When(norm_code__exact=q_norm, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            starts_norm=Case(
+                When(norm_code__startswith=q_norm, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            contains_norm=Case(
+                When(norm_code__contains=q_norm, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            # title signals
+            exact_title=Case(
+                When(product_title__iexact=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            starts_title=Case(
+                When(product_title__istartswith=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            contains_title=Case(
+                When(product_title__icontains=q, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+            # lightweight bias if query is a single token like a code
+            code_bias=Value(looks_like_code, output_field=IntegerField()),
+        ).annotate(
+            rank=(
+                120 * F("exact_norm")
+                + 95 * F("starts_norm")
+                + 75 * F("contains_norm")
+                + 100 * F("exact_code")
+                + 80 * F("starts_code")
+                + 60 * F("contains_code")
+                + 70 * F("exact_title")
+                + 50 * F("starts_title")
+                + 30 * F("contains_title")
+                + 10 * F("code_bias")
+            )
+        )
+
+    # ---------------------------
+    # GET
+    # ---------------------------
     def get(self, request, *args, **kwargs) -> Response:
         try:
+            # Params
+            q = (request.GET.get("q") or "").strip()
             product_code = request.GET.get("product_code")
             product_title = request.GET.get("product_title")
+
             if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
-                return _handle_invalid_query_param()
+                return handle_error(
+                    ErrorCode.INVALID_PARAMETER,
+                    ErrorMessage.INVALID_PARAMETER,
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                )
             if product_title and not isinstance(product_title, str):
-                return _handle_invalid_query_param()
-
-            query = self.get_default_query()
-            if product_code:
-                query &= Q(product_code_no_dashes__icontains=product_code)
-            if product_title:
-                query &= Q(product_title__icontains=product_title)
-
-            products = Product.objects.filter(query).distinct()
-            if not products.exists():
-                return Response(
-                    {"detail": ErrorMessage.PRODUCT_NOT_FOUND.value},
-                    status=status.HTTP_404_NOT_FOUND,
+                return handle_error(
+                    ErrorCode.INVALID_PARAMETER,
+                    ErrorMessage.INVALID_PARAMETER,
+                    status_code=status.HTTP_400_BAD_REQUEST,
                 )
 
-            sort_by = request.GET.get("sort_by")
-            allowed = {"product_title", "product_code_no_dashes"}
-            if sort_by and sort_by.lstrip("-") in allowed:
-                products = products.order_by(sort_by)
+            qs = self._base_scoped_queryset()
 
-            data, paginator = self.paginate_and_serialize(products, request)
+            # 1) No unified query: legacy or plain listing
+            if not q:
+                # Legacy filters (optional)
+                if product_code:
+                    norm_in = self._normalize_term(product_code)
+                    qs = qs.filter(norm_code__icontains=norm_in)
+                if product_title:
+                    qs = qs.filter(product_title__icontains=product_title)
 
-            response_data = _prepare_response_data(
-                products, data, product_code, product_title
+                # Finalize response
+                return self._finalize_and_respond(
+                    qs,
+                    request,
+                    ranked=False,
+                    product_code=product_code,
+                    product_title=product_title,
+                )
+
+            # 2) Unified q= path
+            q_norm = self._normalize_term(q)
+            looks_like_code = 1 if re.fullmatch(r"[A-Za-z0-9_-]+", q) else 0
+
+            qs = self._annotate_rank_signals(qs, q, q_norm, looks_like_code)
+            qs = qs.filter(
+                Q(product_code__icontains=q)
+                | Q(product_title__icontains=q)
+                | Q(norm_code__contains=q_norm)
             )
-            response_data = self.postprocess_response_data(response_data, products)
 
-            if paginator is None:
-                return Response(response_data, status=status.HTTP_200_OK)
-            return paginator.get_paginated_response(
-                response_data, status_code=status.HTTP_200_OK
+            return self._finalize_and_respond(
+                qs,
+                request,
+                ranked=True,
+                product_code=product_code,
+                product_title=product_title,
             )
 
         except DatabaseError:
-            return _handle_database_error()
+            return handle_error(
+                ErrorCode.INTERNAL_SERVER_ERROR,
+                ErrorMessage.INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
         except TimeoutError:
-            return _handle_timeout_error()
+            return handle_error(
+                ErrorCode.INTERNAL_SERVER_ERROR,
+                ErrorMessage.INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            )
         except ValidationError:
-            return _handle_invalid_query_param()
+            return handle_error(
+                ErrorCode.INVALID_PARAMETER,
+                ErrorMessage.INVALID_PARAMETER,
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
         except Exception:
             logger.exception(INTERNAL_ERROR_MSG)
             return handle_error(
@@ -2511,25 +3612,77 @@ class ProductSearchUserView(BaseProductSearchView):
         return Q(is_latest=True, status="live")
 
 
-class ProductUsersSearchFilterAPIView(generics.ListAPIView):
+# --------------------------------------------------------------------------- #
+# Users: Search + Filter (DjangoFilter + SearchFilter)                        #
+# --------------------------------------------------------------------------- #
+
+
+class ProductUsersSearchFilterAPIView(generics.ListAPIView, ProductListMixin):
     """
     GET /api/v1/products/user/search/filter/
+      Supports:
+        - ?search= (SearchFilter on product_title, product_code_no_dashes)
+        - ProductFilter (your custom filterset)
+        - ?sort_by= (uniform custom sorting)
     """
 
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
     serializer_class = ProductSearchSerializer
     pagination_class = CustomPagination
-    queryset = Product.objects.filter(status="live", is_latest=True)
 
+    # Keep standard filter/search backends; we’ll still apply our custom sort_by
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class = ProductFilter
     search_fields = ["product_title", "product_code_no_dashes"]
-    ordering_fields = VALID_SORT_FIELDS
+
+    # OrderingFilter fallback fields (if someone uses ?ordering=)
+    ordering_fields = list(
+        dict.fromkeys([*VALID_SORT_FIELDS, "norm_code", "-norm_code"])
+    )
     ordering = ["product_title", "-updated_at"]
 
+    def get_queryset(self):
+        base = Product.objects.filter(status="live", is_latest=True)
+        base = self.clean_dedup_queryset(base)
+        return base
 
+    def list(self, request, *args, **kwargs):
+        """
+        Override to apply uniform ?sort_by= after filter_backends while
+        preserving search/filter behavior.
+        """
+        try:
+            # Apply filter_backends first (filterset + search + default ordering)
+            qs = self.filter_queryset(self.get_queryset())
+
+            # Then enforce our uniform ?sort_by= if provided/valid
+            sorted_qs = self.get_sorted_queryset(qs, request)
+
+            data, paginator = self.paginate_and_serialize(
+                sorted_qs, request, serializer_class=ProductSearchSerializer
+            )
+            data = filter_live_languages(data)
+            return paginator.get_paginated_response(data)
+
+        except Exception:
+            logger.exception(INTERNAL_ERROR_MSG)
+            return handle_error(
+                ErrorCode.INTERNAL_SERVER_ERROR,
+                ErrorMessage.INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Users: Faceted Filter                                                       #
+# --------------------------------------------------------------------------- #
 class ProductUsersFilterView(ProductListMixin, APIView):
+    """
+    GET /api/v1/products/user/filter/
+      Faceted filters + uniform ?sort_by= support
+    """
+
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
 
@@ -2538,6 +3691,7 @@ class ProductUsersFilterView(ProductListMixin, APIView):
             base_q = Q(is_latest=True, status="live")
             filters = Q()
 
+            # Access type flags (mutually exclusive per your original logic)
             dl = request.GET.get("download_only", "").lower()
             do = request.GET.get("download_or_order", "").lower()
             oo = request.GET.get("order_only", "").lower()
@@ -2548,11 +3702,13 @@ class ProductUsersFilterView(ProductListMixin, APIView):
             elif oo == "true":
                 filters &= Q(tag="order_only")
 
+            # Facets
             for param, lookup in [
                 ("audiences", "update_ref__audience_ref__name"),
                 ("diseases", "update_ref__diseases_ref__name"),
                 ("vaccinations", "update_ref__vaccination_ref__name"),
                 ("program_names", "program_name"),
+                ("program_ids", "program_id"),
                 ("where_to_use", "update_ref__where_to_use_ref__name"),
                 ("alternative_type", "update_ref__alternative_type"),
                 ("product_type", "update_ref__product_type"),
@@ -2572,7 +3728,9 @@ class ProductUsersFilterView(ProductListMixin, APIView):
                         status_code=status.HTTP_400_BAD_REQUEST,
                     )
 
-            queryset = Product.objects.filter(base_q & filters).distinct()
+            queryset = Product.objects.filter(base_q & filters)
+            queryset = self.clean_dedup_queryset(queryset)
+
             sorted_qs = self.get_sorted_queryset(queryset, request)
 
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
@@ -2588,7 +3746,15 @@ class ProductUsersFilterView(ProductListMixin, APIView):
             )
 
 
+# --------------------------------------------------------------------------- #
+# Admin: Faceted Filter                                                       #
+# --------------------------------------------------------------------------- #
 class ProductAdminFilterView(ProductListMixin, APIView):
+    """
+    GET /api/v1/products/admin/filter/
+      Faceted filters for admins + uniform ?sort_by=
+    """
+
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
 
@@ -2603,6 +3769,8 @@ class ProductAdminFilterView(ProductListMixin, APIView):
             "languages": "language_name__in",
             "access_type": "tag__in",
             "status": "status__in",
+            "program_names": "program_name__in",
+            "program_ids": "program_id__in",
         }
         q = Q()
         for param, lookup in mapping.items():
@@ -2610,19 +3778,31 @@ class ProductAdminFilterView(ProductListMixin, APIView):
             if vals:
                 q &= Q(**{lookup: vals})
 
-        codes = request.GET.getlist("product_code")
-        if codes:
-            code_q = Q()
-            for c in codes:
-                code_q |= Q(product_code_no_dashes__icontains=c)
-            q &= code_q
+        # Placeholder to keep structure consistent if product_code is present;
+        # actual filtering applied on annotated norm_code below
+        if request.GET.getlist("product_code"):
+            q &= Q()
 
         return q
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
             base_q = self._build_filter_query(request)
-            qs = Product.objects.filter(base_q).distinct()
+            qs = Product.objects.filter(base_q)
+
+            # Apply code filters on annotated norm_code if provided
+            codes = request.GET.getlist("product_code")
+            qs = self._annotate_norm_code(qs)
+            if codes:
+                code_filters = Q()
+                for c in codes:
+                    normalized = normalize_product_code(c)
+                    code_filters |= Q(norm_code__icontains=normalized)
+                qs = qs.filter(code_filters)
+
+            qs = self._exclude_edge_spaces(qs)
+            qs = self._dedupe_by_norm_code(qs)
+
             sorted_qs = self.get_sorted_queryset(qs, request)
             data, paginator = self.paginate_and_serialize(sorted_qs, request)
             return paginator.get_paginated_response(data)
@@ -2635,26 +3815,52 @@ class ProductAdminFilterView(ProductListMixin, APIView):
             )
 
 
+# --------------------------------------------------------------------------- #
+# Program-scoped: Products (with optional facets)                             #
+# --------------------------------------------------------------------------- #
 class ProgramProductsView(ProductListMixin, generics.ListAPIView):
     """
     GET /api/v1/programmes/<program_id>/products/
+      Supports:
+        - program scoping (diseases/vaccinations tied to program)
+        - optional facets (same as user filter)
+        - uniform ?sort_by=
     """
 
     serializer_class = ProductSerializer
     pagination_class = CustomPagination
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
-    cache_timeout = CACHE_TTL
+    cache_timeout = settings.CACHE_TTL_LIST
 
     def get_cache_key(self, request, program_id):
         user_id = request.user.id if request.user.is_authenticated else "anon"
         return f"prog_products:{program_id}:user:{user_id}:{request.get_full_path()}"
 
+    def _build_facets(self, request) -> Q:
+        q = Q()
+        for param, lookup in [
+            ("audiences", "update_ref__audience_ref__name__in"),
+            ("diseases", "update_ref__diseases_ref__name__in"),
+            ("vaccinations", "update_ref__vaccination_ref__name__in"),
+            ("where_to_use", "update_ref__where_to_use_ref__name__in"),
+            ("alternative_type", "update_ref__alternative_type__in"),
+            ("product_type", "update_ref__product_type__in"),
+            ("languages", "language_name__in"),
+            ("access_type", "tag__in"),
+        ]:
+            vals = request.GET.getlist(param)
+            if vals:
+                q &= Q(**{lookup: vals})
+        return q
+
     def get_queryset(self):
         program = get_object_or_404(Program, pk=self.kwargs["program_id"])
         diseases = Disease.objects.filter(programs=program)
         vaccinations = Vaccination.objects.filter(programs=program)
-        return (
+
+        # Base program scope (live, latest)
+        qs = (
             Product.objects.select_related("update_ref")
             .prefetch_related(
                 "update_ref__diseases_ref",
@@ -2667,8 +3873,16 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
                 Q(is_latest=True),
                 Q(status="live"),
             )
-            .distinct()
         )
+
+        # Optional facets
+        facet_q = self._build_facets(self.request)
+        if facet_q:
+            qs = qs.filter(facet_q)
+
+        # Normalize + dedupe
+        qs = self.clean_dedup_queryset(qs)
+        return qs
 
     def list(self, request, *args, **kwargs):
         cache_key = self.get_cache_key(request, kwargs["program_id"])
@@ -2676,22 +3890,55 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
         if cached:
             return Response(cached)
 
-        response = super().list(request, *args, **kwargs)
+        # Apply uniform ?sort_by= before pagination
+        qs = self.get_queryset()
+        qs = self.get_sorted_queryset(qs, request)
 
-        all_urls = extract_s3_urls(response.data["results"])
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            serializer = self.get_serializer(
+                page, many=True, context=self.get_serializer_context()
+            )
+            # Attachment-style presigns
+            all_urls = extract_s3_urls(serializer.data)
+            presigned = generate_presigned_urls(all_urls)
+            update_product_urls(serializer.data, presigned)
+
+            response = self.get_paginated_response(serializer.data)
+
+            # Include program diseases/vaccinations in the payload
+            program = get_object_or_404(Program, pk=kwargs["program_id"])
+            response.data["diseases"] = DiseaseSerializer(
+                Disease.objects.filter(programs=program), many=True
+            ).data
+            response.data["vaccinations"] = VaccinationSerializer(
+                Vaccination.objects.filter(programs=program), many=True
+            ).data
+
+            cache.set(cache_key, response.data, self.cache_timeout)
+            return response
+
+        # Non-paginated fallback (rare)
+        serializer = self.get_serializer(
+            qs, many=True, context=self.get_serializer_context()
+        )
+        data = serializer.data
+        all_urls = extract_s3_urls(data)
         presigned = generate_presigned_urls(all_urls)
-        update_product_urls(response.data["results"], presigned)
+        update_product_urls(data, presigned)
 
         program = get_object_or_404(Program, pk=kwargs["program_id"])
-        response.data["diseases"] = DiseaseSerializer(
-            Disease.objects.filter(programs=program), many=True
-        ).data
-        response.data["vaccinations"] = VaccinationSerializer(
-            Vaccination.objects.filter(programs=program), many=True
-        ).data
-
-        cache.set(cache_key, response.data, self.cache_timeout)
-        return response
+        payload = {
+            "results": data,
+            "diseases": DiseaseSerializer(
+                Disease.objects.filter(programs=program), many=True
+            ).data,
+            "vaccinations": VaccinationSerializer(
+                Vaccination.objects.filter(programs=program), many=True
+            ).data,
+        }
+        cache.set(cache_key, payload, self.cache_timeout)
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class IncompleteProductsView(View):

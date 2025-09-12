@@ -116,7 +116,7 @@ jobs:
   release-hotfix:
     name: Hotfix Tag and release container image 
     runs-on: ubuntu-latest
-    if: (github.ref == 'refs/heads/prod') && contains(github.event.head_commit.message, 'hpub-hotfix/')
+    if: (github.ref == 'refs/heads/prod') && contains(github.event.head_commit.message, 'feature/hotfix')
     environment: dev
     permissions:
       contents: write

@@ -4,6 +4,7 @@
 
 This project is a Wagtail-Django-based backend application for managing various health publication components such as programs, products(publications), ordering publications, and more. The project uses Wagtail to provide APIs for interacting with these components.
 
+
 ## Environments & Access
 
 The backend supports multiple environments:
@@ -355,6 +356,7 @@ After assigning a user to `Admin` status in Azure External Id do the following t
    - Docker build errors → clear cache: docker builder prune
 
    - AWS permission denied → confirm your IAM role has ecs:*, ssm:GetParameter, ecr:*
+
 
 ## Glossary & References
 - Wagtail: Django-based CMS

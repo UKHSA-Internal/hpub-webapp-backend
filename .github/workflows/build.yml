@@ -117,6 +117,7 @@ jobs:
     name: Tag and release container image main
     runs-on: ubuntu-latest
     if: (github.ref == 'refs/heads/prod') && contains(github.event.head_commit.message, 'hpub-hotfix/')
+    environment: dev
     permissions:
       contents: write
       id-token: write

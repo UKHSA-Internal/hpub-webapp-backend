@@ -141,13 +141,25 @@ jobs:
 
           VERSION_NUMBER=${LATEST_RELEASE_TAG#v}
           IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_NUMBER"
-          PATCH=$((PATCH + 1))
+          
+          # Fetch all tags locally
+          git fetch --tags > /dev/null 2>&1
 
-          EXISTING_HOTFIXES=$(git fetch --tags && git tag -l "v${MAJOR}.${MINOR}.${PATCH}-hotfix*")
-          COUNT=$(echo "$EXISTING_HOTFIXES" | wc -l)
-          HOTFIX_NUMBER=$((COUNT + 1))
-          HOTFIX_TAG="v${MAJOR}.${MINOR}.${PATCH}-hotfix${HOTFIX_NUMBER}"
-          echo "HOTFIX_TAG=$HOTFIX_TAG" >> $GITHUB_ENV
+          # Find the highest patch for this MAJOR.MINOR
+          LATEST_PATCH=$(git tag -l "v${MAJOR}.${MINOR}.*" \
+            | sed "s/v${MAJOR}.${MINOR}.//" \
+            | sort -n \
+            | tail -1)
+
+          # If no tags found, start at 0
+          LATEST_PATCH=${LATEST_PATCH:-0}
+
+          # Increment PATCH from the latest one
+          PATCH=$((LATEST_PATCH + 1))
+
+          # Build new tag
+          NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "HOTFIX_TAG=$NEW_TAG" >> $GITHUB_ENV
           echo "Latest release: $LATEST_RELEASE_TAG"
           echo "New hotfix tag: $HOTFIX_TAG"
 

@@ -10,15 +10,21 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TZ=Europe/London \
     DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies (cron, ffmpeg for video, libmagic for MIME detection, tzdata),
-# set timezone, then clean up to keep image small.
+# Install system dependencies:
+# - cron: for scheduled tasks
+# - ffmpeg: for video/audio probing
+# - libmagic1: MIME detection
+# - tzdata: timezone
+# - libreoffice: for doc conversions/page counts
+# - fonts-dejavu: prevent blank glyphs in PDFs
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         cron \
         ffmpeg \
         libmagic1 \
-        libmbedtls-dev \
         tzdata \
+        libreoffice-writer libreoffice-core libreoffice-common \
+        fonts-dejavu \
     && ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime \
     && echo "$TZ" > /etc/timezone \
     && apt-get clean \
@@ -37,16 +43,23 @@ COPY health_pubs /app/
 # Change ownership (optional)
 RUN chown -R appuser:appuser /app
 
-# Copy and make the entrypoint script executable
+# Copy entrypoint script
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-# Run as non-root
-USER appuser
-
+# Copy LibreOffice healthcheck script
+COPY lo_healthcheck.sh /usr/local/bin/lo_healthcheck.sh
+RUN chmod +x /usr/local/bin/lo_healthcheck.sh
 
 # Expose the application port
 EXPOSE 8000
 
-# Use the entrypoint to initialize cron jobs and launch Gunicorn
+# Add Docker HEALTHCHECK (runs every 30s)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD /usr/local/bin/lo_healthcheck.sh || exit 1
+
+# Run as non-root for the app
+USER appuser
+
+# Entrypoint: starts cron + Gunicorn (and runs LO startup check)
 ENTRYPOINT ["/app/entrypoint.sh"]

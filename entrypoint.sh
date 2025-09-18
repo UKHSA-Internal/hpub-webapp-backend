@@ -15,6 +15,19 @@ echo "Wagtail version: $wagtail_version"
 echo "=============================="
 
 # -----------------------------------------------------------------------------
+# Step 0.5: Check LibreOffice availability (startup sanity check)
+# -----------------------------------------------------------------------------
+echo "=============================="
+echo "Checking LibreOffice (soffice) availability..."
+if /usr/local/bin/lo_healthcheck.sh; then
+  echo "LibreOffice check passed at startup."
+else
+  echo "LibreOffice check failed. Exiting."
+  exit 1
+fi
+echo "=============================="
+
+# -----------------------------------------------------------------------------
 # Step 1: Check for migration files under "core" (or sub‐apps) and generate if empty
 # -----------------------------------------------------------------------------
 echo "=============================="

@@ -623,7 +623,7 @@ class TokenRefresh(APIView):
     permission_classes = []
 
     def post(self, request):
-        logger.info("Request COOKIE header: %s", request.META.get("HTTP_COOKIE"))
+        # logger.info("Request COOKIE header: %s", request.META.get("HTTP_COOKIE")) # for debugging
         # Extract token from header if available; otherwise use cookie.
         auth_header = request.headers.get("Authorization", "")
         if auth_header and " " in auth_header:

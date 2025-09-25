@@ -338,6 +338,7 @@ After assigning a user to `Admin` status in Azure External Id do the following t
    Please following the steps in the documentation in this link [text](https://github.com/UKHSA-Internal/hpub-aps/blob/main/event_triggers_lambdas/update_user_role/README.md) this process has been turned into a Lambda function in AWS to help for easy use.
 
 
+
 ## Debugging & Troubleshooting
 1. Logs
 

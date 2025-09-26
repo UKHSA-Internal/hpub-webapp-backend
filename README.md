@@ -358,7 +358,6 @@ After assigning a user to `Admin` status in Azure External Id do the following t
 
    - AWS permission denied → confirm your IAM role has ecs:*, ssm:GetParameter, ecr:*
 
-
 ## Glossary & References
 - Wagtail: Django-based CMS
 - ECR: Elastic Container Registry

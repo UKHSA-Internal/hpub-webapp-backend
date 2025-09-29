@@ -2711,6 +2711,14 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         return file_urls
 
     def add_file_metadata(self, file_urls: dict) -> dict:
+        """
+        Attach presigned URLs and file metadata to file_urls.
+        Ensures TTL alignment with cache and safe defaults if metadata is missing.
+        """
+        presign_ttl = int(getattr(settings, "PRESIGNED_URL_TTL", 3600))
+        effective_ttl = max(0, presign_ttl - 5)  # safety margin
+
+        # Collect URLs
         all_urls = []
         if file_urls.get("main_download_url"):
             all_urls.append(file_urls["main_download_url"])
@@ -2718,20 +2726,31 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
             if key != "main_download_url" and isinstance(value, list):
                 all_urls.extend(value)
 
-        presigned = generate_presigned_urls(all_urls)
-        inline_presigned = generate_inline_presigned_urls(all_urls)
-        metadata_list = get_file_metadata(list(presigned.values()))
-        metadata_dict = {meta["URL"]: meta for meta in metadata_list}
+        # Generate presigns
+        presigned = generate_presigned_urls(all_urls, expiration=effective_ttl)
+        inline_presigned = generate_inline_presigned_urls(
+            all_urls, expiration=effective_ttl
+        )
 
+        # Metadata lookup (guarded by feature flag if needed)
+        metadata_dict = {}
+        if getattr(settings, "FILE_METADATA_ENABLED", True) and presigned:
+            metadata_list = get_file_metadata(list(presigned.values()))
+            metadata_dict = {meta["URL"]: meta for meta in metadata_list}
+
+        # Build a new dict (don’t mutate in place)
+        result = {}
         for key, value in file_urls.items():
             if key == "main_download_url" and value:
                 presigned_url = presigned.get(value)
                 meta = metadata_dict.get(presigned_url, {"URL": value})
-                meta["s3_bucket_url"] = value
-                meta["inline_presigned_s3_url"] = inline_presigned.get(value, "")
-                file_urls[key] = meta
+                result[key] = {
+                    **meta,
+                    "s3_bucket_url": value,
+                    "inline_presigned_s3_url": inline_presigned.get(value, ""),
+                }
             elif isinstance(value, list):
-                file_urls[key] = [
+                result[key] = [
                     {
                         **metadata_dict.get(presigned.get(url), {"URL": url}),
                         "s3_bucket_url": url,
@@ -2739,7 +2758,10 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                     }
                     for url in value
                 ]
-        return file_urls
+            else:
+                result[key] = value
+
+        return result
 
     def prepare_product_update_data(
         self,

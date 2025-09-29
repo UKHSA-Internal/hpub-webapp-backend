@@ -1977,7 +1977,7 @@ class PresignedUrlMixin:
 # Product detail (preview) — versioned server cache + browser no-store        #
 # --------------------------------------------------------------------------- #
 class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
-    authentication_classes = [SessionAuthentication]
+    authentication_classes = [CustomTokenAuthentication, SessionAuthentication]
     permission_classes = [AllowAny]
 
     def retrieve(self, request, product_code=None, *args, **kwargs):

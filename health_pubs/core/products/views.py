@@ -2104,7 +2104,7 @@ class ProductDeleteAll(View):
             )
 
 
-class ProductStatusUpdateView(View):
+class ProductStatusUpdateView(APIView):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
     """
@@ -2345,7 +2345,7 @@ class ProductStatusUpdateView(View):
         return new_status
 
 
-class ProductUpdateView(View):
+class ProductUpdateView(APIView):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
     """
@@ -3333,32 +3333,19 @@ class ProductListMixin:
         return sv if sv in ALLOWED_SORT_FIELDS else None
 
     def _dedupe_by_norm_code_fast(self, qs):
-        """
-        Return Product rows de-duplicated by normalized product_code (norm_code),
-        keeping the most recently updated (then highest id) per code.
-
-        Works even if the incoming queryset is *sliced* by rebasing it onto a
-        fresh Product queryset using a Subquery of IDs.
-        """
-        # If the incoming queryset is sliced, rebase to avoid .filter() on a slice.
         try:
             q = qs
             q_query = getattr(qs, "query", None)
             low_mark = getattr(q_query, "low_mark", 0) or 0
             high_mark = getattr(q_query, "high_mark", None)
             if low_mark or high_mark is not None:
-                # Build a fresh base that we CAN filter/annotate
                 q = Product.objects.filter(id__in=Subquery(qs.values("id")))
         except Exception:
-            # Very defensive fallback
             q = Product.objects.filter(id__in=Subquery(qs.values("id")))
 
-        # Now it is safe to annotate & filter
         q = self._annotate_norm_code(q).filter(product_code=F("code_trim"))
-
         updated_field = self._best_updated_field(q) or "id"
 
-        # Choose the single "best" row per norm_code
         best_row_for_norm = (
             q.filter(norm_code=OuterRef("norm_code"))
             .order_by(F(updated_field).desc(nulls_last=True), F("id").desc())
@@ -3371,7 +3358,6 @@ class ProductListMixin:
             .values("best_id")
         )
 
-        # Return a clean Product queryset constrained to the chosen ids
         return Product.objects.filter(id__in=Subquery(best_ids))
 
     def get_sorted_queryset(self, queryset, request):
@@ -3450,16 +3436,13 @@ class ProductListMixin:
         is_search: bool = False,
     ):
         bypass_cache = (self.cache_timeout or 0) <= 0 or request.GET.get("fresh") == "1"
-
         version = self._queryset_version(queryset)
         base_key = self.get_cache_key(request)
         cache_key = f"{base_key}:v{version}"
 
         cached = None if bypass_cache else cache.get(cache_key)
-
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(queryset, request, view=self)
-
         if cached is not None:
             return cached, paginator
 
@@ -3467,13 +3450,15 @@ class ProductListMixin:
         s_class = serializer_class or (
             self.search_serializer_class if is_search else self.serializer_class
         )
-
         serializer = s_class(page, many=True, context=ctx)
 
-        # IMPORTANT: No behavior change unless the view explicitly disables this.
+        # --- PRESIGN with explicit TTL ---
+        presign_ttl = int(getattr(settings, "PRESIGNED_URL_TTL", 3600))
+        safety_margin = 5
+
         if self.presign_in_lists and getattr(settings, "PRESIGN_IN_LISTS", True):
             urls = extract_s3_urls(serializer.data)
-            presigned = generate_presigned_urls(urls)
+            presigned = generate_presigned_urls(urls, expiration=presign_ttl)
             if use_direct_update:
                 _update_product_downloads_with_presigned_urls(page, presigned)
                 serializer = s_class(page, many=True, context=ctx)
@@ -3483,17 +3468,14 @@ class ProductListMixin:
         data = serializer.data
 
         if not bypass_cache and self.cache_timeout and self.cache_timeout > 0:
-            cache.set(cache_key, data, timeout=self.cache_timeout)
+            effective_ttl = self.cache_timeout
+            if presign_ttl:
+                effective_ttl = min(effective_ttl, max(0, presign_ttl - safety_margin))
+            cache.set(cache_key, data, timeout=effective_ttl)
 
         return data, paginator
 
     def optimize_for_search(self, qs):
-        """
-        Light-weight queryset for user-facing lists/search:
-        - add normalized code fields used by search/serializers
-        - trim/clean product_code (guards against trailing spaces)
-        - pull common related rows we serialize
-        """
         norm_expr = Upper(
             Replace(
                 Replace(
@@ -3505,79 +3487,52 @@ class ProductListMixin:
                 Value(""),
             )
         )
-
         annotations = {
             "code_trim": Trim(F("product_code")),
-            "norm_code": norm_expr,  # used widely across search/ranking
+            "norm_code": norm_expr,
         }
-
-        # Only add this if it's NOT a real DB field to avoid conflicts
         if not self._model_has_field(qs.model, "product_code_no_dashes"):
             annotations["product_code_no_dashes"] = norm_expr
 
         return (
             qs.select_related("update_ref", "program_id", "language_id")
             .annotate(**annotations)
-            .filter(product_code=F("code_trim"))  # exclude edge-space variants
+            .filter(product_code=F("code_trim"))
         )
 
 
 # --------------------------------------------------------------------------- #
-# Admin: List (all fields, optimized)                                         #
+# Admin: List                                                                 #
 # --------------------------------------------------------------------------- #
 class ProductAdminListView(ProductListMixin, APIView):
-    """
-    GET /api/v1/products/admin/all/?page=1&page_size=100&sort_by=-created_at
-    Admin-only product listing, full data, no S3 overhead.
-    """
-
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
-
     include_request_context = True
-    cache_timeout = 0  # always fresh for admins
+    cache_timeout = 0
     pagination_class = AdminPagination
-    presign_in_lists = False  # <<< KEY CHANGE: no presigning here
+    presign_in_lists = False
 
     def get(self, request, *args, **kwargs):
-        logger.info("ProductAdminListView GET called")
         try:
-            # keep admin fields rich, but avoid unnecessary related loads
             base = Product.objects.all().select_related("program_id", "language_id")
-
             if not base.exists():
-                logger.warning(ErrorMessage.PRODUCT_NOT_FOUND.value)
                 return handle_error(
                     ErrorCode.PRODUCT_NOT_FOUND,
                     ErrorMessage.PRODUCT_NOT_FOUND,
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
-
             sorted_qs = self.get_sorted_queryset(base, request)
-
-            # paginate and serialize (no presigning/enrichment)
-            data, paginator = self.paginate_and_serialize(
-                sorted_qs, request, use_direct_update=False, is_search=False
-            )
-            return paginator.get_paginated_response(
-                data, status_code=status.HTTP_200_OK
-            )
-
-        except Exception as e:  # noqa: BLE001
+            data, paginator = self.paginate_and_serialize(sorted_qs, request)
+            return paginator.get_paginated_response(data)
+        except Exception as e:
             logger.exception("Admin list error: %s", e)
             return handle_exceptions(e)
 
 
 # --------------------------------------------------------------------------- #
-# Users: List (brief cache, flat latency)                                     #
+# Users: List                                                                 #
 # --------------------------------------------------------------------------- #
 class ProductUsersListView(ProductListMixin, APIView):
-    """
-    GET /api/v1/products/users/all/?page=1&sort_by=-created_at
-    Public user-facing product listing.
-    Optimized for speed + always presigns images.
-    """
-
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
     include_request_context = True
@@ -3585,7 +3540,6 @@ class ProductUsersListView(ProductListMixin, APIView):
 
     def get(self, request, *args, **kwargs):
         try:
-            # Base query: only live & latest
             base = Product.objects.filter(is_latest=True, status="live")
             if not base.exists():
                 return handle_error(
@@ -3593,28 +3547,17 @@ class ProductUsersListView(ProductListMixin, APIView):
                     ErrorMessage.PRODUCT_NOT_FOUND,
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
-
-            #  Lighter path: optimize fields, skip heavy dedupe
             qs = self.optimize_for_search(base)
-
-            #  Sorting
             sorted_qs = self.get_sorted_queryset(qs, request)
-
-            #  Pagination + force presigning (not is_search)
             data, paginator = self.paginate_and_serialize(
                 sorted_qs,
                 request,
                 serializer_class=ProductSearchSerializer,
-                is_search=False,  # <<< force presign here
-                use_direct_update=False,  # we only need to update serializer.data
+                is_search=False,
             )
-
-            #  Drop unwanted languages
             data = filter_live_languages(data)
-
             return paginator.get_paginated_response(data)
-
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.exception("Users list error: %s", e)
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
@@ -3878,16 +3821,9 @@ class ProductSearchAdminView(BaseProductSearchView):
 
 
 # --------------------------------------------------------------------------- #
-# Users: Filter (facets)                                                      #
+# Users: Faceted Filter                                                       #
 # --------------------------------------------------------------------------- #
 class ProductUsersFilterView(ProductListMixin, APIView):
-    """
-    GET /api/v1/products/user/filter/
-    Faceted filters (audiences, diseases, program, languages, access type, etc.)
-    - Live + latest only
-    - Presigned images/downloads included
-    """
-
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
     include_request_context = True
@@ -3896,24 +3832,17 @@ class ProductUsersFilterView(ProductListMixin, APIView):
 
     def get(self, request, *args, **kwargs):
         try:
-            cache_key = self.get_cache_key(request, prefix="user_filter")
-            if self.cache_timeout and not request.GET.get("fresh"):
-                cached = cache.get(cache_key)
-                if cached:
-                    return Response(cached)
-
             base_q = Q(is_latest=True, status="live")
             filters = Q()
 
-            # Access type
+            # Access type (normalize to hyphenated tags)
             if request.GET.get("download_only", "").lower() == "true":
-                filters &= Q(tag="download_only")
+                filters &= Q(tag="download-only")
             elif request.GET.get("download_or_order", "").lower() == "true":
-                filters &= Q(tag="download_and_order")
+                filters &= Q(tag="download-or-order")
             elif request.GET.get("order_only", "").lower() == "true":
-                filters &= Q(tag="order_only")
+                filters &= Q(tag="order-only")
 
-            # Facets
             mapping = [
                 ("audiences", "update_ref__audience_ref__name"),
                 ("diseases", "update_ref__diseases_ref__name"),
@@ -3930,112 +3859,19 @@ class ProductUsersFilterView(ProductListMixin, APIView):
                 if vals:
                     filters &= Q(**{f"{lookup}__in": vals})
 
-            if recent := request.GET.get("recently_updated"):
-                try:
-                    filters &= Q(updated_at__gte=recent)
-                except ValueError:
-                    return handle_error(
-                        ErrorCode.INVALID_PARAMETER,
-                        f"Invalid date: {recent}",
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                    )
-
             qs = Product.objects.filter(base_q & filters)
-            qs = self._annotate_norm_code(qs)
-            qs = self._exclude_edge_spaces(qs)
+            qs = self._dedupe_by_norm_code_fast(qs)
             qs = self.optimize_for_search(qs)
-            qs = self.get_sorted_queryset(qs, request)
-
-            data, paginator = self.paginate_and_serialize(
-                qs, request, serializer_class=ProductSearchSerializer, is_search=True
-            )
-            data = filter_live_languages(data)
-            response = paginator.get_paginated_response(data)
-
-            if self.cache_timeout:
-                cache.set(cache_key, response.data, self.cache_timeout)
-
-            return response
-
-        except Exception:
-            logger.exception("User filter error")
-            return handle_error(
-                ErrorCode.INTERNAL_SERVER_ERROR,
-                ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-
-# --------------------------------------------------------------------------- #
-# Users: Faceted Filter                                                       #
-# --------------------------------------------------------------------------- #
-class ProductUsersFilterView(ProductListMixin, APIView):
-    """
-    GET /api/v1/products/user/filter/
-      - Faceted filters (audiences, diseases, etc.)
-      - Always presigns downloads/images
-    """
-
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
-    pagination_class = CustomPagination
-    include_request_context = True
-    cache_timeout = getattr(settings, "CACHE_TTL_LIST", 30)
-
-    def get(self, request, *args, **kwargs):
-        try:
-            base_q = Q(is_latest=True, status="live")
-            filters = Q()
-
-            # Access type flags
-            if request.GET.get("download_only", "").lower() == "true":
-                filters &= Q(tag="download_only")
-            elif request.GET.get("download_or_order", "").lower() == "true":
-                filters &= Q(tag="download_and_order")
-            elif request.GET.get("order_only", "").lower() == "true":
-                filters &= Q(tag="order_only")
-
-            # Facets
-            for param, lookup in [
-                ("audiences", "update_ref__audience_ref__name"),
-                ("diseases", "update_ref__diseases_ref__name"),
-                ("vaccinations", "update_ref__vaccination_ref__name"),
-                ("program_names", "program_name"),
-                ("program_ids", "program_id"),
-                ("where_to_use", "update_ref__where_to_use_ref__name"),
-                ("alternative_type", "update_ref__alternative_type"),
-                ("product_type", "update_ref__product_type"),
-                ("languages", "language_name"),
-            ]:
-                values = request.GET.getlist(param)
-                if values:
-                    filters &= Q(**{f"{lookup}__in": values})
-
-            # Recently updated
-            if recent := request.GET.get("recently_updated"):
-                try:
-                    filters &= Q(updated_at__gte=recent)
-                except ValueError:
-                    return handle_error(
-                        ErrorCode.INVALID_PARAMETER,
-                        f"Invalid date for recently_updated: {recent}",
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                    )
-
-            qs = Product.objects.filter(base_q & filters)
-            qs = self._dedupe_by_norm_code(qs)
-            qs = self.optimize_for_search(qs)  #  include downloads/images
             qs = self.get_sorted_queryset(qs, request)
 
             data, paginator = self.paginate_and_serialize(
                 qs,
                 request,
                 serializer_class=ProductSearchSerializer,
-                is_search=True,  #  presign enabled
+                is_search=True,
             )
             data = filter_live_languages(data)
             return paginator.get_paginated_response(data)
-
         except Exception:
             logger.exception("User filter error")
             return handle_error(
@@ -4044,82 +3880,60 @@ class ProductUsersFilterView(ProductListMixin, APIView):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-    def _dedupe_by_norm_code(self, qs):
-        return self._dedupe_by_norm_code_fast(qs)
-
 
 # --------------------------------------------------------------------------- #
 # Admin: Faceted Filter                                                       #
 # --------------------------------------------------------------------------- #
 class ProductAdminFilterView(ProductListMixin, APIView):
-    """
-    GET /api/v1/products/admin/filter/
-      Faceted filters for admins + uniform ?sort_by=
-    """
-
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
-
-    def _build_filter_query(self, request):
-        mapping = {
-            "diseases": "update_ref__diseases_ref__name__in",
-            "vaccinations": "update_ref__vaccination_ref__name__in",
-            "audiences": "update_ref__audience_ref__name__in",
-            "where_to_use": "update_ref__where_to_use_ref__name__in",
-            "alternative_type": "update_ref__alternative_type__in",
-            "product_type": "update_ref__product_type__in",
-            "languages": "language_name__in",
-            "access_type": "tag__in",
-            "status": "status__in",
-            "program_names": "program_name__in",
-            "program_ids": "program_id__in",
-        }
-        q = Q()
-        for param, lookup in mapping.items():
-            vals = request.GET.getlist(param, [])
-            if vals:
-                q &= Q(**{lookup: vals})
-
-        # Placeholder to keep structure consistent if product_code is present;
-        # actual filtering applied on annotated norm_code below
-        if request.GET.getlist("product_code"):
-            q &= Q()
-
-        return q
+    pagination_class = AdminPagination
+    include_request_context = True
+    cache_timeout = 0  # always fresh
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            base_q = self._build_filter_query(request)
-            qs = Product.objects.filter(base_q)
+            mapping = {
+                "diseases": "update_ref__diseases_ref__name__in",
+                "vaccinations": "update_ref__vaccination_ref__name__in",
+                "audiences": "update_ref__audience_ref__name__in",
+                "where_to_use": "update_ref__where_to_use_ref__name__in",
+                "alternative_type": "update_ref__alternative_type__in",
+                "product_type": "update_ref__product_type__in",
+                "languages": "language_name__in",
+                "access_type": "tag__in",
+                "status": "status__in",
+                "program_names": "program_name__in",
+                "program_ids": "program_id__in",
+            }
+            q = Q()
+            for param, lookup in mapping.items():
+                vals = request.GET.getlist(param, [])
+                if vals:
+                    q &= Q(**{lookup: vals})
 
-            # Apply code filters on annotated norm_code if provided
-            codes = request.GET.getlist("product_code")
-            qs = self._annotate_norm_code(qs)
-            if codes:
-                code_filters = Q()
-                for c in codes:
-                    normalized = normalize_product_code(c)
-                    code_filters |= Q(norm_code__icontains=normalized)
-                qs = qs.filter(code_filters)
-
-            qs = self._exclude_edge_spaces(qs)
-            qs = self._dedupe_by_norm_code(qs)
+            # 🚀 Lighter query: no dedupe, but with select_related
+            qs = Product.objects.filter(q).select_related(
+                "program_id", "language_id", "update_ref"
+            )
 
             sorted_qs = self.get_sorted_queryset(qs, request)
+
             data, paginator = self.paginate_and_serialize(
-                sorted_qs, request, is_search=True
+                sorted_qs,
+                request,
+                serializer_class=ProductSerializer,
+                is_search=False,  # no presigning for admin
             )
             return paginator.get_paginated_response(data)
+
         except Exception:
-            logger.exception(INTERNAL_ERROR_MSG)
+            logger.exception("Admin filter error")
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-
-    def _dedupe_by_norm_code(self, qs):
-        return self._dedupe_by_norm_code_fast(qs)
 
 
 # --------------------------------------------------------------------------- #

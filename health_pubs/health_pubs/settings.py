@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 from datetime import timedelta
 import os
+from urllib.parse import urlparse
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -287,13 +288,14 @@ MEDIA_ROOT = "/app/media/"
 # ================= Wagtail =================
 WAGTAIL_SITE_NAME = "Hpub Backend Service"
 
+
 if not DEBUG:
-    if HPUB_FRONT_END_URL.startswith("http://"):
+    parsed = urlparse(HPUB_FRONT_END_URL)
+    if parsed.scheme != "https":
         raise ValueError(
             f"Insecure HPUB_FRONT_END_URL configured: {HPUB_FRONT_END_URL}. "
             "Use HTTPS in non-DEBUG environments."
         )
-
 
 WAGTAILADMIN_BASE_URL = HPUB_FRONT_END_URL
 

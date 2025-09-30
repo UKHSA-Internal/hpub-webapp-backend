@@ -35,7 +35,12 @@ WORKDIR /app
 
 
 # --- FIX: Ensure safe tmp directory exists ---
-RUN mkdir -p /app/tmp && chown -R appuser:appuser /app/tmp
+# Create a private tmp dir for LibreOffice configs/cache
+RUN mkdir -p /app/.lo_tmp && chown -R appuser:appuser /app/.lo_tmp
+ENV HOME=/app/.lo_tmp
+ENV XDG_CACHE_HOME=/app/.lo_tmp/.cache
+ENV XDG_CONFIG_HOME=/app/.lo_tmp/.config
+
 
 # Copy and install Python dependencies
 COPY health_pubs/requirements.txt /app/requirements.txt

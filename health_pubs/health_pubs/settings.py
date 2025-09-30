@@ -285,10 +285,15 @@ STATIC_ROOT = "/app/static/"
 MEDIA_ROOT = "/app/media/"
 
 # ================= Wagtail =================
-WAGTAIL_SITE_NAME = "HPub Backend Service"
-# Always ensure HTTPS outside of DEBUG
-if not DEBUG and HPUB_FRONT_END_URL.startswith("http://"):
-    HPUB_FRONT_END_URL = HPUB_FRONT_END_URL.replace("http://", "https://")
+WAGTAIL_SITE_NAME = "Hpub Backend Service"
+
+if not DEBUG:
+    if HPUB_FRONT_END_URL.startswith("http://"):
+        raise ValueError(
+            f"Insecure HPUB_FRONT_END_URL configured: {HPUB_FRONT_END_URL}. "
+            "Use HTTPS in non-DEBUG environments."
+        )
+
 
 WAGTAILADMIN_BASE_URL = HPUB_FRONT_END_URL
 

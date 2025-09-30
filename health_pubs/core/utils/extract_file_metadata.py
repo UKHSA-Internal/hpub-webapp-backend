@@ -242,11 +242,6 @@ def _libreoffice_pdf(src: Path) -> Optional[Path]:
 
         # Ensure LO can write config/cache even in minimal containers
         env = os.environ.copy()
-        # Provide sane defaults if HOME/XDG dirs are missing
-        env.setdefault("HOME", "/tmp")
-        env.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
-        env.setdefault("XDG_CONFIG_HOME", "/tmp/.config")
-        env.setdefault("TMPDIR", "/tmp")
 
         subprocess.run(
             cmd,

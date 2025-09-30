@@ -1792,23 +1792,22 @@ class PresignedUrlMixin:
     def _collect_s3_urls(
         self, product_downloads: Dict[str, Any], *, slots: List[str]
     ) -> List[str]:
-        urls: List[str] = []
-
-        def add_dict(v: Any) -> None:
-            if isinstance(v, dict):
-                u = v.get("s3_bucket_url")
-                if u:
-                    urls.append(u)
-
-        for slot in slots:
-            val = product_downloads.get(slot)
+        def extract_from_val(val: Any) -> List[str]:
             if isinstance(val, dict):
-                add_dict(val)
-            elif isinstance(val, list):
-                for it in val:
-                    add_dict(it)
+                return [val.get("s3_bucket_url")] if val.get("s3_bucket_url") else []
+            if isinstance(val, list):
+                return [
+                    it.get("s3_bucket_url")
+                    for it in val
+                    if isinstance(it, dict) and it.get("s3_bucket_url")
+                ]
+            return []
 
-        # de-dupe, preserve order
+        urls = []
+        for slot in slots:
+            urls.extend(extract_from_val(product_downloads.get(slot)))
+
+        # de-dupe while preserving order
         seen, out = set(), []
         for u in urls:
             if u and u not in seen:
@@ -1846,63 +1845,69 @@ class PresignedUrlMixin:
                 )
                 for i in item
             ]
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or not item.get("s3_bucket_url"):
             return item
 
-        s3_url = item.get("s3_bucket_url")
-        if not s3_url:
-            return item
-
-        # attach download + inline
-        p = presigned.get(s3_url)
-        if p:
-            item["URL"] = p
-            md = metadata_dict.get(p, {})
-
-            # size/type (only if known)
-            if "file_size" in md:
-                item["file_size"] = md["file_size"]
-            if "file_type" in md:
-                item["file_type"] = md["file_type"]
-
-            file_type = (md.get("file_type") or "").lower()
-
-            # IMAGES → only dimensions (strip doc fields if any leaked)
-            if file_type.startswith("image/"):
-                item.pop("number_of_pages", None)
-                item.pop("page_size", None)
-                if "dimensions" in md:
-                    item["dimensions"] = md["dimensions"]
-
-            # DOCS → number_of_pages / page_size if present
-            elif self._is_doc_mime(file_type):
-                if "number_of_pages" in md:
-                    item["number_of_pages"] = md["number_of_pages"]
-                if "page_size" in md:
-                    item["page_size"] = md["page_size"]
-
-            # AV → duration/dimensions if present
-            if "duration" in md:
-                item["duration"] = md["duration"]
-            if "dimensions" in md and not file_type.startswith("image/"):
-                item["dimensions"] = md["dimensions"]
-
-            # optional extras (only if present)
-            for k in (
-                "number_of_slides",
-                "number_of_paragraphs",
-                "number_of_sheets",
-                "number_of_paragraphs_odt",
-            ):
-                if k in md:
-                    item[k] = md[k]
-
+        s3_url = item["s3_bucket_url"]
+        item = self._apply_presigned_and_metadata(
+            item, s3_url, presigned, metadata_dict
+        )
         ip = inline_presigned.get(s3_url)
         if ip:
             item["inline_presigned_s3_url"] = ip
+        return item
 
+    def _apply_presigned_and_metadata(
+        self,
+        item: Dict[str, Any],
+        s3_url: str,
+        presigned: Dict[str, str],
+        metadata_dict: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        presigned_url = presigned.get(s3_url)
+        if not presigned_url:
+            return item
+
+        item["URL"] = presigned_url
+        md = metadata_dict.get(presigned_url, {})
+        self._apply_core_metadata(item, md)
+        self._apply_optional_metadata(item, md)
         item["s3_bucket_url"] = s3_url
         return item
+
+    def _apply_core_metadata(self, item: Dict[str, Any], md: Dict[str, Any]) -> None:
+        if "file_size" in md:
+            item["file_size"] = md["file_size"]
+        if "file_type" in md:
+            item["file_type"] = md["file_type"]
+
+        file_type = (md.get("file_type") or "").lower()
+        if file_type.startswith("image/"):
+            item.pop("number_of_pages", None)
+            item.pop("page_size", None)
+            if "dimensions" in md:
+                item["dimensions"] = md["dimensions"]
+        elif self._is_doc_mime(file_type):
+            for k in ("number_of_pages", "page_size"):
+                if k in md:
+                    item[k] = md[k]
+
+        if "duration" in md:
+            item["duration"] = md["duration"]
+        if "dimensions" in md and not file_type.startswith("image/"):
+            item["dimensions"] = md["dimensions"]
+
+    def _apply_optional_metadata(
+        self, item: Dict[str, Any], md: Dict[str, Any]
+    ) -> None:
+        for k in (
+            "number_of_slides",
+            "number_of_paragraphs",
+            "number_of_sheets",
+            "number_of_paragraphs_odt",
+        ):
+            if k in md:
+                item[k] = md[k]
 
     # -------- main hook --------
     def _process_presigned_urls(self, response_data: Dict[str, Any]) -> None:
@@ -1910,22 +1915,39 @@ class PresignedUrlMixin:
         if not isinstance(update_refs, dict):
             return
 
-        product_downloads = update_refs.get("product_downloads")
-        if isinstance(product_downloads, str):
-            try:
-                product_downloads = json.loads(product_downloads)
-                update_refs["product_downloads"] = product_downloads
-            except json.JSONDecodeError:
-                return
+        product_downloads = self._parse_product_downloads(
+            update_refs.get("product_downloads")
+        )
         if not isinstance(product_downloads, dict):
             return
+        update_refs["product_downloads"] = product_downloads
 
         all_slots = list(self._ALL_SLOTS)
         urls_all = self._collect_s3_urls(product_downloads, slots=all_slots)
         if not urls_all:
             return
 
-        # presign (download + inline)
+        presigned, inline_presigned = self._generate_presigned_pairs(urls_all)
+        metadata_dict = self._build_metadata_dict(presigned, urls_all)
+
+        for slot in all_slots:
+            val = product_downloads.get(slot)
+            if val is not None:
+                product_downloads[slot] = self._apply_metadata_and_presigned(
+                    val, presigned, inline_presigned, metadata_dict
+                )
+
+    def _parse_product_downloads(self, product_downloads: Any) -> Any:
+        if isinstance(product_downloads, str):
+            try:
+                return json.loads(product_downloads)
+            except json.JSONDecodeError:
+                return None
+        return product_downloads
+
+    def _generate_presigned_pairs(
+        self, urls_all: List[str]
+    ) -> tuple[Dict[str, str], Dict[str, str]]:
         ttl = getattr(settings, "PRESIGNED_URL_TTL", 3600)
         presigned = generate_presigned_urls(
             urls_all, expiration=ttl, force_download=True
@@ -1933,20 +1955,25 @@ class PresignedUrlMixin:
         inline_presigned = generate_presigned_urls(
             urls_all, expiration=ttl, force_download=False
         )
+        return presigned, inline_presigned
 
-        # metadata: detail path → enrich for all referenced URLs
+    def _build_metadata_dict(
+        self, presigned: Dict[str, str], urls_all: List[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        if not getattr(settings, "FILE_METADATA_ENABLED", True):
+            return {}
+
+        presigned_urls = [presigned[u] for u in urls_all if u in presigned]
+        metas = get_file_metadata(presigned_urls, deep_for_doc_types=True)
         metadata_dict: Dict[str, Dict[str, Any]] = {}
-        if getattr(settings, "FILE_METADATA_ENABLED", True):
-            presigned_urls = [presigned[u] for u in urls_all if u in presigned]
-            metas = get_file_metadata(presigned_urls, deep_for_doc_types=True)
-            for m in metas:
-                if not isinstance(m, dict):
-                    continue
-                u = m.get("URL")
-                if not u:
-                    continue
-                md = {}
-                for k in (
+        for m in metas:
+            if not isinstance(m, dict) or not m.get("URL"):
+                continue
+            metadata_dict[m["URL"]] = {
+                k: m[k]
+                for k in m
+                if k
+                in (
                     "file_size",
                     "file_type",
                     "number_of_pages",
@@ -1957,22 +1984,13 @@ class PresignedUrlMixin:
                     "number_of_paragraphs",
                     "number_of_sheets",
                     "number_of_paragraphs_odt",
-                ):
-                    if k in m:
-                        md[k] = m[k]
-                metadata_dict[u] = md
-
-        # apply per slot
-        for slot in all_slots:
-            val = product_downloads.get(slot)
-            if val is not None:
-                product_downloads[slot] = self._apply_metadata_and_presigned(
-                    val, presigned, inline_presigned, metadata_dict
                 )
+            }
+        return metadata_dict
 
 
 # --------------------------------------------------------------------------- #
-# Product detail (preview) — versioned server cache + browser no-store        #
+# Product detail view
 # --------------------------------------------------------------------------- #
 class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
     authentication_classes = [CustomTokenAuthentication, SessionAuthentication]
@@ -1988,7 +2006,24 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
                 status.HTTP_404_NOT_FOUND,
             )
 
-        # version from product.updated_at and update_ref.updated_at if present
+        ver_ts = self._get_version_timestamp(product)
+        cache_key, bypass = self._get_cache_key_and_bypass(request, code, ver_ts)
+
+        if not bypass:
+            cached = cache.get(cache_key)
+            if cached:
+                return self._cached_response(cached, code, ver_ts)
+
+        data = ProductSerializer(product, context={"request": request}).data
+        self._process_presigned_urls(data)
+
+        ttl = getattr(settings, "CACHE_TTL_DETAIL", 60)
+        if ttl and ttl > 0 and not bypass:
+            cache.set(cache_key, data, ttl)
+
+        return self._fresh_response(data, code, ver_ts)
+
+    def _get_version_timestamp(self, product: Product) -> int:
         ver_sources = []
         if getattr(product, "updated_at", None):
             ver_sources.append(product.updated_at)
@@ -1996,38 +2031,32 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
             product.update_ref, "updated_at", None
         ):
             ver_sources.append(product.update_ref.updated_at)
-        ver_ts = int(max(ver_sources).timestamp()) if ver_sources else 0
+        return int(max(ver_sources).timestamp()) if ver_sources else 0
 
+    def _get_cache_key_and_bypass(
+        self, request, code: str, ver_ts: int
+    ) -> tuple[str, bool]:
         cache_key = f"product_detail:v{ver_ts}:{code}"
         bypass = (request.GET.get("fresh") == "1") or getattr(
             request.user, "is_staff", False
         )
+        return cache_key, bypass
 
-        if not bypass:
-            cached = cache.get(cache_key)
-            if cached:
-                resp = JsonResponse(cached, status=status.HTTP_200_OK)
-                resp["Cache-Control"] = "no-store"
-                resp["ETag"] = f'W/"{code}-{ver_ts}"'
-                if ver_ts:
-                    resp["Last-Modified"] = http_date(ver_ts)
-                return resp
+    def _cached_response(self, cached: dict, code: str, ver_ts: int) -> JsonResponse:
+        resp = JsonResponse(cached, status=status.HTTP_200_OK)
+        self._set_headers(resp, code, ver_ts)
+        return resp
 
-        data = ProductSerializer(product, context={"request": request}).data
-
-        # single presign/metadata pass for **detail only**
-        self._process_presigned_urls(data)
-
-        ttl = getattr(settings, "CACHE_TTL_DETAIL", 60)
-        if ttl and ttl > 0 and not bypass:
-            cache.set(cache_key, data, ttl)
-
+    def _fresh_response(self, data: dict, code: str, ver_ts: int) -> JsonResponse:
         resp = JsonResponse(data, status=status.HTTP_200_OK)
+        self._set_headers(resp, code, ver_ts)
+        return resp
+
+    def _set_headers(self, resp: JsonResponse, code: str, ver_ts: int) -> None:
         resp["Cache-Control"] = "no-store"
         resp["ETag"] = f'W/"{code}-{ver_ts}"'
         if ver_ts:
             resp["Last-Modified"] = http_date(ver_ts)
-        return resp
 
 
 class ProductDetailDelete(ErrorHandlingMixin, View):

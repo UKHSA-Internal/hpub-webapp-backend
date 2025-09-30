@@ -360,41 +360,44 @@ def _deep_doc_meta(temp_path: Path, ext_with_dot: str) -> Dict[str, Union[str, i
     meta: Dict[str, Union[str, int]] = {"number_of_pages": 0, "page_size": "Unknown"}
 
     try:
-        if ext == ".pdf":
-            return _pdf_meta(temp_path)
-
-        if ext == ".pptx":
-            return _pptx_meta(temp_path)
-
-        if ext == ".docx":
-            return _docx_meta(temp_path)
+        if ext in {".pdf", ".pptx", ".docx"}:
+            return {"pdf": _pdf_meta, ".pptx": _pptx_meta, ".docx": _docx_meta}[ext](
+                temp_path
+            )
 
         if ext == ".odt":
             meta.update(_odt_meta(temp_path))
         elif ext in (".ppt", ".doc"):
             meta.update(_legacy_ppt_doc_meta(temp_path))
 
-        # Fallback via LibreOffice if we still lack info and strict/LO is enabled
-        need_fallback = (meta.get("number_of_pages", 0) == 0) or (
-            meta.get("page_size") == "Unknown"
-        )
-        if need_fallback and (STRICT_DOC_PAGE_META or DOC_PAGECOUNT_VIA_LIBREOFFICE):
-            pdf = _libreoffice_pdf(temp_path)
-            if pdf:
-                try:
-                    meta.update(_pdf_meta(pdf))
-                finally:
-                    try:
-                        pdf.unlink()
-                    except Exception:
-                        pass
+        if _needs_fallback(meta) and (
+            STRICT_DOC_PAGE_META or DOC_PAGECOUNT_VIA_LIBREOFFICE
+        ):
+            _apply_libreoffice_fallback(temp_path, meta)
 
     except Exception as e:
         logger.debug("Deep doc meta failed for %s: %s", temp_path, e)
 
-    meta.setdefault("number_of_pages", 0)
-    meta.setdefault("page_size", "Unknown")
-    return meta
+    return {**{"number_of_pages": 0, "page_size": "Unknown"}, **meta}
+
+
+def _needs_fallback(meta: Dict[str, Union[str, int]]) -> bool:
+    return (meta.get("number_of_pages", 0) == 0) or (meta.get("page_size") == "Unknown")
+
+
+def _apply_libreoffice_fallback(
+    temp_path: Path, meta: Dict[str, Union[str, int]]
+) -> None:
+    pdf = _libreoffice_pdf(temp_path)
+    if not pdf:
+        return
+    try:
+        meta.update(_pdf_meta(pdf))
+    finally:
+        try:
+            pdf.unlink()
+        except Exception:
+            pass
 
 
 # -------------------- image (incremental) --------------------
@@ -485,99 +488,95 @@ def get_file_metadata(
     deep_for_doc_types: bool = True,
 ) -> List[Dict[str, Union[str, int, float, tuple]]]:
     """
-    Return list of dicts per URL:
-      {
-        URL, file_size, file_type,
-        [number_of_pages], [page_size],
-        [duration], [dimensions]
-      }
-
-    - Size/type via S3 HeadObject (fast)
-    - Docs: page count + page size (LibreOffice fallback when needed; DOCX page count enabled)
-    - Images: dimensions via incremental range reads (no full download)
-    - Audio/Video: duration + (video) dimensions via ffprobe
-    - ETag-keyed cache to avoid repeated work
+    Return list of dicts per URL.
     """
     out: List[Dict[str, Union[str, int, float, tuple]]] = []
-
-    ttl = FILE_METADATA_CACHE_TTL
-    size_cap = _size_limit_bytes()
-    t_budget_ms = FILE_METADATA_TIME_BUDGET_MS
     started = time.monotonic()
 
     for url in urls:
         if not url:
             continue
 
-        base: Dict[str, Union[str, int, tuple]] = {
-            "URL": url,
-            "file_size": "0 Bytes",
-            "file_type": DEFAULT_MIME,
-        }
-
         head = _s3_head(url)
         if head:
-            base["file_size"] = _hr(head["size"])
-            base["file_type"] = head["content_type"]
-            ext = (_ext_from_key(head["key"]) or "").lower()
-            cache_key = f'filemeta:{head["bucket"]}:{head["key"]}:{head["etag"]}'
-            cached = cache.get(cache_key)
-            if cached is not None:
-                out.append({**base, **cached})
-                continue
-
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-
-            is_audio = base["file_type"].startswith("audio/") or ext in AUDIO_EXTS
-            is_video = base["file_type"].startswith("video/") or ext in VIDEO_EXTS
-            is_image = base["file_type"].startswith("image/") or ext in IMAGE_EXTS
-            is_doc = ext in DOC_DEEP_PROBE_EXTS
-
-            details: Dict[str, Union[str, int, tuple]] = {}
-
-            # Images → dimensions (cheap, incremental)
-            if is_image:
-                dims = _image_dimensions_from_s3(head["bucket"], head["key"])
-                if dims:
-                    details["dimensions"] = dims
-
-            # AV → ffprobe (respect size cap)
-            if (is_audio or is_video) and (
-                (size_cap is None) or (head["size"] <= size_cap)
-            ):
-                details.update(_ffprobe_info(url))
-
-            # Docs → strict page meta (ignore time budget if STRICT_DOC_PAGE_META)
-            if (
-                deep_for_doc_types
-                and is_doc
-                and (
-                    STRICT_DOC_PAGE_META or not t_budget_ms or elapsed_ms <= t_budget_ms
-                )
-            ):
-                tmp = _download_s3_to_temp(head["bucket"], head["key"])
-                try:
-                    if tmp:
-                        details.update(_deep_doc_meta(tmp, "." + ext))
-                finally:
-                    try:
-                        if tmp:
-                            tmp.unlink()
-                    except Exception:
-                        pass
-            elif t_budget_ms and elapsed_ms > t_budget_ms:
-                cache.set(cache_key, details, timeout=ttl)
-                out.append({**base, **details})
-                continue
-
-            cache.set(cache_key, details, timeout=ttl)
-            out.append({**base, **details})
+            out.append(_process_s3_url(url, head, started, deep_for_doc_types))
             continue
 
-        # Non-S3 URL fallback
-        base["file_type"] = _guess_type(url)
-        if base["file_type"].startswith(("audio/", "video/")):
-            base.update(_ffprobe_info(url))
-        out.append(base)
+        # Non-S3 fallback
+        out.append(_process_non_s3_url(url))
 
     return out
+
+
+# -------- helpers --------
+def _process_s3_url(
+    url: str, head: dict, started: float, deep_for_doc_types: bool
+) -> Dict[str, Union[str, int, float, tuple]]:
+    base = {
+        "URL": url,
+        "file_size": _hr(head["size"]),
+        "file_type": head["content_type"],
+    }
+    ext = (_ext_from_key(head["key"]) or "").lower()
+    cache_key = f'filemeta:{head["bucket"]}:{head["key"]}:{head["etag"]}'
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return {**base, **cached}
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    details = _extract_details(url, head, ext, elapsed_ms, deep_for_doc_types)
+    cache.set(cache_key, details, timeout=FILE_METADATA_CACHE_TTL)
+    return {**base, **details}
+
+
+def _extract_details(
+    url: str, head: dict, ext: str, elapsed_ms: int, deep_for_doc_types: bool
+) -> Dict[str, Union[str, int, tuple]]:
+    details: Dict[str, Union[str, int, tuple]] = {}
+    file_type = head["content_type"]
+
+    if file_type.startswith("image/") or ext in IMAGE_EXTS:
+        dims = _image_dimensions_from_s3(head["bucket"], head["key"])
+        if dims:
+            details["dimensions"] = dims
+
+    if (file_type.startswith("audio/") or ext in AUDIO_EXTS) or (
+        file_type.startswith("video/") or ext in VIDEO_EXTS
+    ):
+        if not _size_limit_bytes() or head["size"] <= _size_limit_bytes():
+            details.update(_ffprobe_info(url))
+
+    if _should_probe_doc(ext, deep_for_doc_types, elapsed_ms):
+        _apply_doc_meta(details, head, ext)
+
+    return details
+
+
+def _should_probe_doc(ext: str, deep: bool, elapsed_ms: int) -> bool:
+    if not (deep and ext in DOC_DEEP_PROBE_EXTS):
+        return False
+    if STRICT_DOC_PAGE_META:
+        return True
+    return (
+        not FILE_METADATA_TIME_BUDGET_MS or elapsed_ms <= FILE_METADATA_TIME_BUDGET_MS
+    )
+
+
+def _apply_doc_meta(details: dict, head: dict, ext: str) -> None:
+    tmp = _download_s3_to_temp(head["bucket"], head["key"])
+    if not tmp:
+        return
+    try:
+        details.update(_deep_doc_meta(tmp, "." + ext))
+    finally:
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+
+
+def _process_non_s3_url(url: str) -> Dict[str, Union[str, int, float, tuple]]:
+    base = {"URL": url, "file_size": "0 Bytes", "file_type": _guess_type(url)}
+    if base["file_type"].startswith(("audio/", "video/")):
+        base.update(_ffprobe_info(url))
+    return base

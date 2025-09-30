@@ -3589,17 +3589,21 @@ class ProductUsersListView(ProductListMixin, APIView):
 
 
 class BaseProductSearchView(APIView, ProductListMixin):
+    """Shared helpers for product search views (user/admin/etc.)."""
+
     pagination_class = CustomPagination
 
     @staticmethod
     def _normalize_term(term: str) -> str:
-        """Uppercase and strip '-', '_', and whitespace."""
-        t = term or ""
-        t = re.sub(r"[-_\s]+", "", t).upper()
-        return t
+        """Normalize search term by uppercasing and removing '-', '_' and spaces."""
+        return re.sub(r"[-_\s]+", "", (term or "")).upper()
 
     @staticmethod
     def _annotate_rank_signals(qs, q: str, q_norm: str, looks_like_code: int):
+        """
+        Annotate queryset with ranking signals and compute a composite 'rank'.
+        This boosts results that exactly or partially match code/title/norm_code.
+        """
         return qs.annotate(
             exact_code=Case(
                 When(product_code__iexact=q, then=Value(1)),
@@ -3664,12 +3668,12 @@ class BaseProductSearchView(APIView, ProductListMixin):
 
 
 # --------------------------------------------------------------------------- #
-# Users: Search (fast path)                                                   #
+# Users: Public search endpoint                                               #
 # --------------------------------------------------------------------------- #
-class ProductSearchUserView(APIView, ProductListMixin):
+class ProductSearchUserView(BaseProductSearchView):
     """
     GET /api/v1/products/users/search/?q=...&page=1
-    Public search, optimized. Still presigns what UI needs.
+    Public search, optimized for UI needs.
     """
 
     authentication_classes = [SessionAuthentication]
@@ -3681,126 +3685,48 @@ class ProductSearchUserView(APIView, ProductListMixin):
     # tuneable cap for the pre-ranked set (before dedupe/rank)
     PRE_RANK_LIMIT = int(getattr(settings, "SEARCH_PRE_RANK_LIMIT", 2000))
 
-    @staticmethod
-    def _normalize_term(term: str) -> str:
-        # match your norm_code normalization
-        return re.sub(r"[-_\s]+", "", (term or "")).upper()
-
-    @staticmethod
-    def _annotate_rank_signals(qs, q: str, q_norm: str, looks_like_code: int):
-        return qs.annotate(
-            exact_code=Case(
-                When(product_code__iexact=q, then=Value(1)),
-                default=Value(0),
-                output_field=IntegerField(),
-            ),
-            starts_code=Case(
-                When(product_code__istartswith=q, then=Value(1)),
-                default=Value(0),
-                output_field=IntegerField(),
-            ),
-            contains_code=Case(
-                When(product_code__icontains=q, then=Value(1)),
-                default=Value(0),
-                output_field=IntegerField(),
-            ),
-            exact_norm=Case(
-                When(norm_code__exact=q_norm, then=Value(1)),
-                default=Value(0),
-                output_field=IntegerField(),
-            ),
-            starts_norm=Case(
-                When(norm_code__startswith=q_norm, then=Value(1)),
-                default=Value(0),
-                output_field=IntegerField(),
-            ),
-            contains_norm=Case(
-                When(norm_code__contains=q_norm, then=Value(1)),
-                default=Value(0),
-                output_field=IntegerField(),
-            ),
-            exact_title=Case(
-                When(product_title__iexact=q, then=Value(1)),
-                default=Value(0),
-                output_field=IntegerField(),
-            ),
-            starts_title=Case(
-                When(product_title__istartswith=q, then=Value(1)),
-                default=Value(0),
-                output_field=IntegerField(),
-            ),
-            contains_title=Case(
-                When(product_title__icontains=q, then=Value(1)),
-                default=Value(0),
-                output_field=IntegerField(),
-            ),
-            code_bias=Value(looks_like_code, output_field=IntegerField()),
-        ).annotate(
-            rank=(
-                120 * F("exact_norm")
-                + 95 * F("starts_norm")
-                + 75 * F("contains_norm")
-                + 100 * F("exact_code")
-                + 80 * F("starts_code")
-                + 60 * F("contains_code")
-                + 70 * F("exact_title")
-                + 50 * F("starts_title")
-                + 30 * F("contains_title")
-                + 10 * F("code_bias")
-            )
-        )
-
     def get(self, request, *args, **kwargs) -> Response:
         try:
             q = (request.GET.get("q") or "").strip()
             base = Product.objects.filter(is_latest=True, status="live")
 
-            # No query → use dedupe + default sort, presign minimal
+            # Case 1: Empty query → dedupe + default sort
             if not q:
                 deduped = self._dedupe_by_norm_code_fast(base)
                 deduped = self.get_sorted_queryset(
                     deduped.select_related("update_ref"), request
                 )
-
                 data, paginator = self.paginate_and_serialize(
                     deduped,
                     request,
                     serializer_class=ProductSearchSerializer,
-                    is_search=True,  # presign on
+                    is_search=True,
                 )
                 data = filter_live_languages(data)
                 return paginator.get_paginated_response(data)
 
-            # With query
+            # Case 2: Search with query
             q_norm = self._normalize_term(q)
             looks_like_code = 1 if re.fullmatch(r"[A-Za-z0-9_-]+", q) else 0
 
-            # Restrict FIRST using indexed cols, then cap
             restricted = base.filter(
                 Q(product_code__icontains=q) | Q(product_title__icontains=q)
             )
-
-            # also allow norm_code contains (add annotation once here)
             restricted = self._annotate_norm_code(restricted).filter(
                 Q(norm_code__icontains=q_norm)
                 | Q(product_code__icontains=q)
                 | Q(product_title__icontains=q)
             )
 
-            # cap size before heavier steps
             updated_field = self._best_updated_field(restricted) or "id"
             restricted = restricted.order_by(
                 F(updated_field).desc(nulls_last=True), "-id"
             )[: self.PRE_RANK_LIMIT]
 
-            # Dedupe by normalized code
             deduped = self._dedupe_by_norm_code_fast(restricted)
-
-            # Re-annotate for ranking (needs norm_code on this qs)
             ranked = self._annotate_norm_code(deduped)
             ranked = self._annotate_rank_signals(ranked, q, q_norm, looks_like_code)
 
-            # Sort primarily by rank; allow optional explicit sort as a tiebreaker
             sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
             if sort_by:
                 ranked = ranked.order_by("-rank", sort_by, "-id")
@@ -3808,14 +3734,13 @@ class ProductSearchUserView(APIView, ProductListMixin):
                 updated_desc = self._resolve_sort_field(ranked, "-updated_at") or "-id"
                 ranked = ranked.order_by("-rank", "product_title", updated_desc, "-id")
 
-            # Pull update_ref for image/download presigning; avoid .only() to prevent field deferral issues
             ranked = ranked.select_related("update_ref")
 
             data, paginator = self.paginate_and_serialize(
                 ranked,
                 request,
                 serializer_class=ProductSearchSerializer,
-                is_search=True,  # presign on
+                is_search=True,
             )
             data = filter_live_languages(data)
             return paginator.get_paginated_response(data)
@@ -3829,7 +3754,14 @@ class ProductSearchUserView(APIView, ProductListMixin):
             )
 
 
+# --------------------------------------------------------------------------- #
+# Admin: Search endpoint                                                      #
+# --------------------------------------------------------------------------- #
 class ProductSearchAdminView(BaseProductSearchView):
+    """
+    Admin-only search view.
+    """
+
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
 

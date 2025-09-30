@@ -94,7 +94,7 @@ $ ./database_access.sh
 3. Install Dependencies
    - `python3 -m venv venv`
    - `source venv/bin/activate`
-   - `pip install -r requirements.txt`
+   - `pip install -r requirements.txt` inside `/health_pubs`
 4. Activate Your AWS Configuration
    - In your terminal Run `aws configure`
    - Add your secrets-key, access-key and default region = `eu-west-2`

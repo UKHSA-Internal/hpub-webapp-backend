@@ -91,8 +91,6 @@ $ ./database_access.sh
 
    - Create an .env.dev file in the directory `/hpub-webapp-backend/health_pubs/configs/`
 
-   - Ensure you have .env.dev file in the `/backend-alpha/configs/` directory.
-
 3. Install Dependencies
    - `python -m venv venv`
    - `source venv/bin/activate`

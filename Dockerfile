@@ -33,6 +33,10 @@ RUN apt-get update \
 # Create app directory
 WORKDIR /app
 
+
+# --- FIX: Ensure safe tmp directory exists ---
+RUN mkdir -p /app/tmp && chown -R appuser:appuser /app/tmp
+
 # Copy and install Python dependencies
 COPY health_pubs/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt --verbose

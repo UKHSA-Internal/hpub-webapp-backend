@@ -9,6 +9,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 from configs.get_secret_config import Config
 from corsheaders.defaults import default_headers
 
+
 config = Config()
 DB_NAME = config.get_db_name()
 DB_HOST = config.get_db_host()
@@ -219,6 +220,8 @@ DATABASES = {
     }
 }
 
+AWS_EXPECTED_BUCKET_OWNER = config.get_aws_expected_bucket_owner()
+
 # ================= Cache =================
 CACHES = {
     "default": {
@@ -283,9 +286,11 @@ MEDIA_ROOT = "/app/media/"
 
 # ================= Wagtail =================
 WAGTAIL_SITE_NAME = "HPub Backend Service"
-WAGTAILADMIN_BASE_URL = (
-    HPUB_FRONT_END_URL if DEBUG else HPUB_FRONT_END_URL.replace("http://", "https://")
-)
+# Always ensure HTTPS outside of DEBUG
+if not DEBUG and HPUB_FRONT_END_URL.startswith("http://"):
+    HPUB_FRONT_END_URL = HPUB_FRONT_END_URL.replace("http://", "https://")
+
+WAGTAILADMIN_BASE_URL = HPUB_FRONT_END_URL
 
 # ================= Logging =================
 LOGGING = {

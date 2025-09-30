@@ -11,7 +11,6 @@ from django.utils import timezone
 import time
 from django.db import IntegrityError
 from psycopg2 import errors as pg_errors
-from collections import defaultdict
 from datetime import timedelta
 
 from django.db.models import (
@@ -39,7 +38,6 @@ from core.diseases.models import Disease
 from core.diseases.serializers import DiseaseSerializer
 from core.errors.enums import ErrorCode, ErrorMessage
 from core.errors.error_function import handle_error
-from core.establishments.models import Establishment
 from core.languages.models import LanguagePage
 from core.order_limits.models import OrderLimitPage
 from core.organizations.models import Organization
@@ -2496,43 +2494,75 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
             file_urls,
         )
 
+        # ----------------- ATOMIC: ProductUpdate + Product ------------------ #
         with transaction.atomic():
-            # Update or create order limits
-            if data.get("order_limits"):
-                self.update_order_limits(product, data.get("order_limits"))
+            logger.info(
+                "Starting atomic transaction for product_code=%s", decoded_product_code
+            )
 
-            # Pre-create or update ProductUpdate so signals see required fields
+            # Ensure/update ProductUpdate
             product_update = self.get_or_create_product_update(
                 product, product_update_data
             )
-            # Apply any foreign-key guidance sets immediately on the update_ref
-            self.update_foreign_keys(product_update, data)
+            logger.info(
+                "ProductUpdate ensured for product_code=%s (id=%s)",
+                decoded_product_code,
+                product_update.id,
+            )
 
-            # Now patch the Product itself
+            # Update foreign keys
+            self.update_foreign_keys(product_update, data)
+            logger.debug(
+                "Updated foreign keys on ProductUpdate id=%s", product_update.id
+            )
+
+            # Patch Product itself
             serializer = ProductSerializer(
                 product, data=data, partial=True, context={"request": request}
             )
-            if serializer.is_valid():
-                serializer.save()
-
-                # Prepare response
-                response_data = serializer.data
-                response_data["update_ref"] = ProductUpdateSerializer(
-                    product_update, context={"request": request}
-                ).data
-
-                logger.info(
-                    "Product updated successfully for product_code: %s",
+            if not serializer.is_valid():
+                logger.error(
+                    "Validation errors for product_code=%s: %s",
                     decoded_product_code,
+                    serializer.errors,
                 )
-                invalidate_product_caches(product.product_code)
-                return JsonResponse(response_data, status=status.HTTP_200_OK)
-
-            else:
-                logger.error("Serializer errors: %s", serializer.errors)
                 return handle_error(
                     ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
                 )
+            serializer.save()
+            logger.info(
+                "Product patched successfully for product_code=%s", decoded_product_code
+            )
+
+        # --------------- OUTSIDE ATOMIC: Order limits ------------------------ #
+        if data.get("order_limits"):
+            logger.info(
+                "Processing order_limits for product_code=%s", decoded_product_code
+            )
+            try:
+                self.update_order_limits(product, data["order_limits"])
+                logger.info(
+                    "Order limits updated for product_code=%s", decoded_product_code
+                )
+            except Exception as e:
+                logger.exception(
+                    "Order limits update failed for product_code=%s: %s",
+                    decoded_product_code,
+                    e,
+                )
+
+        # Build response
+        response_data = ProductSerializer(product, context={"request": request}).data
+        response_data["update_ref"] = ProductUpdateSerializer(
+            product.update_ref, context={"request": request}
+        ).data
+
+        logger.info(
+            "PATCH request completed successfully for product_code=%s",
+            decoded_product_code,
+        )
+        invalidate_product_caches(product.product_code)
+        return JsonResponse(response_data, status=status.HTTP_200_OK)
 
     def process_file_urls(
         self, product_type: str, data: dict, product_downloads: dict, product_tag: str
@@ -2865,20 +2895,8 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         raise RuntimeError("Could not create or find ProductUpdate after retries")
 
     def update_order_limits(self, product: Product, order_limits: list):
-        """
-        Upserts OrderLimitPage records instead of wholesale delete & recreate.
-        Keeps existing pages when unchanged, updates when modified, creates when new,
-        and deletes only those no longer needed.
+        parent_page = Page.objects.get(slug="products")
 
-        Result: far fewer Wagtail unpublish/delete/publish cycles → much faster.
-        """
-        try:
-            parent_page = Page.objects.get(slug="products")
-        except Page.DoesNotExist:
-            logger.error("Parent page with slug 'products' not found.")
-            return
-
-        # --- Existing pages grouped by org name ----------------------------------
         existing_pages = (
             OrderLimitPage.objects.child_of(parent_page)
             .filter(product_ref=product)
@@ -2886,7 +2904,6 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         )
         by_org = {p.organization_ref.name: p for p in existing_pages}
 
-        # --- Prefetch org + establishment data -----------------------------------
         org_names = [
             lim["organization_name"]
             for lim in order_limits
@@ -2895,60 +2912,38 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         org_qs = Organization.objects.filter(name__in=org_names)
         org_cache = {org.name: org for org in org_qs}
 
-        est_qs = Establishment.objects.filter(organization_ref__in=org_qs).values(
-            "organization_ref_id", "full_external_key"
-        )
-        full_keys_map = defaultdict(list)
-        for est in est_qs:
-            full_keys_map[est["organization_ref_id"]].append(est["full_external_key"])
-
-        # --- Upsert loop ----------------------------------------------------------
         seen_orgs = set()
-
         for lim in order_limits:
             org_name = lim.get("organization_name")
             if not org_name:
                 continue
+            seen_orgs.add(org_name)
 
             org = org_cache.get(org_name)
             if not org:
-                logger.warning("Organization '%s' not found. Skipping.", org_name)
                 continue
 
             limit_val = lim.get("order_limit_value", 0)
-            full_keys = full_keys_map.get(org.organization_id, [])
-            seen_orgs.add(org_name)
 
-            # ------------------------------------------------------------------
-            # Case A: existing page → update if changed
-            # ------------------------------------------------------------------
             if org_name in by_org:
+                # ⚡ In-place update — no delete/recreate
                 page = by_org[org_name]
-                if (
-                    page.order_limit != limit_val
-                    or page.full_external_keys != full_keys
-                ):
+                if page.order_limit != limit_val:
                     page.order_limit = limit_val
-                    page.full_external_keys = full_keys
-                    page.save_revision().publish()
-                continue
+                    page.save(update_fields=["order_limit"])
+            else:
+                # Only create when missing
+                new_page = OrderLimitPage(
+                    title=f"Order Limit for {org_name}",
+                    slug=slugify(f"{org_name}-order-limit-{uuid.uuid4()}"),
+                    order_limit=limit_val,
+                    product_ref=product,
+                    organization_ref=org,
+                )
+                parent_page.add_child(instance=new_page)
+                new_page.save()
 
-            # ------------------------------------------------------------------
-            # Case B: new page → create
-            # ------------------------------------------------------------------
-            logger.debug("full_external_keys for %s: %s", org_name, full_keys)
-            new_page = OrderLimitPage(
-                title=f"Order Limit for {org_name}",
-                slug=slugify(f"{org_name}-order-limit-{uuid.uuid4()}"),
-                order_limit=limit_val,
-                product_ref=product,
-                organization_ref=org,
-                full_external_keys=full_keys,
-            )
-            parent_page.add_child(instance=new_page)
-            new_page.save_revision().publish()
-
-        # --- Delete pages for orgs no longer supplied ----------------------------
+        # Delete pages no longer present
         for org_name, page in by_org.items():
             if org_name not in seen_orgs:
                 page.delete()

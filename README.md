@@ -92,7 +92,7 @@ $ ./database_access.sh
    - Create an .env.dev file in the directory `/hpub-webapp-backend/health_pubs/configs/`
 
 3. Install Dependencies
-   - `python -m venv venv`
+   - `python3 -m venv venv`
    - `source venv/bin/activate`
    - `pip install -r requirements.txt`
 4. Activate Your AWS Configuration

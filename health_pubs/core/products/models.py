@@ -295,28 +295,126 @@ class Product(Page):
     def __str__(self):
         return self.product_title
 
+    # ======== Series parsing (DoS-safe, no catastrophic backtracking) ========
+
     @staticmethod
     def _normalize_code(code: str) -> str:
         if not isinstance(code, str):
             return ""
+        # remove spaces/dashes, upper-case
         return re.sub(r"[\s-]+", "", code.upper())
 
     @staticmethod
-    def _is_standard_series_code(code: str) -> bool:
-        norm = Product._normalize_code(code)
-        return bool(re.match(r"^\d{4,}[A-Z]{2}\d{3}$", norm))
+    def _sanitize_lang_hint(lang: str | None) -> str:
+        if not lang:
+            return ""
+        # letters only, up to 4
+        return re.sub(r"[^A-Z]", "", str(lang).upper())[:4]
 
     @staticmethod
-    def _standard_root(code: str) -> str:
+    def _split_lang_version(
+        norm: str, lang_hint: str | None = None, max_total_len: int = 512
+    ):
+        """
+        Return (prefix, lang, version) where code = prefix + lang + version(3 digits).
+
+        Strategy:
+        - Require last 3 chars to be digits (version).
+        - If a language hint is provided (recommended), require code to end with that exact
+          letters-only LANG (2..4) + version.
+        - Otherwise, fall back to 'exactly 2 trailing letters' as LANG to avoid consuming
+          product-key letters into LANG by accident.
+        """
+        if not norm or len(norm) > max_total_len or len(norm) < 5:
+            return None
+
+        ver = norm[-3:]
+        if not ver.isdigit():
+            return None
+
+        hint = Product._sanitize_lang_hint(lang_hint)
+        if 2 <= len(hint) <= 4 and norm.endswith(hint + ver):
+            return (norm[: -(len(hint) + 3)], hint, ver)
+
+        # Fallback: treat LANG as exactly 2 trailing letters before version
+        if len(norm) >= 5 and norm[-4:-2].isalpha():
+            lang = norm[-4:-2]
+            return (norm[:-5], lang, ver)
+
+        return None
+
+    @staticmethod
+    def _series_root_from_prefix(prefix: str, min_digit_run: int = 1) -> str:
+        """
+        From the prefix (before LANG), take the RIGHTMOST block:
+           digits_run + letters_run
+        where letters_run are contiguous A–Z right before LANG, and digits_run is the
+        contiguous digits immediately before those letters (or end if no letters).
+        Return digits_run + letters_run.
+
+        Example extractions:
+          '240377D'   -> '240377D'
+          '240377FB'  -> '240377FB'
+          '2023'      -> '2023'
+          '12AB34E'   -> '34E'
+        """
+        if not prefix:
+            return ""
+        i = len(prefix) - 1
+
+        # 1) Gather letters immediately before LANG (if any)
+        while i >= 0 and "A" <= prefix[i] <= "Z":
+            i -= 1
+        letters = prefix[i + 1 :]  # may be ""
+
+        # 2) Gather the digit run immediately before those letters (or end)
+        j = i
+        while j >= 0 and prefix[j].isdigit():
+            j -= 1
+        digits = prefix[j + 1 : i + 1]
+
+        if len(digits) < min_digit_run:
+            return ""
+        return digits + letters
+
+    @staticmethod
+    def _is_standard_series_code(code: str) -> bool:
+        """
+        Standard if we can split into <prefix><LANG><3 digits> and extract a root
+        (digits + immediate letters) from the prefix.
+        """
         norm = Product._normalize_code(code)
-        m = re.match(r"^(\d+)[A-Z]{2}\d{3}$", norm)
-        return m.group(1) if m else ""
+        parts = Product._split_lang_version(norm, None)
+        if not parts:
+            return False
+        prefix, _lang, _ver = parts
+        return Product._series_root_from_prefix(prefix) != ""
+
+    @staticmethod
+    def _standard_root(code: str, lang_hint: str | None = None) -> str:
+        """
+        The 'series root' = digits just before LANG + any letters immediately before LANG.
+        If lang_hint is provided (recommended), we split using that exact LANG.
+        """
+        norm = Product._normalize_code(code)
+        parts = Product._split_lang_version(norm, lang_hint)
+        if not parts:
+            return ""
+        prefix, _lang, _ver = parts
+        return Product._series_root_from_prefix(prefix)
+
+    @staticmethod
+    def _series_info(code: str, lang_hint: str | None = None) -> tuple[str, str]:
+        root = Product._standard_root(code, lang_hint)
+        if root:
+            return "standard", root
+        return "irregular", Product._irregular_root(code)
 
     @staticmethod
     def _irregular_root(code: str) -> str:
+        # Keep as-is; these are anchored/simple and not prone to catastrophic backtracking.
         norm = Product._normalize_code(code)
         m = re.match(r"^([A-Z]{2,}\d+)[A-Z]{2,3}$", norm)
-
         if m:
             return m.group(1)
         m = re.match(r"^([A-Z]{2,})\d+$", norm)
@@ -324,12 +422,6 @@ class Product(Page):
             return m.group(1)
         m = re.match(r"^([A-Z]{2,})", norm)
         return m.group(1) if m else ""
-
-    @staticmethod
-    def _series_info(code: str) -> tuple[str, str]:
-        if Product._is_standard_series_code(code):
-            return "standard", Product._standard_root(code)
-        return "irregular", Product._irregular_root(code)
 
     @staticmethod
     def _get_common_prefix(a: str, b: str, min_length: int = 3) -> str:
@@ -344,7 +436,9 @@ class Product(Page):
         code = data.get("product_code")
         if not code:
             return None
-        _, c_root = self._series_info(code)
+
+        # Use the row's lang as a hint for robust splitting
+        _, c_root = self._series_info(code, data.get("iso_language_code"))
         if c_root != wanted_root:
             return None
 
@@ -381,7 +475,9 @@ class Product(Page):
         code = getattr(self, "product_code", None)
         if not isinstance(code, str):
             return []
-        kind, root = self._series_info(code)
+
+        # Use self.iso_language_code as a hint for correct grouping
+        kind, root = self._series_info(code, self.iso_language_code)
         if not root:
             return []
 

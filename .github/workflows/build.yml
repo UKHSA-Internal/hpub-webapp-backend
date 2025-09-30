@@ -3,7 +3,7 @@ name: "Build, Test and Release"
 on:
   pull_request:
   push:
-    branches: ["main"]
+    branches: ["main","production"]
 
 permissions:
   id-token: write
@@ -50,7 +50,7 @@ jobs:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
           role-session-name: build-${{ github.sha }}
           aws-region: ${{ env.AWS_REGION }}
-
+      
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -64,7 +64,7 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         with:
           context: .
-          push: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+          push: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/production') && github.event_name == 'push' }}
           tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ github.sha }},${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:latest
           cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:latest
           cache-to: type=inline
@@ -112,16 +112,95 @@ jobs:
           docker pull $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$IMAGE_TAG
           docker tag $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$IMAGE_TAG $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${{ steps.tag_bump.outputs.new_tag }}
           docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${{ steps.tag_bump.outputs.new_tag }}
+  
+  release-hotfix:
+    name: Hotfix Tag and release container image 
+    runs-on: ubuntu-latest
+    if: (github.ref == 'refs/heads/production') && contains(github.event.head_commit.message, 'hotfix/HPUB')
+    environment: dev
+    permissions:
+      contents: write
+      id-token: write
+      actions: read
+    needs:
+      - build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 
+      
+      - name: Get latest GitHub release
+        id: latest_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          LATEST_RELEASE_TAG=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            https://api.github.com/repos/$REPO/releases/latest \
+            | jq -r '.tag_name')
 
-      # - name: Create Github release
-      #   env:
-      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      #     tag: ${{ steps.tag_bump.outputs.new_tag }}
-      #   run: |
-      #     gh release create "$tag" \
-      #       --repo="$GITHUB_REPOSITORY" \
-      #       --title="${GITHUB_REPOSITORY#*/} ${tag#v}" \
-      #       --generate-notes
+          VERSION_NUMBER=${LATEST_RELEASE_TAG#v}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_NUMBER"
+          
+          # Fetch all tags locally
+          git fetch --tags > /dev/null 2>&1
+
+          # Find the highest patch for this MAJOR.MINOR
+          LATEST_PATCH=$(git tag -l "v${MAJOR}.${MINOR}.*" \
+            | sed "s/v${MAJOR}.${MINOR}.//" \
+            | sort -n \
+            | tail -1)
+
+          # If no tags found, start at 0
+          LATEST_PATCH=${LATEST_PATCH:-0}
+
+          # Increment PATCH from the latest one
+          PATCH=$((LATEST_PATCH + 1))
+
+          # Build new tag
+          NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "HOTFIX_TAG=$NEW_TAG" >> $GITHUB_ENV
+          echo "Latest release: $LATEST_RELEASE_TAG"
+          echo "New hotfix tag: $HOTFIX_TAG"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # AWS_ACCOUNT_ID_ECR_REGISTRY is used for pulling from a shared ECR repository
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
+          role-session-name: retag-image-${{ github.sha }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Setup Git
+        run: |
+          git config user.name "${GITHUB_ACTOR}"
+          git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
+
+      # Create Git tag
+      - name: Create tag
+        run: |
+          git tag -a $HOTFIX_TAG -m "Hotfix: $HOTFIX_TAG"
+      
+      # Push tag to remote
+      - name: Push tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git push origin $HOTFIX_TAG
+
+      - name: Pull, retag, and push Application image for release
+        id: push
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker pull $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$IMAGE_TAG $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$HOTFIX_TAG
+          docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$HOTFIX_TAG
 
   deploy_to_nonprod:
     name: Deploy build to ${{ matrix.environment }}
@@ -130,7 +209,7 @@ jobs:
     strategy:
       max-parallel: 1
       matrix:
-        environment: ["dev", "test",]
+        environment: ["dev", "test", "uat"]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:
       contents: write

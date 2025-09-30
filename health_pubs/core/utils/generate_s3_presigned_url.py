@@ -78,7 +78,7 @@ def generate_presigned_urls(
     urls: List[str],
     expiration: int = DEFAULT_PRESIGNED_URL_TTL,
     force_download: bool = True,
-    max_workers: int = 5,  # kept for signature compatibility (not used now)
+    max_workers: int = 5,  # kept for signature compatibility
 ) -> Dict[str, str]:
     """
     Batch presign with cache. No duplicate work.
@@ -87,37 +87,48 @@ def generate_presigned_urls(
         u: _cache_key_for(u, expiration, inline=not force_download) for u in urls if u
     }
     existing = cache.get_many(list(key_map.values()))
-    out: Dict[str, str] = {}
-
-    for u, ck in key_map.items():
-        if ck in existing:
-            out[u] = existing[ck]
+    out: Dict[str, str] = {
+        u: existing[ck] for u, ck in key_map.items() if ck in existing
+    }
 
     to_sign = [u for u in urls if u and u not in out]
     for u in to_sign:
-        b, k = _parse_s3_url(u)
-        if not b or not k:
-            continue
-        params = {"Bucket": b, "Key": k}
-        if force_download:
-            filename = k.rsplit("/", 1)[-1].lower()
-            if any(filename.endswith(ext) for ext in _FORCE_DOWNLOAD_EXTENSIONS):
-                params[
-                    "ResponseContentDisposition"
-                ] = f'attachment; filename="{filename}"'
-        try:
-            signed = s3_client.generate_presigned_url(
-                ClientMethod="get_object",
-                Params=params,
-                ExpiresIn=expiration,
-            )
+        signed = _presign_single_url(u, expiration, force_download)
+        if signed:
             out[u] = signed
-        except ClientError as e:
-            logger.warning("Presign error for %s: %s", u, e)
 
     if out:
         cache.set_many({key_map[u]: s for u, s in out.items()}, timeout=expiration)
     return out
+
+
+# -------- helpers --------
+def _presign_single_url(
+    url: str, expiration: int, force_download: bool
+) -> Optional[str]:
+    b, k = _parse_s3_url(url)
+    if not b or not k:
+        return None
+
+    params = {"Bucket": b, "Key": k}
+    if force_download:
+        _apply_force_download(params, k)
+
+    try:
+        return s3_client.generate_presigned_url(
+            ClientMethod="get_object",
+            Params=params,
+            ExpiresIn=expiration,
+        )
+    except ClientError as e:
+        logger.warning("Presign error for %s: %s", url, e)
+        return None
+
+
+def _apply_force_download(params: dict, key: str) -> None:
+    filename = key.rsplit("/", 1)[-1].lower()
+    if any(filename.endswith(ext) for ext in _FORCE_DOWNLOAD_EXTENSIONS):
+        params["ResponseContentDisposition"] = f'attachment; filename="{filename}"'
 
 
 def generate_inline_presigned_urls(

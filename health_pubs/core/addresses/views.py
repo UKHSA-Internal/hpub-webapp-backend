@@ -142,9 +142,9 @@ class AddressViewSet(viewsets.ModelViewSet):
         try:
             ok = verify_address(addr)
         except Exception as e:
-            logger.exception("Unexpected error verifying address")
+            logger.exception(f"Unexpected error verifying address: {e}")
             return Response(
-                {"error": "Address verification service error", "details": str(e)},
+                {"error": "Address verification service error"},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
@@ -269,8 +269,9 @@ class AddressViewSet(viewsets.ModelViewSet):
         try:
             token = get_oauth_token()
         except Exception as e:
+            logger.exception(f"Error obtaining OAuth token: {e}")
             return Response(
-                {"error": "Failed to obtain token", "details": str(e)},
+                {"error": "Failed to obtain token"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
@@ -285,13 +286,15 @@ class AddressViewSet(viewsets.ModelViewSet):
             )
             resp.raise_for_status()
         except requests.HTTPError as e:
+            logger.error(f"HTTP error during geocoding: {e}")
             return Response(
-                {"error": "HTTP error", "details": str(e)},
+                {"error": "HTTP error"},
                 status=resp.status_code,
             )
         except Exception as e:
+            logger.exception(f"Unexpected error during geocoding: {e}")
             return Response(
-                {"error": "Unexpected error", "details": str(e)},
+                {"error": "Unexpected error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 

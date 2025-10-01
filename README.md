@@ -25,19 +25,20 @@ The backend supports multiple environments:
    * Accessing the environment's database
 
 ### Local Database Access via SSH
+> Note: You must have already exported your AWS credentials for the specific environment.
 
 To connect to the database locally:
 
 ```sh
-# Clone infrastructure repository
+# Clone infrastructure repository - UKHSA-Internal/hpub-iac
 $ git clone <iac-repo-url>
-$ cd hpub-iac/docs/scripts
 
 # Run the database access script
+$ cd hpub-iac/docs/scripts
 $ ./database_access.sh
 ```
 
-> Note: You must have already exported your AWS credentials for the specific environment.
+
 
 ## Prerequisites
 
@@ -113,6 +114,8 @@ $ ./database_access.sh
    > If you encounter an error related to `libmagic` on macOS, install the missing dependency by running: `brew install libmagic`
 
 ## Running the Application with Docker
+   > **Note:**  
+   > Docker is no longer required for local development due to the implementation of a CI/CD pipeline. Use local setup instead.
 
    If you prefer running the application in Docker, follow these steps:
 
@@ -123,9 +126,6 @@ $ ./database_access.sh
       - `docker run -d -p 8000:8000 hpub-webapp-backend`
    4. The application will now be accessible at:
       - `<http://127.0.0.1:8000>`
-
-   > **Note:**  
-   > Docker is no longer required for local development due to the implementation of a CI/CD pipeline. Use local setup instead.
 
 ## Accessing the Backend API through ECR
 

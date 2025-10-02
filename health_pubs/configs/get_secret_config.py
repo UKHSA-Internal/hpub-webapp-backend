@@ -352,5 +352,9 @@ class Config:
     def get_db_name():
         return Config.get_value("DB_NAME", is_secret=False)
 
+    @staticmethod
+    def get_aws_expected_bucket_owner():
+        return Config.get_value("AWS_EXPECTED_BUCKET_OWNER", is_secret=False)
+
 
 #

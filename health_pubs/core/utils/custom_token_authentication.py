@@ -70,7 +70,7 @@ class CustomTokenAuthentication(BaseAuthentication):
                 logger.info("Azure B2C user not found: %s", email)
                 return None
 
-            logger.info("Authenticated Azure B2C user %s", email)
+            # logger.info("Authenticated Azure B2C user %s", email) #for debugging
             return (user, None)
 
         # Custom tokens
@@ -100,7 +100,9 @@ class CustomTokenAuthentication(BaseAuthentication):
             logger.info("No user for token user_id=%s", user_id)
             return None
 
-        logger.info("Authenticated user %s via %s token", user.email, token_type)
+        logger.info(
+            "Authenticated user %s via %s token", user.email, token_type
+        )  # for debugging
         return (user, None)
 
     def _get_token(self, request):

@@ -70,21 +70,21 @@ migrations_output=$(python manage.py showmigrations --verbosity=2 --no-color 2>&
 echo "$migrations_output"
 
 
-# -----------------------------------------------------------------------------
-# Step 3a: Ensure django_migrations table exists
-# -----------------------------------------------------------------------------
-echo "Checking if 'django_migrations' table exists…"
-table_check=$(psql -U "$DB_USER" -d "$DB_NAME" -tAc \
-  "SELECT to_regclass('public.django_migrations');")
+# # -----------------------------------------------------------------------------
+# # Step 3a: Ensure django_migrations table exists
+# # -----------------------------------------------------------------------------
+# echo "Checking if 'django_migrations' table exists…"
+# table_check=$(psql -U "$DB_USER" -d "$DB_NAME" -tAc \
+#   "SELECT to_regclass('public.django_migrations');")
 
-if [ "$table_check" = "" ] || [ "$table_check" = "NULL" ]; then
-  echo "'django_migrations' table missing — forcing initial migrate."
-  python manage.py migrate --verbosity=2
-fi
+# if [ "$table_check" = "" ] || [ "$table_check" = "NULL" ]; then
+#   echo "'django_migrations' table missing — forcing initial migrate."
+#   python manage.py migrate --verbosity=2
+# fi
 
 
 # -----------------------------------------------------------------------------
-# Step 3b: Count pending migrations
+# Step 3: Count pending migrations
 # -----------------------------------------------------------------------------
 # Strip any ANSI color codes (in case)
 clean_output=$(echo "$migrations_output" | sed 's/\x1B\[[0-9;]*[a-zA-Z]//g')

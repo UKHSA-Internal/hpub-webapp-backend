@@ -6,30 +6,29 @@ import os
 import uuid
 import difflib
 from typing import Any, Iterable, Mapping, Optional, Set, Union, Dict, List, Tuple
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit, parse_qsl, urlencode
 from django.utils import timezone
 import time
 from django.db import IntegrityError
 from psycopg2 import errors as pg_errors
-from collections import defaultdict
 from datetime import timedelta
 
 from django.db.models import (
     Q,
+    Max,
     F,
     Value,
     IntegerField,
+    OuterRef,
+    Subquery,
     Case,
     When,
-    Window,
 )
 from django.db.models.functions import (
     Upper,
     Trim,
     Replace,
 )
-from django.db.models.functions.window import RowNumber
-
 
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -39,7 +38,6 @@ from core.diseases.models import Disease
 from core.diseases.serializers import DiseaseSerializer
 from core.errors.enums import ErrorCode, ErrorMessage
 from core.errors.error_function import handle_error
-from core.establishments.models import Establishment
 from core.languages.models import LanguagePage
 from core.order_limits.models import OrderLimitPage
 from core.organizations.models import Organization
@@ -55,14 +53,13 @@ from core.utils.generate_s3_presigned_url import (
     generate_presigned_urls,
 )
 from .filters import ProductFilter
-from rest_framework import generics
+from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.filters import OrderingFilter, SearchFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from django.conf import settings
 from django.core.cache import cache
 
-from core.utils.product_recommendation_system import get_recommended_products
 from core.vaccinations.models import Vaccination
 from core.vaccinations.serializers import VaccinationSerializer
 from core.where_to_use.models import WhereToUse
@@ -71,6 +68,7 @@ from django.core.exceptions import (
     ObjectDoesNotExist,
     ValidationError,
     ImproperlyConfigured,
+    FieldDoesNotExist,
 )
 from rest_framework.filters import OrderingFilter, SearchFilter
 from django_filters.rest_framework import DjangoFilterBackend
@@ -567,7 +565,9 @@ def invalidate_product_caches(product_code: str | None = None):
 
 
 class CustomPagination(PageNumberPagination):
-    page_size = 10  # Set pagination to 10 items per page
+    page_size = getattr(
+        settings, "PRODUCTS_PAGE_SIZE", 10
+    )  # Set pagination to 10 items per page
 
     def get_paginated_response(self, data, status_code=200):
         response = Response(
@@ -583,6 +583,11 @@ class CustomPagination(PageNumberPagination):
         response.status_code = status_code
 
         return response
+
+
+class AdminPagination(CustomPagination):
+    # Only the admin list should use this larger/smaller page size
+    page_size = getattr(settings, "ADMIN_PRODUCTS_PAGE_SIZE", 20)  # pick your number
 
 
 class ErrorHandlingMixin:
@@ -1775,170 +1780,283 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
 
 
 class PresignedUrlMixin:
-    """Handles presigned URL extraction and injection, including metadata."""
+    _ALL_SLOTS: tuple[str, ...] = (
+        "main_download_url",
+        "web_download_url",
+        "print_download_url",
+        "transcript_url",
+        "video_url",
+    )
 
-    def _process_presigned_urls(self, response_data):
+    # -------- URL collection --------
+    def _collect_s3_urls(
+        self, product_downloads: Dict[str, Any], *, slots: List[str]
+    ) -> List[str]:
+        def extract_from_val(val: Any) -> List[str]:
+            if isinstance(val, dict):
+                return [val.get("s3_bucket_url")] if val.get("s3_bucket_url") else []
+            if isinstance(val, list):
+                return [
+                    it.get("s3_bucket_url")
+                    for it in val
+                    if isinstance(it, dict) and it.get("s3_bucket_url")
+                ]
+            return []
+
+        urls = []
+        for slot in slots:
+            urls.extend(extract_from_val(product_downloads.get(slot)))
+
+        # de-dupe while preserving order
+        seen, out = set(), []
+        for u in urls:
+            if u and u not in seen:
+                seen.add(u)
+                out.append(u)
+        return out
+
+    # -------- applicators --------
+    @staticmethod
+    def _is_doc_mime(m: str) -> bool:
+        m = (m or "").lower()
+        return any(
+            token in m
+            for token in (
+                "application/pdf",
+                "application/msword",
+                "application/vnd.openxmlformats-officedocument",
+                "application/vnd.oasis.opendocument",
+                "application/vnd.ms-powerpoint",
+                "application/vnd.ms-excel",
+            )
+        )
+
+    def _apply_metadata_and_presigned(
+        self,
+        item: Any,
+        presigned: Dict[str, str],
+        inline_presigned: Dict[str, str],
+        metadata_dict: Dict[str, Dict[str, Any]],
+    ) -> Any:
+        if isinstance(item, list):
+            return [
+                self._apply_metadata_and_presigned(
+                    i, presigned, inline_presigned, metadata_dict
+                )
+                for i in item
+            ]
+        if not isinstance(item, dict) or not item.get("s3_bucket_url"):
+            return item
+
+        s3_url = item["s3_bucket_url"]
+        item = self._apply_presigned_and_metadata(
+            item, s3_url, presigned, metadata_dict
+        )
+        ip = inline_presigned.get(s3_url)
+        if ip:
+            item["inline_presigned_s3_url"] = ip
+        return item
+
+    def _apply_presigned_and_metadata(
+        self,
+        item: Dict[str, Any],
+        s3_url: str,
+        presigned: Dict[str, str],
+        metadata_dict: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        presigned_url = presigned.get(s3_url)
+        if not presigned_url:
+            return item
+
+        item["URL"] = presigned_url
+        md = metadata_dict.get(presigned_url, {})
+        self._apply_core_metadata(item, md)
+        self._apply_optional_metadata(item, md)
+        item["s3_bucket_url"] = s3_url
+        return item
+
+    def _apply_core_metadata(self, item: Dict[str, Any], md: Dict[str, Any]) -> None:
+        if "file_size" in md:
+            item["file_size"] = md["file_size"]
+        if "file_type" in md:
+            item["file_type"] = md["file_type"]
+
+        file_type = (md.get("file_type") or "").lower()
+        if file_type.startswith("image/"):
+            item.pop("number_of_pages", None)
+            item.pop("page_size", None)
+            if "dimensions" in md:
+                item["dimensions"] = md["dimensions"]
+        elif self._is_doc_mime(file_type):
+            for k in ("number_of_pages", "page_size"):
+                if k in md:
+                    item[k] = md[k]
+
+        if "duration" in md:
+            item["duration"] = md["duration"]
+        if "dimensions" in md and not file_type.startswith("image/"):
+            item["dimensions"] = md["dimensions"]
+
+    def _apply_optional_metadata(
+        self, item: Dict[str, Any], md: Dict[str, Any]
+    ) -> None:
+        for k in (
+            "number_of_slides",
+            "number_of_paragraphs",
+            "number_of_sheets",
+            "number_of_paragraphs_odt",
+        ):
+            if k in md:
+                item[k] = md[k]
+
+    # -------- main hook --------
+    def _process_presigned_urls(self, response_data: Dict[str, Any]) -> None:
         update_refs = response_data.get("update_ref")
         if not isinstance(update_refs, dict):
             return
 
-        product_downloads = update_refs.get("product_downloads")
+        product_downloads = self._parse_product_downloads(
+            update_refs.get("product_downloads")
+        )
         if not isinstance(product_downloads, dict):
             return
+        update_refs["product_downloads"] = product_downloads
 
-        # 1. Collect all S3 URLs
-        all_download_urls = self._collect_s3_urls(product_downloads)
-        logger.info(LOG_MSG_S3_URL_EXTRACTION, all_download_urls)
+        all_slots = list(self._ALL_SLOTS)
+        urls_all = self._collect_s3_urls(product_downloads, slots=all_slots)
+        if not urls_all:
+            return
 
-        # 2. Generate presigned URLs and inline presigned URLs
-        presigned_urls = generate_presigned_urls(all_download_urls)
-        inline_presigned_urls = generate_inline_presigned_urls(all_download_urls)
+        presigned, inline_presigned = self._generate_presigned_pairs(urls_all)
+        metadata_dict = self._build_metadata_dict(presigned, urls_all)
 
-        # 3. Retrieve metadata for the presigned URLs
-        metadata_list = get_file_metadata(list(presigned_urls.values()))
-        metadata_dict = {meta["URL"]: meta for meta in metadata_list}
-
-        # 4. Process the main download
-        if "main_download_url" in product_downloads:
-            product_downloads["main_download_url"] = self._apply_metadata_and_presigned(
-                product_downloads.get("main_download_url"),
-                presigned_urls,
-                inline_presigned_urls,
-                metadata_dict,
-            )
-
-        # 5. Process other download types
-        for download_type in [
-            "web_download_url",
-            "print_download_url",
-            "transcript_url",
-        ]:
-            downloads = product_downloads.get(download_type, [])
-            if isinstance(downloads, list):
-                product_downloads[download_type] = [
-                    self._apply_metadata_and_presigned(
-                        item, presigned_urls, inline_presigned_urls, metadata_dict
-                    )
-                    for item in downloads
-                ]
-
-    def _collect_s3_urls(self, product_downloads):
-        urls = []
-
-        # Handle main_download_url as either a dict or a list of dicts
-        main = product_downloads.get("main_download_url")
-        if isinstance(main, dict):
-            urls.append(main.get("s3_bucket_url"))
-        elif isinstance(main, list):
-            for item in main:
-                if isinstance(item, dict) and item.get("s3_bucket_url"):
-                    urls.append(item["s3_bucket_url"])
-
-        # The rest stays the same…
-        for download_type in [
-            "web_download_url",
-            "print_download_url",
-            "transcript_url",
-        ]:
-            downloads = product_downloads.get(download_type, [])
-            if isinstance(downloads, list):
-                urls.extend(
-                    item.get("s3_bucket_url")
-                    for item in downloads
-                    if isinstance(item, dict) and item.get("s3_bucket_url")
+        for slot in all_slots:
+            val = product_downloads.get(slot)
+            if val is not None:
+                product_downloads[slot] = self._apply_metadata_and_presigned(
+                    val, presigned, inline_presigned, metadata_dict
                 )
-        return urls
 
-    def _apply_metadata_and_presigned(
-        self, item, presigned_urls, inline_presigned_urls, metadata_dict
-    ):
-        """
-        Update a single download entry, but also handle lists for main_download_url
-        """
-        # If it's a list, process each element
-        if isinstance(item, list):
-            return [
-                self._apply_metadata_and_presigned(
-                    i, presigned_urls, inline_presigned_urls, metadata_dict
+    def _parse_product_downloads(self, product_downloads: Any) -> Any:
+        if isinstance(product_downloads, str):
+            try:
+                return json.loads(product_downloads)
+            except json.JSONDecodeError:
+                return None
+        return product_downloads
+
+    def _generate_presigned_pairs(
+        self, urls_all: List[str]
+    ) -> tuple[Dict[str, str], Dict[str, str]]:
+        ttl = getattr(settings, "PRESIGNED_URL_TTL", 3600)
+        presigned = generate_presigned_urls(
+            urls_all, expiration=ttl, force_download=True
+        )
+        inline_presigned = generate_presigned_urls(
+            urls_all, expiration=ttl, force_download=False
+        )
+        return presigned, inline_presigned
+
+    def _build_metadata_dict(
+        self, presigned: Dict[str, str], urls_all: List[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        if not getattr(settings, "FILE_METADATA_ENABLED", True):
+            return {}
+
+        presigned_urls = [presigned[u] for u in urls_all if u in presigned]
+        metas = get_file_metadata(presigned_urls, deep_for_doc_types=True)
+        metadata_dict: Dict[str, Dict[str, Any]] = {}
+        for m in metas:
+            if not isinstance(m, dict) or not m.get("URL"):
+                continue
+            metadata_dict[m["URL"]] = {
+                k: m[k]
+                for k in m
+                if k
+                in (
+                    "file_size",
+                    "file_type",
+                    "number_of_pages",
+                    "page_size",
+                    "duration",
+                    "dimensions",
+                    "number_of_slides",
+                    "number_of_paragraphs",
+                    "number_of_sheets",
+                    "number_of_paragraphs_odt",
                 )
-                for i in item
-            ]
-
-        # … existing dict handling below
-        if not isinstance(item, dict):
-            return item
-
-        s3_url = item.get("s3_bucket_url", "")
-        if s3_url in presigned_urls:
-            presigned_url = presigned_urls[s3_url]
-            item["URL"] = presigned_url
-            if presigned_url in metadata_dict:
-                item.update(metadata_dict[presigned_url])
-            item["s3_bucket_url"] = s3_url
-
-        if s3_url in inline_presigned_urls:
-            item["inline_presigned_s3_url"] = inline_presigned_urls[s3_url]
-
-        return item
+            }
+        return metadata_dict
 
 
 # --------------------------------------------------------------------------- #
-# Product detail (preview) — versioned server cache + browser no-store        #
+# Product detail view
 # --------------------------------------------------------------------------- #
-class ProductDetailView(ErrorHandlingMixin, PresignedUrlMixin, viewsets.ViewSet):
-    """
-    GET /api/products/{product_code}/
-
-    - Server-side cache key is versioned by Product.updated_at (second precision).
-    - Browser/CDN caching disabled via Cache-Control: no-store (+ ETag/Last-Modified).
-    """
-
-    authentication_classes = [CustomTokenAuthentication]
+class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
+    authentication_classes = [CustomTokenAuthentication, SessionAuthentication]
     permission_classes = [AllowAny]
 
     def retrieve(self, request, product_code=None, *args, **kwargs):
         code = unquote(product_code or "")
-
         product = Product.objects.filter(product_code=code).first()
         if not product:
-            logger.warning("Product not found: %s", code)
             return handle_error(
                 ErrorCode.PRODUCT_NOT_FOUND,
                 ErrorMessage.PRODUCT_NOT_FOUND,
                 status.HTTP_404_NOT_FOUND,
             )
 
-        ver = (
-            int(product.updated_at.timestamp())
-            if getattr(product, "updated_at", None)
-            else 0
-        )
-        cache_key = f"product_detail:v{ver}:{code}"
+        ver_ts = self._get_version_timestamp(product)
+        cache_key, bypass = self._get_cache_key_and_bypass(request, code, ver_ts)
 
-        cached = cache.get(cache_key)
-        if cached:
-            resp = JsonResponse(cached, status=status.HTTP_200_OK)
-            resp["Cache-Control"] = "no-store"
-            resp["ETag"] = f'W/"{code}-{ver}"'
-            if product.updated_at:
-                resp["Last-Modified"] = http_date(product.updated_at.timestamp())
-            return resp
+        if not bypass:
+            cached = cache.get(cache_key)
+            if cached:
+                return self._cached_response(cached, code, ver_ts)
 
-        logger.info("Retrieving product details for %s", code)
         data = ProductSerializer(product, context={"request": request}).data
         self._process_presigned_urls(data)
 
-        # 1-second default if not provided
-        ttl = getattr(settings, "CACHE_TTL_DETAIL", 1)
-        if ttl and ttl > 0:
+        ttl = getattr(settings, "CACHE_TTL_DETAIL", 60)
+        if ttl and ttl > 0 and not bypass:
             cache.set(cache_key, data, ttl)
 
-        resp = JsonResponse(data, status=status.HTTP_200_OK)
-        resp["Cache-Control"] = "no-store"
-        resp["ETag"] = f'W/"{code}-{ver}"'
-        if product.updated_at:
-            resp["Last-Modified"] = http_date(product.updated_at.timestamp())
+        return self._fresh_response(data, code, ver_ts)
+
+    def _get_version_timestamp(self, product: Product) -> int:
+        ver_sources = []
+        if getattr(product, "updated_at", None):
+            ver_sources.append(product.updated_at)
+        if getattr(product, "update_ref", None) and getattr(
+            product.update_ref, "updated_at", None
+        ):
+            ver_sources.append(product.update_ref.updated_at)
+        return int(max(ver_sources).timestamp()) if ver_sources else 0
+
+    def _get_cache_key_and_bypass(
+        self, request, code: str, ver_ts: int
+    ) -> tuple[str, bool]:
+        cache_key = f"product_detail:v{ver_ts}:{code}"
+        bypass = (request.GET.get("fresh") == "1") or getattr(
+            request.user, "is_staff", False
+        )
+        return cache_key, bypass
+
+    def _cached_response(self, cached: dict, code: str, ver_ts: int) -> JsonResponse:
+        resp = JsonResponse(cached, status=status.HTTP_200_OK)
+        self._set_headers(resp, code, ver_ts)
         return resp
+
+    def _fresh_response(self, data: dict, code: str, ver_ts: int) -> JsonResponse:
+        resp = JsonResponse(data, status=status.HTTP_200_OK)
+        self._set_headers(resp, code, ver_ts)
+        return resp
+
+    def _set_headers(self, resp: JsonResponse, code: str, ver_ts: int) -> None:
+        resp["Cache-Control"] = "no-store"
+        resp["ETag"] = f'W/"{code}-{ver_ts}"'
+        if ver_ts:
+            resp["Last-Modified"] = http_date(ver_ts)
 
 
 class ProductDetailDelete(ErrorHandlingMixin, View):
@@ -2013,7 +2131,7 @@ class ProductDeleteAll(View):
             )
 
 
-class ProductStatusUpdateView(View):
+class ProductStatusUpdateView(APIView):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
     """
@@ -2078,6 +2196,7 @@ class ProductStatusUpdateView(View):
                     ErrorMessage.DATABASE_ERROR,
                     status_code=500,
                 )
+            invalidate_product_caches(product.product_code)
 
             return JsonResponse(
                 {"message": "Product status updated successfully."}, status=HTTP_200_OK
@@ -2253,7 +2372,7 @@ class ProductStatusUpdateView(View):
         return new_status
 
 
-class ProductUpdateView(View):
+class ProductUpdateView(APIView):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
     """
@@ -2404,42 +2523,75 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
             file_urls,
         )
 
+        # ----------------- ATOMIC: ProductUpdate + Product ------------------ #
         with transaction.atomic():
-            # Update or create order limits
-            if data.get("order_limits"):
-                self.update_order_limits(product, data.get("order_limits"))
+            logger.info(
+                "Starting atomic transaction for product_code=%s", decoded_product_code
+            )
 
-            # Pre-create or update ProductUpdate so signals see required fields
+            # Ensure/update ProductUpdate
             product_update = self.get_or_create_product_update(
                 product, product_update_data
             )
-            # Apply any foreign-key guidance sets immediately on the update_ref
-            self.update_foreign_keys(product_update, data)
+            logger.info(
+                "ProductUpdate ensured for product_code=%s (id=%s)",
+                decoded_product_code,
+                product_update.id,
+            )
 
-            # Now patch the Product itself
+            # Update foreign keys
+            self.update_foreign_keys(product_update, data)
+            logger.debug(
+                "Updated foreign keys on ProductUpdate id=%s", product_update.id
+            )
+
+            # Patch Product itself
             serializer = ProductSerializer(
                 product, data=data, partial=True, context={"request": request}
             )
-            if serializer.is_valid():
-                serializer.save()
-
-                # Prepare response
-                response_data = serializer.data
-                response_data["update_ref"] = ProductUpdateSerializer(
-                    product_update, context={"request": request}
-                ).data
-
-                logger.info(
-                    "Product updated successfully for product_code: %s",
+            if not serializer.is_valid():
+                logger.error(
+                    "Validation errors for product_code=%s: %s",
                     decoded_product_code,
+                    serializer.errors,
                 )
-                return JsonResponse(response_data, status=status.HTTP_200_OK)
-
-            else:
-                logger.error("Serializer errors: %s", serializer.errors)
                 return handle_error(
                     ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
                 )
+            serializer.save()
+            logger.info(
+                "Product patched successfully for product_code=%s", decoded_product_code
+            )
+
+        # --------------- OUTSIDE ATOMIC: Order limits ------------------------ #
+        if data.get("order_limits"):
+            logger.info(
+                "Processing order_limits for product_code=%s", decoded_product_code
+            )
+            try:
+                self.update_order_limits(product, data["order_limits"])
+                logger.info(
+                    "Order limits updated for product_code=%s", decoded_product_code
+                )
+            except Exception as e:
+                logger.exception(
+                    "Order limits update failed for product_code=%s: %s",
+                    decoded_product_code,
+                    e,
+                )
+
+        # Build response
+        response_data = ProductSerializer(product, context={"request": request}).data
+        response_data["update_ref"] = ProductUpdateSerializer(
+            product.update_ref, context={"request": request}
+        ).data
+
+        logger.info(
+            "PATCH request completed successfully for product_code=%s",
+            decoded_product_code,
+        )
+        invalidate_product_caches(product.product_code)
+        return JsonResponse(response_data, status=status.HTTP_200_OK)
 
     def process_file_urls(
         self, product_type: str, data: dict, product_downloads: dict, product_tag: str
@@ -2476,7 +2628,7 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         For other product types, the standard required downloads are enforced.
         """
         tag = product_tag.lower()
-        logger.info(
+        logger.debug(
             "Validating required downloads for product_type: %s, tag: %s",
             product_type,
             tag,
@@ -2618,6 +2770,14 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         return file_urls
 
     def add_file_metadata(self, file_urls: dict) -> dict:
+        """
+        Attach presigned URLs and file metadata to file_urls.
+        Ensures TTL alignment with cache and safe defaults if metadata is missing.
+        """
+        presign_ttl = int(getattr(settings, "PRESIGNED_URL_TTL", 3600))
+        effective_ttl = max(0, presign_ttl - 5)  # safety margin
+
+        # Collect URLs
         all_urls = []
         if file_urls.get("main_download_url"):
             all_urls.append(file_urls["main_download_url"])
@@ -2625,20 +2785,31 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
             if key != "main_download_url" and isinstance(value, list):
                 all_urls.extend(value)
 
-        presigned = generate_presigned_urls(all_urls)
-        inline_presigned = generate_inline_presigned_urls(all_urls)
-        metadata_list = get_file_metadata(list(presigned.values()))
-        metadata_dict = {meta["URL"]: meta for meta in metadata_list}
+        # Generate presigns
+        presigned = generate_presigned_urls(all_urls, expiration=effective_ttl)
+        inline_presigned = generate_inline_presigned_urls(
+            all_urls, expiration=effective_ttl
+        )
 
+        # Metadata lookup (guarded by feature flag if needed)
+        metadata_dict = {}
+        if getattr(settings, "FILE_METADATA_ENABLED", True) and presigned:
+            metadata_list = get_file_metadata(list(presigned.values()))
+            metadata_dict = {meta["URL"]: meta for meta in metadata_list}
+
+        # Build a new dict (don’t mutate in place)
+        result = {}
         for key, value in file_urls.items():
             if key == "main_download_url" and value:
                 presigned_url = presigned.get(value)
                 meta = metadata_dict.get(presigned_url, {"URL": value})
-                meta["s3_bucket_url"] = value
-                meta["inline_presigned_s3_url"] = inline_presigned.get(value, "")
-                file_urls[key] = meta
+                result[key] = {
+                    **meta,
+                    "s3_bucket_url": value,
+                    "inline_presigned_s3_url": inline_presigned.get(value, ""),
+                }
             elif isinstance(value, list):
-                file_urls[key] = [
+                result[key] = [
                     {
                         **metadata_dict.get(presigned.get(url), {"URL": url}),
                         "s3_bucket_url": url,
@@ -2646,7 +2817,10 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                     }
                     for url in value
                 ]
-        return file_urls
+            else:
+                result[key] = value
+
+        return result
 
     def prepare_product_update_data(
         self,
@@ -2750,20 +2924,8 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         raise RuntimeError("Could not create or find ProductUpdate after retries")
 
     def update_order_limits(self, product: Product, order_limits: list):
-        """
-        Upserts OrderLimitPage records instead of wholesale delete & recreate.
-        Keeps existing pages when unchanged, updates when modified, creates when new,
-        and deletes only those no longer needed.
+        parent_page = Page.objects.get(slug="products")
 
-        Result: far fewer Wagtail unpublish/delete/publish cycles → much faster.
-        """
-        try:
-            parent_page = Page.objects.get(slug="products")
-        except Page.DoesNotExist:
-            logger.error("Parent page with slug 'products' not found.")
-            return
-
-        # --- Existing pages grouped by org name ----------------------------------
         existing_pages = (
             OrderLimitPage.objects.child_of(parent_page)
             .filter(product_ref=product)
@@ -2771,7 +2933,6 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         )
         by_org = {p.organization_ref.name: p for p in existing_pages}
 
-        # --- Prefetch org + establishment data -----------------------------------
         org_names = [
             lim["organization_name"]
             for lim in order_limits
@@ -2780,60 +2941,38 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         org_qs = Organization.objects.filter(name__in=org_names)
         org_cache = {org.name: org for org in org_qs}
 
-        est_qs = Establishment.objects.filter(organization_ref__in=org_qs).values(
-            "organization_ref_id", "full_external_key"
-        )
-        full_keys_map = defaultdict(list)
-        for est in est_qs:
-            full_keys_map[est["organization_ref_id"]].append(est["full_external_key"])
-
-        # --- Upsert loop ----------------------------------------------------------
         seen_orgs = set()
-
         for lim in order_limits:
             org_name = lim.get("organization_name")
             if not org_name:
                 continue
+            seen_orgs.add(org_name)
 
             org = org_cache.get(org_name)
             if not org:
-                logger.warning("Organization '%s' not found. Skipping.", org_name)
                 continue
 
             limit_val = lim.get("order_limit_value", 0)
-            full_keys = full_keys_map.get(org.organization_id, [])
-            seen_orgs.add(org_name)
 
-            # ------------------------------------------------------------------
-            # Case A: existing page → update if changed
-            # ------------------------------------------------------------------
             if org_name in by_org:
+                # ⚡ In-place update — no delete/recreate
                 page = by_org[org_name]
-                if (
-                    page.order_limit != limit_val
-                    or page.full_external_keys != full_keys
-                ):
+                if page.order_limit != limit_val:
                     page.order_limit = limit_val
-                    page.full_external_keys = full_keys
-                    page.save_revision().publish()
-                continue
+                    page.save(update_fields=["order_limit"])
+            else:
+                # Only create when missing
+                new_page = OrderLimitPage(
+                    title=f"Order Limit for {org_name}",
+                    slug=slugify(f"{org_name}-order-limit-{uuid.uuid4()}"),
+                    order_limit=limit_val,
+                    product_ref=product,
+                    organization_ref=org,
+                )
+                parent_page.add_child(instance=new_page)
+                new_page.save()
 
-            # ------------------------------------------------------------------
-            # Case B: new page → create
-            # ------------------------------------------------------------------
-            logger.info("full_external_keys for %s: %s", org_name, full_keys)
-            new_page = OrderLimitPage(
-                title=f"Order Limit for {org_name}",
-                slug=slugify(f"{org_name}-order-limit-{uuid.uuid4()}"),
-                order_limit=limit_val,
-                product_ref=product,
-                organization_ref=org,
-                full_external_keys=full_keys,
-            )
-            parent_page.add_child(instance=new_page)
-            new_page.save_revision().publish()
-
-        # --- Delete pages for orgs no longer supplied ----------------------------
+        # Delete pages no longer present
         for org_name, page in by_org.items():
             if org_name not in seen_orgs:
                 page.delete()
@@ -2965,6 +3104,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
                 ErrorMessage.INTERNAL_SERVER_ERROR,
                 status_code=500,
             )
+        invalidate_product_caches(product_instance.product_code)
         return JsonResponse(ProductSerializer(product_instance).data, status=201)
 
     def get_program_and_language(self, program_name, language_id, is_uuid):
@@ -3042,7 +3182,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         while Product.objects.filter(product_code=product_code).exists():
             version_number += 1
             product_code = f"{short_program_id}{short_product_key}{short_language_code}{version_number:03}"
-        logger.info("Unique product code: %s", product_code)
+        logger.debug("Unique product code: %s", product_code)
         return product_code
 
     def get_or_create_parent_page(self):
@@ -3138,24 +3278,47 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
 
 # --------------------------------------------------------------------------- #
 # Core mixin with sorting + normalization/dedupe + list caching               #
-# --------------------------------------------------------------------------- #
-class ProductListMixin(PresignedUrlMixin):
-    """
-    Sorting, pagination, S3 presigning (attachment + inline),
-    with per-request caching of the serialized page data.
-    Also normalizes/dedupes by product_code to avoid 'ABC' vs 'ABC ' duplicates.
-    """
 
+
+# ----------------------------- fallbacks -------------------------------------
+
+if "ALLOWED_SORT_FIELDS" not in globals():
+    ALLOWED_SORT_FIELDS = {
+        "product_title",
+        "-product_title",
+        "created_at",
+        "-created_at",
+        "updated_at",
+        "-updated_at",
+        "program_id",
+        "-program_id",
+    }
+
+if "VALID_SORT_FIELDS" not in globals():
+    VALID_SORT_FIELDS = list(ALLOWED_SORT_FIELDS)
+
+# A conservative pattern; keep your original if already defined elsewhere.
+if "PRODUCT_CODE_PATTERN" not in globals():
+    PRODUCT_CODE_PATTERN = r"^[A-Za-z0-9\-_]+$"
+
+
+# --------------------------------------------------------------------------- #
+# Core mixin: sorting + normalization/dedupe + pagination/presign/cache       #
+# --------------------------------------------------------------------------- #
+
+
+class ProductListMixin:
     serializer_class = ProductSerializer
+    search_serializer_class = ProductSearchSerializer
     include_request_context = False
     cache_timeout = getattr(settings, "CACHE_TTL_LIST", 30)
     pagination_class = CustomPagination
 
-    # ---------------------------
-    # Normalization helpers
-    # ---------------------------
+    # NEW: per-view toggle (admin will turn this off)
+    presign_in_lists = getattr(settings, "PRESIGN_IN_LISTS", True)
+
     @staticmethod
-    def _annotate_norm_code(qs):
+    def _with_norm_fields(qs):
         return qs.annotate(
             code_trim=Trim(F("product_code")),
             norm_code=Upper(
@@ -3171,151 +3334,251 @@ class ProductListMixin(PresignedUrlMixin):
             ),
         )
 
+    def _annotate_norm_code(self, qs):
+        return self._with_norm_fields(qs)
+
     @staticmethod
     def _exclude_edge_spaces(qs):
         return qs.filter(product_code=F("code_trim"))
 
     @staticmethod
-    def _dedupe_by_norm_code(qs):
-        return (
-            qs.annotate(
-                rn=Window(
-                    expression=RowNumber(),
-                    partition_by=[F("norm_code")],
-                    order_by=F("updated_at").desc(nulls_last=True),
-                )
-            )
-            .filter(rn=1)
-            .order_by("id")
-        )
+    def _model_has_field(model, name: str) -> bool:
+        try:
+            model._meta.get_field(name)
+            return True
+        except FieldDoesNotExist:
+            return False
 
-    def clean_dedup_queryset(self, qs):
-        qs = self._annotate_norm_code(qs)
-        qs = self._exclude_edge_spaces(qs)
-        qs = self._dedupe_by_norm_code(qs)
-        return qs
+    def _best_updated_field(self, qs) -> str | None:
+        for name in (
+            "updated_at",
+            "latest_revision_created_at",
+            "last_published_at",
+            "first_published_at",
+            "created_at",
+        ):
+            if self._model_has_field(qs.model, name):
+                return name
+        return None
 
-    # ---------------------------
-    # Sorting helpers
-    # ---------------------------
+    def _resolve_sort_field(self, qs, field_name: str | None) -> str | None:
+        if not field_name:
+            return None
+        sign = "-" if field_name.startswith("-") else ""
+        raw = field_name.lstrip("-")
+        if raw in {"updated_at", "created_at"}:
+            best = self._best_updated_field(qs)
+            return f"{sign}{best}" if best else f"{sign}id"
+        return f"{sign}{raw}" if self._model_has_field(qs.model, raw) else f"{sign}id"
+
     @staticmethod
-    def _normalize_sort_param(sort_by: Optional[str]) -> Optional[str]:
+    def _normalize_sort_param(sort_by: str | None) -> str | None:
         if not sort_by:
             return None
-        sort_by = sort_by.lstrip()
-        return sort_by if sort_by in ALLOWED_SORT_FIELDS else None
+        sv = sort_by.strip()
+        return sv if sv in ALLOWED_SORT_FIELDS else None
 
-    def get_sorted_queryset(self, queryset, request):
-        sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
-        return (
-            queryset.order_by(sort_by)
-            if sort_by
-            else queryset.order_by("product_title", "-updated_at")
+    def _dedupe_by_norm_code_fast(self, qs):
+        try:
+            q = qs
+            q_query = getattr(qs, "query", None)
+            low_mark = getattr(q_query, "low_mark", 0) or 0
+            high_mark = getattr(q_query, "high_mark", None)
+            if low_mark or high_mark is not None:
+                q = Product.objects.filter(id__in=Subquery(qs.values("id")))
+        except Exception:
+            q = Product.objects.filter(id__in=Subquery(qs.values("id")))
+
+        q = self._annotate_norm_code(q).filter(product_code=F("code_trim"))
+        updated_field = self._best_updated_field(q) or "id"
+
+        best_row_for_norm = (
+            q.filter(norm_code=OuterRef("norm_code"))
+            .order_by(F(updated_field).desc(nulls_last=True), F("id").desc())
+            .values("id")[:1]
         )
 
-    # ---------------------------
-    # Pagination + presigning + cache
-    # ---------------------------
-    def get_cache_key(self, request, prefix="products"):
+        best_ids = (
+            q.values("norm_code")
+            .annotate(best_id=Subquery(best_row_for_norm))
+            .values("best_id")
+        )
+
+        return Product.objects.filter(id__in=Subquery(best_ids))
+
+    def get_sorted_queryset(self, queryset, request):
+        requested = self._normalize_sort_param(request.GET.get("sort_by"))
+        if requested:
+            resolved = self._resolve_sort_field(queryset, requested)
+            is_desc = resolved.startswith("-")
+            return queryset.order_by(resolved, "-id" if not is_desc else "id")
+        default_updated = self._best_updated_field(queryset)
+        primary = f"-{default_updated}" if default_updated else "-id"
+        return queryset.order_by(primary, "id" if primary.startswith("-") else "-id")
+
+    def _queryset_version(self, qs) -> int:
+        def _safe_max(qs, field_name: str):
+            try:
+                return qs.aggregate(mx=Max(field_name))["mx"]
+            except Exception:
+                return None
+
+        candidates = []
+        for f in (
+            "updated_at",
+            "latest_revision_created_at",
+            "last_published_at",
+            "first_published_at",
+            "created_at",
+        ):
+            candidates.append(_safe_max(qs, f))
+        for f in (
+            "update_ref__updated_at",
+            "update_ref__latest_revision_created_at",
+            "update_ref__last_published_at",
+            "update_ref__first_published_at",
+        ):
+            candidates.append(_safe_max(qs, f))
+        dt = max([d for d in candidates if d], default=None)
+        return int(dt.timestamp()) if dt else 0
+
+    @staticmethod
+    def _normalized_path_for_cache(request) -> str:
+        parts = urlsplit(request.get_full_path())
+        pairs = parse_qsl(parts.query, keep_blank_values=True)
+
+        def keep(k: str) -> bool:
+            kl = k.lower()
+            if kl in {"requesttime", "_", "cachebust", "fresh"}:
+                return False
+            if kl.startswith("utm_"):
+                return False
+            return True
+
+        cleaned = [(k, v) for (k, v) in pairs if keep(k)]
+        cleaned.sort()
+        q = urlencode(cleaned, doseq=True)
+        return parts.path + (("?" + q) if q else "")
+
+    def get_cache_key(self, request, prefix: str = "products") -> str:
         user_id = (
             request.user.id
             if getattr(request, "user", None) and request.user.is_authenticated
             else "anon"
         )
-        return f"{prefix}:user:{user_id}:{request.get_full_path()}"
+        path = self._normalized_path_for_cache(request)
+        return f"{prefix}:user:{user_id}:{path}"
 
     def get_serializer_context(self):
         return {"request": self.request} if self.include_request_context else {}
 
     def paginate_and_serialize(
-        self, queryset, request, serializer_class=None, use_direct_update=False
+        self,
+        queryset,
+        request,
+        serializer_class=None,
+        *,
+        use_direct_update: bool = False,
+        is_search: bool = False,
     ):
-        """
-        Returns (data_list, paginator). Caches only the serialized 'page' list, never a Response.
-        NOTE: We still call paginate_queryset even on cache hits to keep paginator state
-        (next/prev links, counts). If you want to avoid the DB hit entirely on cache hits,
-        cache pagination metadata too.
-        """
-        cache_key = self.get_cache_key(request)
-        cached = cache.get(cache_key)
+        bypass_cache = (self.cache_timeout or 0) <= 0 or request.GET.get("fresh") == "1"
+        version = self._queryset_version(queryset)
+        base_key = self.get_cache_key(request)
+        cache_key = f"{base_key}:v{version}"
 
+        cached = None if bypass_cache else cache.get(cache_key)
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(queryset, request, view=self)
-
         if cached is not None:
             return cached, paginator
 
         ctx = self.get_serializer_context()
-        serializer = (serializer_class or self.serializer_class)(
-            page, many=True, context=ctx
+        s_class = serializer_class or (
+            self.search_serializer_class if is_search else self.serializer_class
         )
+        serializer = s_class(page, many=True, context=ctx)
 
-        # 1) Gather & presign "download" URLs and inject (attachment style)
-        urls = extract_s3_urls(serializer.data)
-        presigned = generate_presigned_urls(urls)
-        if use_direct_update:
-            _update_product_downloads_with_presigned_urls(page, presigned)
-            serializer = (serializer_class or self.serializer_class)(
-                page, many=True, context=ctx
-            )
-        else:
-            update_product_urls(serializer.data, presigned)
+        # --- PRESIGN with explicit TTL ---
+        presign_ttl = int(getattr(settings, "PRESIGNED_URL_TTL", 3600))
+        safety_margin = 5
+
+        if self.presign_in_lists and getattr(settings, "PRESIGN_IN_LISTS", True):
+            urls = extract_s3_urls(serializer.data)
+            presigned = generate_presigned_urls(urls, expiration=presign_ttl)
+            if use_direct_update:
+                _update_product_downloads_with_presigned_urls(page, presigned)
+                serializer = s_class(page, many=True, context=ctx)
+            else:
+                update_product_urls(serializer.data, presigned)
 
         data = serializer.data
 
-        # 2) Inline presigned URLs + merge metadata for each item
-        for item in data:
-            self._process_presigned_urls(item)
-
-        if self.cache_timeout and self.cache_timeout > 0:
-            cache.set(cache_key, data, self.cache_timeout)
+        if not bypass_cache and self.cache_timeout and self.cache_timeout > 0:
+            effective_ttl = self.cache_timeout
+            if presign_ttl:
+                effective_ttl = min(effective_ttl, max(0, presign_ttl - safety_margin))
+            cache.set(cache_key, data, timeout=effective_ttl)
 
         return data, paginator
 
+    def optimize_for_search(self, qs):
+        norm_expr = Upper(
+            Replace(
+                Replace(
+                    Replace(Trim(F("product_code")), Value("-"), Value("")),
+                    Value("_"),
+                    Value(""),
+                ),
+                Value(" "),
+                Value(""),
+            )
+        )
+        annotations = {
+            "code_trim": Trim(F("product_code")),
+            "norm_code": norm_expr,
+        }
+        if not self._model_has_field(qs.model, "product_code_no_dashes"):
+            annotations["product_code_no_dashes"] = norm_expr
+
+        return (
+            qs.select_related("update_ref", "program_id", "language_id")
+            .annotate(**annotations)
+            .filter(product_code=F("code_trim"))
+        )
+
 
 # --------------------------------------------------------------------------- #
-# Admin: List (fresh)                                                         #
+# Admin: List                                                                 #
 # --------------------------------------------------------------------------- #
 class ProductAdminListView(ProductListMixin, APIView):
     authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAdminUser]
     include_request_context = True
-    cache_timeout = 0  # always fresh for admins
+    cache_timeout = 0
+    pagination_class = AdminPagination
+    presign_in_lists = False
 
     def get(self, request, *args, **kwargs):
-        logger.info("ProductAdminListView GET called")
         try:
-            qs = Product.objects.all()
-            if not qs.exists():
-                logger.warning(ErrorMessage.PRODUCT_NOT_FOUND.value)
+            base = Product.objects.all().select_related("program_id", "language_id")
+            if not base.exists():
                 return handle_error(
                     ErrorCode.PRODUCT_NOT_FOUND,
                     ErrorMessage.PRODUCT_NOT_FOUND,
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
-
-            qs = self.clean_dedup_queryset(qs)
-            sorted_qs = self.get_sorted_queryset(qs, request)
-
-            data, paginator = self.paginate_and_serialize(
-                sorted_qs, request, use_direct_update=True
-            )
-            logger.info("Returning %d products", len(data))
-            return paginator.get_paginated_response(
-                data, status_code=status.HTTP_200_OK
-            )
-        except Exception as e:  # noqa: BLE001
+            sorted_qs = self.get_sorted_queryset(base, request)
+            data, paginator = self.paginate_and_serialize(sorted_qs, request)
+            return paginator.get_paginated_response(data)
+        except Exception as e:
+            logger.exception("Admin list error: %s", e)
             return handle_exceptions(e)
 
 
 # --------------------------------------------------------------------------- #
-# Users: List (briefly cached)                                                #
+# Users: List                                                                 #
 # --------------------------------------------------------------------------- #
 class ProductUsersListView(ProductListMixin, APIView):
-    """
-    GET /api/v1/products/users/all/?page=1&sort_by=-created_at
-    """
-
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
     include_request_context = True
@@ -3323,22 +3586,25 @@ class ProductUsersListView(ProductListMixin, APIView):
 
     def get(self, request, *args, **kwargs):
         try:
-            qs = Product.objects.filter(is_latest=True, status="live")
-            if not qs.exists():
+            base = Product.objects.filter(is_latest=True, status="live")
+            if not base.exists():
                 return handle_error(
                     ErrorCode.PRODUCT_NOT_FOUND,
                     ErrorMessage.PRODUCT_NOT_FOUND,
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
-
-            qs = self.clean_dedup_queryset(qs)
+            qs = self.optimize_for_search(base)
             sorted_qs = self.get_sorted_queryset(qs, request)
-
-            data, paginator = self.paginate_and_serialize(sorted_qs, request)
+            data, paginator = self.paginate_and_serialize(
+                sorted_qs,
+                request,
+                serializer_class=ProductSearchSerializer,
+                is_search=False,
+            )
             data = filter_live_languages(data)
             return paginator.get_paginated_response(data)
-        except Exception as e:  # noqa: BLE001
-            logger.exception("Unhandled exception in ProductUsersListView.get, %s", e)
+        except Exception as e:
+            logger.exception("Users list error: %s", e)
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,
@@ -3347,98 +3613,27 @@ class ProductUsersListView(ProductListMixin, APIView):
 
 
 # --------------------------------------------------------------------------- #
-# Search (base)                                                              #
-# --------------------------------------------------------------------------- #
-class ProductSearchListMixin(ProductListMixin):
-    """
-    Mixin for search endpoints. Uses ProductSearchSerializer.
-    """
-
-    serializer_class = ProductSearchSerializer
-
-
-# --------------------------------------------------------------------------- #
-# Search (base) — unified q= across code/title with ranking                   #
+# Base search (supplies helpers used by user search)                          #
 # --------------------------------------------------------------------------- #
 
 
 class BaseProductSearchView(APIView, ProductListMixin):
+    """Shared helpers for product search views (user/admin/etc.)."""
+
     pagination_class = CustomPagination
 
-    def get_default_query(self) -> Q:
-        return Q()
-
-    def postprocess_response_data(self, response_data: dict, products) -> dict:
-        return response_data
-
-    # ---------------------------
-    # Helpers (new)
-    # ---------------------------
     @staticmethod
     def _normalize_term(term: str) -> str:
-        try:
-            return normalize_product_code(term)
-        except NameError:
-            return re.sub(r"[-_\s]", "", (term or "")).upper()
-
-    def _base_scoped_queryset(self):
-        qs = Product.objects.all()
-        qs = self._annotate_norm_code(qs)
-        return qs.filter(self.get_default_query())
-
-    def _finalize_and_respond(
-        self,
-        qs,
-        request,
-        *,
-        ranked: bool,
-        product_code: str | None,
-        product_title: str | None,
-    ) -> Response:
-        # Clean + dedupe
-        qs = self._exclude_edge_spaces(qs)
-        qs = self._dedupe_by_norm_code(qs)
-
-        # Empty? -> 404 (consistent with prior behavior)
-        if not qs.exists():
-            return Response(
-                {"detail": ErrorMessage.PRODUCT_NOT_FOUND.value},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        # Sorting (rank-aware vs normal)
-        sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
-        if ranked:
-            if sort_by:
-                qs = qs.order_by("-rank", sort_by)
-            else:
-                qs = qs.order_by("-rank", "product_title", "-updated_at")
-        else:
-            qs = (
-                qs.order_by(sort_by)
-                if sort_by
-                else qs.order_by("product_title", "-updated_at")
-            )
-
-        # Serialize + paginate
-        data, paginator = self.paginate_and_serialize(
-            qs, request, serializer_class=ProductSearchSerializer
-        )
-
-        # Shape response
-        response_data = _prepare_response_data(qs, data, product_code, product_title)
-        response_data = self.postprocess_response_data(response_data, qs)
-        return paginator.get_paginated_response(
-            response_data, status_code=status.HTTP_200_OK
-        )
+        """Normalize search term by uppercasing and removing '-', '_' and spaces."""
+        return re.sub(r"[-_\s]+", "", (term or "")).upper()
 
     @staticmethod
     def _annotate_rank_signals(qs, q: str, q_norm: str, looks_like_code: int):
         """
-        Adds ranking signals for product_code, norm_code, and product_title.
+        Annotate queryset with ranking signals and compute a composite 'rank'.
+        This boosts results that exactly or partially match code/title/norm_code.
         """
         return qs.annotate(
-            # product_code signals
             exact_code=Case(
                 When(product_code__iexact=q, then=Value(1)),
                 default=Value(0),
@@ -3454,7 +3649,6 @@ class BaseProductSearchView(APIView, ProductListMixin):
                 default=Value(0),
                 output_field=IntegerField(),
             ),
-            # norm_code signals
             exact_norm=Case(
                 When(norm_code__exact=q_norm, then=Value(1)),
                 default=Value(0),
@@ -3470,7 +3664,6 @@ class BaseProductSearchView(APIView, ProductListMixin):
                 default=Value(0),
                 output_field=IntegerField(),
             ),
-            # title signals
             exact_title=Case(
                 When(product_title__iexact=q, then=Value(1)),
                 default=Value(0),
@@ -3486,7 +3679,6 @@ class BaseProductSearchView(APIView, ProductListMixin):
                 default=Value(0),
                 output_field=IntegerField(),
             ),
-            # lightweight bias if query is a single token like a code
             code_bias=Value(looks_like_code, output_field=IntegerField()),
         ).annotate(
             rank=(
@@ -3503,88 +3695,87 @@ class BaseProductSearchView(APIView, ProductListMixin):
             )
         )
 
-    # ---------------------------
-    # GET
-    # ---------------------------
+
+# --------------------------------------------------------------------------- #
+# Users: Public search endpoint                                               #
+# --------------------------------------------------------------------------- #
+class ProductSearchUserView(BaseProductSearchView):
+    """
+    GET /api/v1/products/users/search/?q=...&page=1
+    Public search, optimized for UI needs.
+    """
+
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+    include_request_context = True
+    cache_timeout = getattr(settings, "CACHE_TTL_LIST", 30)
+    pagination_class = CustomPagination
+
+    # tuneable cap for the pre-ranked set (before dedupe/rank)
+    PRE_RANK_LIMIT = int(getattr(settings, "SEARCH_PRE_RANK_LIMIT", 2000))
+
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            # Params
             q = (request.GET.get("q") or "").strip()
-            product_code = request.GET.get("product_code")
-            product_title = request.GET.get("product_title")
+            base = Product.objects.filter(is_latest=True, status="live")
 
-            if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
-                return handle_error(
-                    ErrorCode.INVALID_PARAMETER,
-                    ErrorMessage.INVALID_PARAMETER,
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                )
-            if product_title and not isinstance(product_title, str):
-                return handle_error(
-                    ErrorCode.INVALID_PARAMETER,
-                    ErrorMessage.INVALID_PARAMETER,
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                )
-
-            qs = self._base_scoped_queryset()
-
-            # 1) No unified query: legacy or plain listing
+            # Case 1: Empty query → dedupe + default sort
             if not q:
-                # Legacy filters (optional)
-                if product_code:
-                    norm_in = self._normalize_term(product_code)
-                    qs = qs.filter(norm_code__icontains=norm_in)
-                if product_title:
-                    qs = qs.filter(product_title__icontains=product_title)
-
-                # Finalize response
-                return self._finalize_and_respond(
-                    qs,
-                    request,
-                    ranked=False,
-                    product_code=product_code,
-                    product_title=product_title,
+                deduped = self._dedupe_by_norm_code_fast(base)
+                deduped = self.get_sorted_queryset(
+                    deduped.select_related("update_ref"), request
                 )
+                data, paginator = self.paginate_and_serialize(
+                    deduped,
+                    request,
+                    serializer_class=ProductSearchSerializer,
+                    is_search=True,
+                )
+                data = filter_live_languages(data)
+                return paginator.get_paginated_response(data)
 
-            # 2) Unified q= path
+            # Case 2: Search with query
             q_norm = self._normalize_term(q)
             looks_like_code = 1 if re.fullmatch(r"[A-Za-z0-9_-]+", q) else 0
 
-            qs = self._annotate_rank_signals(qs, q, q_norm, looks_like_code)
-            qs = qs.filter(
-                Q(product_code__icontains=q)
+            restricted = base.filter(
+                Q(product_code__icontains=q) | Q(product_title__icontains=q)
+            )
+            restricted = self._annotate_norm_code(restricted).filter(
+                Q(norm_code__icontains=q_norm)
+                | Q(product_code__icontains=q)
                 | Q(product_title__icontains=q)
-                | Q(norm_code__contains=q_norm)
             )
 
-            return self._finalize_and_respond(
-                qs,
+            updated_field = self._best_updated_field(restricted) or "id"
+            restricted = restricted.order_by(
+                F(updated_field).desc(nulls_last=True), "-id"
+            )[: self.PRE_RANK_LIMIT]
+
+            deduped = self._dedupe_by_norm_code_fast(restricted)
+            ranked = self._annotate_norm_code(deduped)
+            ranked = self._annotate_rank_signals(ranked, q, q_norm, looks_like_code)
+
+            sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
+            if sort_by:
+                ranked = ranked.order_by("-rank", sort_by, "-id")
+            else:
+                updated_desc = self._resolve_sort_field(ranked, "-updated_at") or "-id"
+                ranked = ranked.order_by("-rank", "product_title", updated_desc, "-id")
+
+            ranked = ranked.select_related("update_ref")
+
+            data, paginator = self.paginate_and_serialize(
+                ranked,
                 request,
-                ranked=True,
-                product_code=product_code,
-                product_title=product_title,
+                serializer_class=ProductSearchSerializer,
+                is_search=True,
             )
+            data = filter_live_languages(data)
+            return paginator.get_paginated_response(data)
 
-        except DatabaseError:
-            return handle_error(
-                ErrorCode.INTERNAL_SERVER_ERROR,
-                ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-        except TimeoutError:
-            return handle_error(
-                ErrorCode.INTERNAL_SERVER_ERROR,
-                ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            )
-        except ValidationError:
-            return handle_error(
-                ErrorCode.INVALID_PARAMETER,
-                ErrorMessage.INVALID_PARAMETER,
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
         except Exception:
-            logger.exception(INTERNAL_ERROR_MSG)
+            logger.exception("User search error")
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,
@@ -3592,118 +3783,45 @@ class BaseProductSearchView(APIView, ProductListMixin):
             )
 
 
+# --------------------------------------------------------------------------- #
+# Admin: Search endpoint                                                      #
+# --------------------------------------------------------------------------- #
 class ProductSearchAdminView(BaseProductSearchView):
+    """
+    Admin-only search view.
+    """
+
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get_default_query(self) -> Q:
         return Q()
 
-    def postprocess_response_data(self, response_data: dict, products) -> dict:
-        response_data["recommended_products"] = get_recommended_products(products)
-        return response_data
-
-
-class ProductSearchUserView(BaseProductSearchView):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
-
-    def get_default_query(self) -> Q:
-        return Q(is_latest=True, status="live")
-
-
-# --------------------------------------------------------------------------- #
-# Users: Search + Filter (DjangoFilter + SearchFilter)                        #
-# --------------------------------------------------------------------------- #
-
-
-class ProductUsersSearchFilterAPIView(generics.ListAPIView, ProductListMixin):
-    """
-    GET /api/v1/products/user/search/filter/
-      Supports:
-        - ?search= (SearchFilter on product_title, product_code_no_dashes)
-        - ProductFilter (your custom filterset)
-        - ?sort_by= (uniform custom sorting)
-    """
-
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
-    serializer_class = ProductSearchSerializer
-    pagination_class = CustomPagination
-
-    # Keep standard filter/search backends; we’ll still apply our custom sort_by
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_class = ProductFilter
-    search_fields = ["product_title", "product_code_no_dashes"]
-
-    # OrderingFilter fallback fields (if someone uses ?ordering=)
-    ordering_fields = list(
-        dict.fromkeys([*VALID_SORT_FIELDS, "norm_code", "-norm_code"])
-    )
-    ordering = ["product_title", "-updated_at"]
-
-    def get_queryset(self):
-        base = Product.objects.filter(status="live", is_latest=True)
-        base = self.clean_dedup_queryset(base)
-        return base
-
-    def list(self, request, *args, **kwargs):
-        """
-        Override to apply uniform ?sort_by= after filter_backends while
-        preserving search/filter behavior.
-        """
-        try:
-            # Apply filter_backends first (filterset + search + default ordering)
-            qs = self.filter_queryset(self.get_queryset())
-
-            # Then enforce our uniform ?sort_by= if provided/valid
-            sorted_qs = self.get_sorted_queryset(qs, request)
-
-            data, paginator = self.paginate_and_serialize(
-                sorted_qs, request, serializer_class=ProductSearchSerializer
-            )
-            data = filter_live_languages(data)
-            return paginator.get_paginated_response(data)
-
-        except Exception:
-            logger.exception(INTERNAL_ERROR_MSG)
-            return handle_error(
-                ErrorCode.INTERNAL_SERVER_ERROR,
-                ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
 
 # --------------------------------------------------------------------------- #
 # Users: Faceted Filter                                                       #
 # --------------------------------------------------------------------------- #
 class ProductUsersFilterView(ProductListMixin, APIView):
-    """
-    GET /api/v1/products/user/filter/
-      Faceted filters + uniform ?sort_by= support
-    """
-
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
+    include_request_context = True
+    pagination_class = CustomPagination
+    cache_timeout = getattr(settings, "CACHE_TTL_LIST", 30)
 
     def get(self, request, *args, **kwargs):
         try:
             base_q = Q(is_latest=True, status="live")
             filters = Q()
 
-            # Access type flags (mutually exclusive per your original logic)
-            dl = request.GET.get("download_only", "").lower()
-            do = request.GET.get("download_or_order", "").lower()
-            oo = request.GET.get("order_only", "").lower()
-            if dl == "true":
-                filters &= Q(tag="download_only")
-            elif do == "true":
-                filters &= Q(tag="download_and_order")
-            elif oo == "true":
-                filters &= Q(tag="order_only")
+            # Access type (normalize to hyphenated tags)
+            if request.GET.get("download_only", "").lower() == "true":
+                filters &= Q(tag="download-only")
+            elif request.GET.get("download_or_order", "").lower() == "true":
+                filters &= Q(tag="download-or-order")
+            elif request.GET.get("order_only", "").lower() == "true":
+                filters &= Q(tag="order-only")
 
-            # Facets
-            for param, lookup in [
+            mapping = [
                 ("audiences", "update_ref__audience_ref__name"),
                 ("diseases", "update_ref__diseases_ref__name"),
                 ("vaccinations", "update_ref__vaccination_ref__name"),
@@ -3713,32 +3831,27 @@ class ProductUsersFilterView(ProductListMixin, APIView):
                 ("alternative_type", "update_ref__alternative_type"),
                 ("product_type", "update_ref__product_type"),
                 ("languages", "language_name"),
-            ]:
+            ]
+            for param, lookup in mapping:
                 vals = request.GET.getlist(param)
                 if vals:
                     filters &= Q(**{f"{lookup}__in": vals})
 
-            if recent := request.GET.get("recently_updated"):
-                try:
-                    filters &= Q(updated_at__gte=recent)
-                except ValueError:
-                    return handle_error(
-                        ErrorCode.INVALID_PARAMETER,
-                        f"Invalid date for recently_updated: {recent}",
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                    )
+            qs = Product.objects.filter(base_q & filters)
+            qs = self._dedupe_by_norm_code_fast(qs)
+            qs = self.optimize_for_search(qs)
+            qs = self.get_sorted_queryset(qs, request)
 
-            queryset = Product.objects.filter(base_q & filters)
-            queryset = self.clean_dedup_queryset(queryset)
-
-            sorted_qs = self.get_sorted_queryset(queryset, request)
-
-            data, paginator = self.paginate_and_serialize(sorted_qs, request)
+            data, paginator = self.paginate_and_serialize(
+                qs,
+                request,
+                serializer_class=ProductSearchSerializer,
+                is_search=True,
+            )
             data = filter_live_languages(data)
             return paginator.get_paginated_response(data)
-
         except Exception:
-            logger.exception(INTERNAL_ERROR_MSG)
+            logger.exception("User filter error")
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,
@@ -3750,64 +3863,112 @@ class ProductUsersFilterView(ProductListMixin, APIView):
 # Admin: Faceted Filter                                                       #
 # --------------------------------------------------------------------------- #
 class ProductAdminFilterView(ProductListMixin, APIView):
-    """
-    GET /api/v1/products/admin/filter/
-      Faceted filters for admins + uniform ?sort_by=
-    """
-
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
-
-    def _build_filter_query(self, request):
-        mapping = {
-            "diseases": "update_ref__diseases_ref__name__in",
-            "vaccinations": "update_ref__vaccination_ref__name__in",
-            "audiences": "update_ref__audience_ref__name__in",
-            "where_to_use": "update_ref__where_to_use_ref__name__in",
-            "alternative_type": "update_ref__alternative_type__in",
-            "product_type": "update_ref__product_type__in",
-            "languages": "language_name__in",
-            "access_type": "tag__in",
-            "status": "status__in",
-            "program_names": "program_name__in",
-            "program_ids": "program_id__in",
-        }
-        q = Q()
-        for param, lookup in mapping.items():
-            vals = request.GET.getlist(param, [])
-            if vals:
-                q &= Q(**{lookup: vals})
-
-        # Placeholder to keep structure consistent if product_code is present;
-        # actual filtering applied on annotated norm_code below
-        if request.GET.getlist("product_code"):
-            q &= Q()
-
-        return q
+    pagination_class = AdminPagination
+    include_request_context = True
+    cache_timeout = 0  # always fresh
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            base_q = self._build_filter_query(request)
-            qs = Product.objects.filter(base_q)
+            mapping = {
+                "diseases": "update_ref__diseases_ref__name__in",
+                "vaccinations": "update_ref__vaccination_ref__name__in",
+                "audiences": "update_ref__audience_ref__name__in",
+                "where_to_use": "update_ref__where_to_use_ref__name__in",
+                "alternative_type": "update_ref__alternative_type__in",
+                "product_type": "update_ref__product_type__in",
+                "languages": "language_name__in",
+                "access_type": "tag__in",
+                "status": "status__in",
+                "program_names": "program_name__in",
+                "program_ids": "program_id__in",
+            }
+            q = Q()
+            for param, lookup in mapping.items():
+                vals = request.GET.getlist(param, [])
+                if vals:
+                    q &= Q(**{lookup: vals})
 
-            # Apply code filters on annotated norm_code if provided
-            codes = request.GET.getlist("product_code")
-            qs = self._annotate_norm_code(qs)
-            if codes:
-                code_filters = Q()
-                for c in codes:
-                    normalized = normalize_product_code(c)
-                    code_filters |= Q(norm_code__icontains=normalized)
-                qs = qs.filter(code_filters)
-
-            qs = self._exclude_edge_spaces(qs)
-            qs = self._dedupe_by_norm_code(qs)
+            # 🚀 Lighter query: no dedupe, but with select_related
+            qs = Product.objects.filter(q).select_related(
+                "program_id", "language_id", "update_ref"
+            )
 
             sorted_qs = self.get_sorted_queryset(qs, request)
-            data, paginator = self.paginate_and_serialize(sorted_qs, request)
+
+            data, paginator = self.paginate_and_serialize(
+                sorted_qs,
+                request,
+                serializer_class=ProductSerializer,
+                is_search=False,  # no presigning for admin
+            )
             return paginator.get_paginated_response(data)
+
         except Exception:
-            logger.exception(INTERNAL_ERROR_MSG)
+            logger.exception("Admin filter error")
+            return handle_error(
+                ErrorCode.INTERNAL_SERVER_ERROR,
+                ErrorMessage.INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Users: Search + Filter (DjangoFilter + SearchFilter)                        #
+# --------------------------------------------------------------------------- #
+
+
+class ProductUsersSearchFilterAPIView(generics.ListAPIView, ProductListMixin):
+    """
+    GET /api/v1/products/user/search/filter/
+      Supports:
+        - ?search= (search in product_title, product_code_no_dashes)
+        - Faceted filters via ProductFilter
+        - ?sort_by= (uniform custom sorting)
+      Always presigns images/downloads for user-facing results.
+    """
+
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+    serializer_class = ProductSearchSerializer
+    pagination_class = CustomPagination
+
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_class = ProductFilter
+    search_fields = ["product_title", "product_code_no_dashes"]
+
+    ordering_fields = list(
+        dict.fromkeys([*VALID_SORT_FIELDS, "norm_code", "-norm_code"])
+    )
+    ordering = ["product_title", "-updated_at"]
+
+    def get_queryset(self):
+        base = Product.objects.filter(status="live", is_latest=True)
+        base = self._annotate_norm_code(base)
+        base = self._exclude_edge_spaces(base)
+        base = self._dedupe_by_norm_code(base)
+        return self.optimize_for_search(base)
+
+    def _dedupe_by_norm_code(self, qs):
+        return self._dedupe_by_norm_code_fast(qs)
+
+    def list(self, request, *args, **kwargs):
+        try:
+            qs = self.filter_queryset(self.get_queryset())
+            qs = self.get_sorted_queryset(qs, request)
+
+            data, paginator = self.paginate_and_serialize(
+                qs,
+                request,
+                serializer_class=ProductSearchSerializer,
+                is_search=True,  #  ensures presign for user-facing
+            )
+            data = filter_live_languages(data)
+            return paginator.get_paginated_response(data)
+
+        except Exception:
+            logger.exception("User search+filter error")
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,
@@ -3834,7 +3995,11 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
     cache_timeout = settings.CACHE_TTL_LIST
 
     def get_cache_key(self, request, program_id):
-        user_id = request.user.id if request.user.is_authenticated else "anon"
+        user_id = (
+            request.user.id
+            if getattr(request, "user", None) and request.user.is_authenticated
+            else "anon"
+        )
         return f"prog_products:{program_id}:user:{user_id}:{request.get_full_path()}"
 
     def _build_facets(self, request) -> Q:
@@ -3881,8 +4046,11 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
             qs = qs.filter(facet_q)
 
         # Normalize + dedupe
-        qs = self.clean_dedup_queryset(qs)
+        qs = self._dedupe_by_norm_code(qs)
         return qs
+
+    def _dedupe_by_norm_code(self, qs):
+        return self._dedupe_by_norm_code_fast(qs)
 
     def list(self, request, *args, **kwargs):
         cache_key = self.get_cache_key(request, kwargs["program_id"])
@@ -3941,7 +4109,13 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
         return Response(payload, status=status.HTTP_200_OK)
 
 
-class IncompleteProductsView(View):
+# --------------------------------------------------------------------------- #
+# Misc: Incomplete drafts warning                                             #
+# --------------------------------------------------------------------------- #
+class IncompleteProductsView(APIView):
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
     def get(self, request, *args, **kwargs):
         current = timezone.now().date()
         ahead = current + timedelta(days=7)
@@ -3966,3 +4140,6 @@ class IncompleteProductsView(View):
                 )
 
         return JsonResponse(incomplete, safe=False)
+
+
+#

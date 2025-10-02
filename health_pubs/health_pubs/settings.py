@@ -1,12 +1,13 @@
 import sys
 from pathlib import Path
 from datetime import timedelta
+import os
+from urllib.parse import urlparse
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 from configs.get_secret_config import Config
-
 from corsheaders.defaults import default_headers
 
 
@@ -28,30 +29,29 @@ AWS_BUCKET_NAME = config.get_hpub_s3_bucket_name()
 ACCESS_TOKEN_LIFETIME = timedelta(minutes=30)
 REFRESH_TOKEN_LIFETIME = timedelta(days=1)
 REFRESH_TOKEN_MAX_AGE = 86400
-# Quick-start development settings - unsuitable for production
+MAX_FEATURED_PROGRAMMES = 6
+
+PRODUCTS_PAGE_SIZE = 10
+USERS_LIST_PAGE_SIZE = 10
+ADDRESSES_LIST_PAGE_SIZE = 10
+ADMIN_PRODUCTS_PAGE_SIZE = 50
 
 SECRET_KEY = DJANGO_SECRET
-
 PUBLIC_KEY = public_key
 PRIVATE_KEY = private_key
-
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config.get_django_debug_value()
 ALLOWED_HOSTS = config.get_django_allowed_hosts()
-
 CORS_ALLOWED_ORIGINS = config.get_cors_allowed_origins()
-
 CORS_ALLOW_CREDENTIALS = True
-
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
     "x-session-id",
+    "idempotency-key",
 ]
 
-
 CSRF_TRUSTED_ORIGINS = config.get_csrf_trusted_origins()
-
 
 SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG
@@ -61,21 +61,54 @@ SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_HSTS_SECONDS = 31536000 if not DEBUG else 0
 SECURE_HSTS_INCLUDE_SUBDOMAINS = not DEBUG
 SECURE_HSTS_PRELOAD = not DEBUG
-# Trust the original host header forwarded by ALB
 USE_X_FORWARDED_HOST = True
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
+# ---------------- Cache TTLs ----------------
+CACHE_TTL = int(os.getenv("CACHE_TTL", 60))
+CACHE_TTL_DETAIL = int(os.getenv("CACHE_TTL_DETAIL", 3 if DEBUG else 60))
+CACHE_TTL_LIST = int(os.getenv("CACHE_TTL_LIST", 30))
 
-if DEBUG:
-    CACHE_TTL = 0  # effectively disables caching
-else:
-    CACHE_TTL = 60 * 5  # 5 minutes in prod
+# ---------------- Presign ----------------
+PRESIGNED_URL_TTL = int(os.getenv("PRESIGNED_URL_TTL", 60 * 60))  # 1 hour
+PRESIGN_IN_LISTS = os.getenv("PRESIGN_IN_LISTS", "true").lower() == "true"
 
+# ---------------- File metadata ----------------
+FILE_METADATA_ENABLED = os.getenv("FILE_METADATA_ENABLED", "true").lower() == "true"
+FILE_METADATA_DEEP_PROBE_DOCS = (
+    os.getenv("FILE_METADATA_DEEP_PROBE_DOCS", "true").lower() == "true"
+)
+MAX_METADATA_BYTES = int(os.getenv("MAX_METADATA_BYTES", 2 * 1024 * 1024))  # 2 MB
+FILE_METADATA_TIME_BUDGET_MS = int(os.getenv("FILE_METADATA_TIME_BUDGET_MS", 300))
+FILE_METADATA_SLOTS = [
+    s.strip()
+    for s in os.getenv("FILE_METADATA_SLOTS", "main_download_url").split(",")
+    if s.strip()
+]
+FILE_METADATA_CACHE_TTL = int(os.getenv("FILE_METADATA_CACHE_TTL", 6 * 60 * 60))  # 6h
 
-PRESIGNED_URL_TTL = 60 * 60  # 1 hour
+# ---------------- A/V probing ----------------
+FFPROBE_TIMEOUT_SECS = int(os.getenv("FFPROBE_TIMEOUT_SECS", 3))
 
-# Application definition
+# ---------------- Document types ----------------
+DOC_FILE_TYPES = [
+    "pdf",
+    "pptx",
+    "txt",
+    "docx",
+    "doc",
+    "odt",
+    "ppt",
+    "xlsx",
+]
+DOC_DEEP_PROBE_EXTS = ["pdf", "pptx", "docx", "doc", "odt", "ppt", "xlsx"]
+DOCX_INCLUDE_PAGECOUNT = True
+DOC_PAGECOUNT_VIA_LIBREOFFICE = True
+LIBREOFFICE_BIN = "soffice"
+LIBREOFFICE_TIMEOUT_SECS = 30
+STRICT_DOC_PAGE_META = True
 
+# ================= Apps =================
 INSTALLED_APPS = [
     "django_crontab",
     "django.contrib.sites",
@@ -93,7 +126,6 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    "django.utils.http",
     "wagtail.contrib.settings",
     "wagtail.contrib",
     "wagtail",
@@ -124,12 +156,9 @@ INSTALLED_APPS = [
     "rest_framework",
     "taggit",
     "core",
-    "pandas",
-    "segno",
-    "boto3",
 ]
 
-
+# ================= Middleware =================
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "corsheaders.middleware.CorsMiddleware",
@@ -138,34 +167,30 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "django.middleware.common.CommonMiddleware",
     "allauth.account.middleware.AccountMiddleware",
 ]
 
-
+# ================= REST Framework =================
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "core.utils.custom_token_authentication.CustomTokenAuthentication",
-        # "rest_framework.authentication.SessionAuthentication",
     ],
-    # "DEFAULT_AUTHENTICATION_CLASSES": [
-    #     "core.utils.custom_token_authentication.CustomTokenAuthentication",
-    # ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
 }
 
+# ================= Cron =================
 CRONJOBS = [
-    ("0 7 * * *", "core.products.cron.CheckDraftProductsCronJob.do"),  # 07:00 daily
-    (
-        "0 0 * * *",
-        "core.products.cron.PublishScheduledProductsCronJob.do",
-    ),  # 00:00 daily
+    ("0 7 * * *", "core.products.cron.CheckDraftProductsCronJob.do"),
+    ("0 0 * * *", "core.products.cron.PublishScheduledProductsCronJob.do"),
 ]
 
+# ================= URLs & WSGI =================
 ROOT_URLCONF = "health_pubs.urls"
+WSGI_APPLICATION = "health_pubs.wsgi.application"
 
+# ================= Templates =================
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
@@ -182,13 +207,7 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = "health_pubs.wsgi.application"
-
-
-# Database
-# https://docs.djangoproject.com/en/5.0/ref/settings/#databases
-
-
+# ================= Database =================
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
@@ -197,12 +216,30 @@ DATABASES = {
         "PASSWORD": DB_PASSWORD,
         "HOST": DB_HOST,
         "PORT": DB_PORT,
+        **({"OPTIONS": {"sslmode": "require"}} if not DEBUG else {}),
     }
 }
 
+AWS_EXPECTED_BUCKET_OWNER = config.get_aws_expected_bucket_owner()
+
+# ================= Cache =================
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "unique-%s-cache" % ("dev" if DEBUG else "prod"),
+    }
+}
+
+# ================= Warning Suppression (Dev Only) =================
+if DEBUG:
+    import warnings
+    from django.core.cache.backends.base import CacheKeyWarning
+
+    warnings.filterwarnings("ignore", category=CacheKeyWarning)
+
 
 #  NOTE: This will be used once I have the AWS Config for the setup
-# Cache Configuration
+# Cache Configuration with Redis
 # CACHES = {
 #     "default": {
 #         "BACKEND": "django_redis.cache.RedisCache",
@@ -214,73 +251,54 @@ DATABASES = {
 # }
 
 
-# Password validation
-
+# ================= Auth =================
 AUTH_PASSWORD_VALIDATORS = [
     {
-        "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
+        "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"
     },
-    {
-        "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
-    },
-    {
-        "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
-    },
-    {
-        "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator",
-    },
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
-
-
-# Internationalization
-
-LANGUAGE_CODE = "en-us"
-
-TIME_ZONE = "UTC"
-
-USE_I18N = True
-
-USE_TZ = True
-
-
-STATIC_URL = "/static/"
-STATIC_ROOT = "/app/static/"
-
-MEDIA_URL = "/media/"
-MEDIA_ROOT = "/app/media/"
-
-
-# Default primary key field type
-# https://docs.djangoproject.com/en/5.0/ref/settings/#default-auto-field
-
-DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
-
-WAGTAIL_SITE_NAME = "HPub Backend Service"
-
-if DEBUG:
-    WAGTAILADMIN_BASE_URL = HPUB_FRONT_END_URL
-else:
-    # Assuming HPUB_FRONT_END_URL is the base URL for your production environment
-    # and it should be HTTPS in production.
-    WAGTAILADMIN_BASE_URL = HPUB_FRONT_END_URL.replace("http://", "https://")  # NOSONAR
-
 
 AUTHENTICATION_BACKENDS = (
     "django.contrib.auth.backends.ModelBackend",
     "allauth.account.auth_backends.AuthenticationBackend",
 )
 
-
 SITE_ID = 1
 LOGIN_REDIRECT_URL = "/"
 LOGOUT_REDIRECT_URL = "/user/logout/"
-
-
-# Ensure that the default account adapter works well with Azure B2C
 ACCOUNT_ADAPTER = "allauth.account.adapter.DefaultAccountAdapter"
 SOCIALACCOUNT_ADAPTER = "allauth.socialaccount.adapter.DefaultSocialAccountAdapter"
 
+# ================= Internationalization =================
+LANGUAGE_CODE = "en-us"
+TIME_ZONE = "UTC"
+USE_I18N = True
+USE_TZ = True
 
+# ================= Static & Media =================
+STATIC_URL = "/static/"
+MEDIA_URL = "/media/"
+STATIC_ROOT = "/app/static/"
+MEDIA_ROOT = "/app/media/"
+
+# ================= Wagtail =================
+WAGTAIL_SITE_NAME = "Hpub Backend Service"
+
+
+if not DEBUG:
+    parsed = urlparse(HPUB_FRONT_END_URL)
+    if parsed.scheme != "https":
+        raise ValueError(
+            f"Insecure HPUB_FRONT_END_URL configured: {HPUB_FRONT_END_URL}. "
+            "Use HTTPS in non-DEBUG environments."
+        )
+
+WAGTAILADMIN_BASE_URL = HPUB_FRONT_END_URL
+
+# ================= Logging =================
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,

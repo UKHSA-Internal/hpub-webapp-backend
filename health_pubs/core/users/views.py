@@ -623,7 +623,7 @@ class TokenRefresh(APIView):
     permission_classes = []
 
     def post(self, request):
-        logger.info("Request COOKIE header: %s", request.META.get("HTTP_COOKIE"))
+        # logger.info("Request COOKIE header: %s", request.META.get("HTTP_COOKIE")) # for debugging
         # Extract token from header if available; otherwise use cookie.
         auth_header = request.headers.get("Authorization", "")
         if auth_header and " " in auth_header:
@@ -878,7 +878,11 @@ class UserDetailView(GenericAPIView):
 
 
 class CustomPagination(PageNumberPagination):
-    page_size = 10  # Set pagination to 10 items per page
+    from django.conf import settings
+
+    page_size = getattr(
+        settings, "USERS_LIST_PAGE_SIZE", 10
+    )  # Set pagination to 10 items per page
 
     def get_paginated_response(self, data, status_code=200):
         response = Response(

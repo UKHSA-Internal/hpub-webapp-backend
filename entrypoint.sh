@@ -15,6 +15,19 @@ echo "Wagtail version: $wagtail_version"
 echo "=============================="
 
 # -----------------------------------------------------------------------------
+# Step 0.5: Check LibreOffice availability (startup sanity check)
+# -----------------------------------------------------------------------------
+echo "=============================="
+echo "Checking LibreOffice (soffice) availability..."
+if /usr/local/bin/lo_healthcheck.sh; then
+  echo "LibreOffice check passed at startup."
+else
+  echo "LibreOffice check failed. Exiting."
+  exit 1
+fi
+echo "=============================="
+
+# -----------------------------------------------------------------------------
 # Step 1: Check for migration files under "core" (or sub‐apps) and generate if empty
 # -----------------------------------------------------------------------------
 echo "=============================="
@@ -55,6 +68,20 @@ migrations_output=$(python manage.py showmigrations --verbosity=2 --no-color 2>&
   exit 1
 }
 echo "$migrations_output"
+
+
+# # -----------------------------------------------------------------------------
+# # Step 3a: Ensure django_migrations table exists
+# # -----------------------------------------------------------------------------
+# echo "Checking if 'django_migrations' table exists…"
+# table_check=$(psql -U "$DB_USER" -d "$DB_NAME" -tAc \
+#   "SELECT to_regclass('public.django_migrations');")
+
+# if [ "$table_check" = "" ] || [ "$table_check" = "NULL" ]; then
+#   echo "'django_migrations' table missing — forcing initial migrate."
+#   python manage.py migrate --verbosity=2
+# fi
+
 
 # -----------------------------------------------------------------------------
 # Step 3: Count pending migrations

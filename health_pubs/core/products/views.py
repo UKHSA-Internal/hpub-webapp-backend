@@ -3551,6 +3551,23 @@ class ProductListMixin:
 # --------------------------------------------------------------------------- #
 # Admin: List                                                                 #
 # --------------------------------------------------------------------------- #
+
+
+# ProductAdmin list and filter mapping
+productAdminListMapping = {
+    "diseases": "update_ref__diseases_ref__name__in",
+    "vaccinations": "update_ref__vaccination_ref__name__in",
+    "audiences": "update_ref__audience_ref__name__in",
+    "where_to_use": "update_ref__where_to_use_ref__name__in",
+    "alternative_type": "update_ref__alternative_type__in",
+    "product_type": "update_ref__product_type__in",
+    "languages": "language_name__in",
+    "access_type": "tag__in",
+    "status": "status__in",
+    "program_names": "program_name__in",
+    "program_ids": "program_id__in",
+}
+
 class ProductAdminListView(ProductListMixin, APIView):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
@@ -3561,22 +3578,8 @@ class ProductAdminListView(ProductListMixin, APIView):
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            mapping = {
-                "diseases": "update_ref__diseases_ref__name__in",
-                "vaccinations": "update_ref__vaccination_ref__name__in",
-                "audiences": "update_ref__audience_ref__name__in",
-                "where_to_use": "update_ref__where_to_use_ref__name__in",
-                "alternative_type": "update_ref__alternative_type__in",
-                "product_type": "update_ref__product_type__in",
-                "languages": "language_name__in",
-                "access_type": "tag__in",
-                "status": "status__in",
-                "program_names": "program_name__in",
-                "program_ids": "program_id__in",
-            }
-
             q = Q()
-            for param, lookup in mapping.items():
+            for param, lookup in productAdminListMapping.items():
                 vals = request.GET.getlist(param, [])
                 if vals:
                     q &= Q(**{lookup: vals})
@@ -3917,22 +3920,8 @@ class ProductAdminFilterView(ProductListMixin, APIView):
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            mapping = {
-                "diseases": "update_ref__diseases_ref__name__in",
-                "vaccinations": "update_ref__vaccination_ref__name__in",
-                "audiences": "update_ref__audience_ref__name__in",
-                "where_to_use": "update_ref__where_to_use_ref__name__in",
-                "alternative_type": "update_ref__alternative_type__in",
-                "product_type": "update_ref__product_type__in",
-                "languages": "language_name__in",
-                "access_type": "tag__in",
-                "status": "status__in",
-                "program_names": "program_name__in",
-                "program_ids": "program_id__in",
-            }
-
             q = Q()
-            for param, lookup in mapping.items():
+            for param, lookup in productAdminListMapping.items():
                 vals = request.GET.getlist(param, [])
                 if vals:
                     q &= Q(**{lookup: vals})

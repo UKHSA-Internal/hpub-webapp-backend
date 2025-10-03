@@ -564,6 +564,54 @@ def invalidate_product_caches(product_code: str | None = None):
         pass
 
 
+# --------------------------------------------------------------------------- #
+# Function: build_admin_queryset                                               #
+# --------------------------------------------------------------------------- #
+def build_admin_queryset(request, *, apply_filters: bool = False):
+    """
+    Build queryset for admin list/filter views.
+    - If apply_filters=True → apply faceted filters + product_code filters
+    - Else → just return all products (deduped and sorted)
+    """
+    mapping = {
+        "diseases": "update_ref__diseases_ref__name__in",
+        "vaccinations": "update_ref__vaccination_ref__name__in",
+        "audiences": "update_ref__audience_ref__name__in",
+        "where_to_use": "update_ref__where_to_use_ref__name__in",
+        "alternative_type": "update_ref__alternative_type__in",
+        "product_type": "update_ref__product_type__in",
+        "languages": "language_name__in",
+        "access_type": "tag__in",
+        "status": "status__in",
+        "program_names": "program_name__in",
+        "program_ids": "program_id__in",
+    }
+
+    q = Q()
+    if apply_filters:
+        for param, lookup in mapping.items():
+            vals = request.GET.getlist(param, [])
+            if vals:
+                q &= Q(**{lookup: vals})
+
+        #  product_code filters
+        codes = request.GET.getlist("product_code")
+        if codes:
+            code_q = Q()
+            for c in codes:
+                normed = re.sub(r"[-_\s]+", "", c).upper().strip()
+                code_q |= Q(product_code__icontains=c) | Q(
+                    product_code_no_dashes__icontains=normed
+                )
+            q &= code_q
+
+    qs = Product.objects.filter(q).select_related(
+        "program_id", "language_id", "update_ref"
+    )
+
+    return qs
+
+
 class CustomPagination(PageNumberPagination):
     page_size = getattr(
         settings, "PRODUCTS_PAGE_SIZE", 10
@@ -3561,59 +3609,17 @@ class ProductAdminListView(ProductListMixin, APIView):
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            mapping = {
-                "diseases": "update_ref__diseases_ref__name__in",
-                "vaccinations": "update_ref__vaccination_ref__name__in",
-                "audiences": "update_ref__audience_ref__name__in",
-                "where_to_use": "update_ref__where_to_use_ref__name__in",
-                "alternative_type": "update_ref__alternative_type__in",
-                "product_type": "update_ref__product_type__in",
-                "languages": "language_name__in",
-                "access_type": "tag__in",
-                "status": "status__in",
-                "program_names": "program_name__in",
-                "program_ids": "program_id__in",
-            }
-
-            q = Q()
-            for param, lookup in mapping.items():
-                vals = request.GET.getlist(param, [])
-                if vals:
-                    q &= Q(**{lookup: vals})
-
-            # Explicit product_code filter
-            product_codes = request.GET.getlist("product_code", [])
-            if product_codes:
-                # normalize like in ProductListMixin
-                normed = [
-                    pc.strip()
-                    .replace("-", "")
-                    .replace("_", "")
-                    .replace(" ", "")
-                    .upper()
-                    for pc in product_codes
-                ]
-                q &= Q(norm_code__in=normed)
-
-            qs = Product.objects.filter(q).select_related(
-                "program_id", "language_id", "update_ref"
-            )
-
-            # annotate norm fields so norm_code filter works
+            qs = build_admin_queryset(request, apply_filters=False)
             qs = self._annotate_norm_code(qs)
-
-            sorted_qs = self.get_sorted_queryset(qs, request)
+            deduped = self._dedupe_by_norm_code_fast(qs)
+            sorted_qs = self.get_sorted_queryset(deduped, request)
 
             data, paginator = self.paginate_and_serialize(
-                sorted_qs,
-                request,
-                serializer_class=ProductSerializer,
-                is_search=False,  # no presigning for admin
+                sorted_qs, request, serializer_class=ProductSerializer, is_search=False
             )
             return paginator.get_paginated_response(data)
-
         except Exception:
-            logger.exception("Admin filter error")
+            logger.exception("Admin list error")
             return handle_error(
                 ErrorCode.INTERNAL_SERVER_ERROR,
                 ErrorMessage.INTERNAL_SERVER_ERROR,
@@ -3913,58 +3919,20 @@ class ProductAdminFilterView(ProductListMixin, APIView):
     permission_classes = [IsAuthenticated, IsAdminUser]
     pagination_class = AdminPagination
     include_request_context = True
-    cache_timeout = 0  # always fresh
+    cache_timeout = 0
+    presign_in_lists = False
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            mapping = {
-                "diseases": "update_ref__diseases_ref__name__in",
-                "vaccinations": "update_ref__vaccination_ref__name__in",
-                "audiences": "update_ref__audience_ref__name__in",
-                "where_to_use": "update_ref__where_to_use_ref__name__in",
-                "alternative_type": "update_ref__alternative_type__in",
-                "product_type": "update_ref__product_type__in",
-                "languages": "language_name__in",
-                "access_type": "tag__in",
-                "status": "status__in",
-                "program_names": "program_name__in",
-                "program_ids": "program_id__in",
-            }
-
-            q = Q()
-            for param, lookup in mapping.items():
-                vals = request.GET.getlist(param, [])
-                if vals:
-                    q &= Q(**{lookup: vals})
-
-            # ✅ Handle product_code filtering (full or partial, multiple values allowed)
-            codes = request.GET.getlist("product_code")
-            if codes:
-                code_q = Q()
-                for c in codes:
-                    normed = re.sub(r"[-_\s]+", "", c).upper().strip()
-                    code_q |= Q(product_code__icontains=c) | Q(
-                        product_code_no_dashes__icontains=normed
-                    )
-                q &= code_q
-
-            qs = Product.objects.filter(q).select_related(
-                "program_id", "language_id", "update_ref"
-            )
-
-            # still annotate trim field for consistency with sorting/deduping
+            qs = build_admin_queryset(request, apply_filters=True)
             qs = self._annotate_norm_code(qs)
-
-            sorted_qs = self.get_sorted_queryset(qs, request)
+            deduped = self._dedupe_by_norm_code_fast(qs)
+            sorted_qs = self.get_sorted_queryset(deduped, request)
 
             data, paginator = self.paginate_and_serialize(
-                sorted_qs,
-                request,
-                serializer_class=ProductSerializer,
-                is_search=False,  # no presigning for admin
+                sorted_qs, request, serializer_class=ProductSerializer, is_search=False
             )
             return paginator.get_paginated_response(data)
-
         except Exception:
             logger.exception("Admin filter error")
             return handle_error(

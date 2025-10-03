@@ -3319,19 +3319,20 @@ class ProductListMixin:
 
     @staticmethod
     def _with_norm_fields(qs):
+        norm_expr = Upper(
+            Replace(
+                Replace(
+                    Replace(Trim(F("product_code")), Value("-"), Value("")),
+                    Value("_"),
+                    Value(""),
+                ),
+                Value(" "),
+                Value(""),
+            )
+        )
         return qs.annotate(
             code_trim=Trim(F("product_code")),
-            norm_code=Upper(
-                Replace(
-                    Replace(
-                        Replace(Trim(F("product_code")), Value("-"), Value("")),
-                        Value("_"),
-                        Value(""),
-                    ),
-                    Value(" "),
-                    Value(""),
-                )
-            ),
+            norm_code=norm_expr,
         )
 
     def _annotate_norm_code(self, qs):
@@ -3929,16 +3930,30 @@ class ProductAdminFilterView(ProductListMixin, APIView):
                 "program_names": "program_name__in",
                 "program_ids": "program_id__in",
             }
+
             q = Q()
             for param, lookup in mapping.items():
                 vals = request.GET.getlist(param, [])
                 if vals:
                     q &= Q(**{lookup: vals})
 
-            # 🚀 Lighter query: no dedupe, but with select_related
+            # ✅ Handle product_code filtering (full or partial, multiple values allowed)
+            codes = request.GET.getlist("product_code")
+            if codes:
+                code_q = Q()
+                for c in codes:
+                    normed = re.sub(r"[-_\s]+", "", c).upper().strip()
+                    code_q |= Q(product_code__icontains=c) | Q(
+                        product_code_no_dashes__icontains=normed
+                    )
+                q &= code_q
+
             qs = Product.objects.filter(q).select_related(
                 "program_id", "language_id", "update_ref"
             )
+
+            # still annotate trim field for consistency with sorting/deduping
+            qs = self._annotate_norm_code(qs)
 
             sorted_qs = self.get_sorted_queryset(qs, request)
 

@@ -3558,21 +3558,66 @@ class ProductAdminListView(ProductListMixin, APIView):
     pagination_class = AdminPagination
     presign_in_lists = False
 
-    def get(self, request, *args, **kwargs):
+    def get(self, request, *args, **kwargs) -> Response:
         try:
-            base = Product.objects.all().select_related("program_id", "language_id")
-            if not base.exists():
-                return handle_error(
-                    ErrorCode.PRODUCT_NOT_FOUND,
-                    ErrorMessage.PRODUCT_NOT_FOUND,
-                    status_code=status.HTTP_404_NOT_FOUND,
-                )
-            sorted_qs = self.get_sorted_queryset(base, request)
-            data, paginator = self.paginate_and_serialize(sorted_qs, request)
+            mapping = {
+                "diseases": "update_ref__diseases_ref__name__in",
+                "vaccinations": "update_ref__vaccination_ref__name__in",
+                "audiences": "update_ref__audience_ref__name__in",
+                "where_to_use": "update_ref__where_to_use_ref__name__in",
+                "alternative_type": "update_ref__alternative_type__in",
+                "product_type": "update_ref__product_type__in",
+                "languages": "language_name__in",
+                "access_type": "tag__in",
+                "status": "status__in",
+                "program_names": "program_name__in",
+                "program_ids": "program_id__in",
+            }
+
+            q = Q()
+            for param, lookup in mapping.items():
+                vals = request.GET.getlist(param, [])
+                if vals:
+                    q &= Q(**{lookup: vals})
+
+            # Explicit product_code filter
+            product_codes = request.GET.getlist("product_code", [])
+            if product_codes:
+                # normalize like in ProductListMixin
+                normed = [
+                    pc.strip()
+                    .replace("-", "")
+                    .replace("_", "")
+                    .replace(" ", "")
+                    .upper()
+                    for pc in product_codes
+                ]
+                q &= Q(norm_code__in=normed)
+
+            qs = Product.objects.filter(q).select_related(
+                "program_id", "language_id", "update_ref"
+            )
+
+            # annotate norm fields so norm_code filter works
+            qs = self._annotate_norm_code(qs)
+
+            sorted_qs = self.get_sorted_queryset(qs, request)
+
+            data, paginator = self.paginate_and_serialize(
+                sorted_qs,
+                request,
+                serializer_class=ProductSerializer,
+                is_search=False,  # no presigning for admin
+            )
             return paginator.get_paginated_response(data)
-        except Exception as e:
-            logger.exception("Admin list error: %s", e)
-            return handle_exceptions(e)
+
+        except Exception:
+            logger.exception("Admin filter error")
+            return handle_error(
+                ErrorCode.INTERNAL_SERVER_ERROR,
+                ErrorMessage.INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 # --------------------------------------------------------------------------- #

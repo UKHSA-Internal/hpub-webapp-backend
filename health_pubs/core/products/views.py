@@ -188,6 +188,7 @@ PRODUCT_ADMIN_MAPPING = {
     "program_ids": "program_id__in",
 }
 
+
 def normalize_tag(raw: str) -> str:
     if not raw:
         return ""

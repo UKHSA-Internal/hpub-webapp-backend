@@ -23,11 +23,13 @@ from django.db.models import (
     Subquery,
     Case,
     When,
+    Window,
 )
 from django.db.models.functions import (
     Upper,
     Trim,
     Replace,
+    RowNumber,
 )
 
 import pandas as pd
@@ -169,6 +171,27 @@ CACHE_TTL = getattr(settings, "CACHE_TTL")
 PRODUCT_CODE_NORMALIZE_RE = re.compile(r"[-_\s]+")
 
 CANONICAL_TAGS = {"download-only", "download-or-order", "order-only"}
+
+
+def dedupe_by_code_distinct_on(qs):
+    """
+    Keep the newest row per product_code_no_dashes using ROW_NUMBER().
+    Works with arbitrary subsequent ordering and pagination/count.
+    """
+    # pick best updated field available on your model
+    updated = (
+        "updated_at" if "updated_at" in [f.name for f in Product._meta.fields] else "id"
+    )
+
+    qs = qs.annotate(
+        _rn=Window(
+            expression=RowNumber(),
+            partition_by=[F("product_code_no_dashes")],
+            order_by=[F(updated).desc(nulls_last=True), F("id").desc()],
+        )
+    ).filter(_rn=1)
+
+    return qs
 
 
 def normalize_tag(raw: str) -> str:
@@ -3609,13 +3632,34 @@ class ProductAdminListView(ProductListMixin, APIView):
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            qs = build_admin_queryset(request, apply_filters=False)
-            qs = self._annotate_norm_code(qs)
-            deduped = self._dedupe_by_norm_code_fast(qs)
-            sorted_qs = self.get_sorted_queryset(deduped, request)
+            qs = (
+                build_admin_queryset(request, apply_filters=False)
+                .only(
+                    "id",
+                    "product_code",
+                    "product_code_no_dashes",
+                    "product_title",
+                    "program_name",
+                    "status",
+                    "updated_at",
+                    "created_at",
+                    "version_number",
+                    "language_name",
+                    "program_id_id",
+                    "language_id_id",
+                    "update_ref_id",
+                )
+                .select_related("program_id", "language_id")
+            )  # drop update_ref if serializer doesn't need it
+
+            # ⚡ Fast dedupe using DISTINCT ON
+            qs = dedupe_by_code_distinct_on(qs)
+
+            # Sort after dedupe
+            qs = self.get_sorted_queryset(qs, request)
 
             data, paginator = self.paginate_and_serialize(
-                sorted_qs, request, serializer_class=ProductSerializer, is_search=False
+                qs, request, serializer_class=ProductSerializer, is_search=False
             )
             return paginator.get_paginated_response(data)
         except Exception:
@@ -3924,13 +3968,33 @@ class ProductAdminFilterView(ProductListMixin, APIView):
 
     def get(self, request, *args, **kwargs) -> Response:
         try:
-            qs = build_admin_queryset(request, apply_filters=True)
-            qs = self._annotate_norm_code(qs)
-            deduped = self._dedupe_by_norm_code_fast(qs)
-            sorted_qs = self.get_sorted_queryset(deduped, request)
+            qs = (
+                build_admin_queryset(request, apply_filters=True)
+                .only(
+                    "id",
+                    "product_code",
+                    "product_code_no_dashes",
+                    "product_title",
+                    "program_name",
+                    "status",
+                    "updated_at",
+                    "created_at",
+                    "version_number",
+                    "language_name",
+                    "program_id_id",
+                    "language_id_id",
+                    "update_ref_id",
+                )
+                .select_related("program_id", "language_id")
+            )
+
+            # ⚡ Fast dedupe using DISTINCT ON
+            qs = dedupe_by_code_distinct_on(qs)
+
+            qs = self.get_sorted_queryset(qs, request)
 
             data, paginator = self.paginate_and_serialize(
-                sorted_qs, request, serializer_class=ProductSerializer, is_search=False
+                qs, request, serializer_class=ProductSerializer, is_search=False
             )
             return paginator.get_paginated_response(data)
         except Exception:

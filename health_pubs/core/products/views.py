@@ -567,10 +567,12 @@ def invalidate_product_caches(product_code: str | None = None):
 # --------------------------------------------------------------------------- #
 # Function: build_admin_queryset                                               #
 # --------------------------------------------------------------------------- #
+
+
 def build_admin_queryset(request, *, apply_filters: bool = False):
     """
     Build queryset for admin list/filter views.
-    - If apply_filters=True → apply faceted filters + product_code filters
+    - If apply_filters=True → apply faceted filters + product_code/product_title filters
     - Else → just return all products (deduped and sorted)
     """
     mapping = {
@@ -582,19 +584,20 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
         "product_type": "update_ref__product_type__in",
         "languages": "language_name__in",
         "access_type": "tag__in",
-        "status": "status__in",
+        "status": "status__in",  # only applied if explicitly passed
         "program_names": "program_name__in",
         "program_ids": "program_id__in",
     }
 
     q = Q()
     if apply_filters:
+        # --- Faceted filters ---
         for param, lookup in mapping.items():
             vals = request.GET.getlist(param, [])
             if vals:
                 q &= Q(**{lookup: vals})
 
-        #  product_code filters
+        # --- Product code filters ---
         codes = request.GET.getlist("product_code")
         if codes:
             code_q = Q()
@@ -604,6 +607,17 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
                     product_code_no_dashes__icontains=normed
                 )
             q &= code_q
+
+        # --- Product title filters (partial + case-insensitive) ---
+        titles = request.GET.getlist("product_title")
+        if titles:
+            title_q = Q()
+            for t in titles:
+                clean_t = t.strip()
+                title_q |= Q(product_title__icontains=clean_t) | Q(
+                    product_title__icontains=clean_t
+                )
+            q &= title_q
 
     qs = Product.objects.filter(q).select_related(
         "program_id", "language_id", "update_ref"

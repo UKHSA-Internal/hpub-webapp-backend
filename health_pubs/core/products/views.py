@@ -3610,10 +3610,8 @@ class ProductListMixin:
         )
 
 
-# --------------------------------------------------------------------------- #
-# Admin: List                                                                 #
-# --------------------------------------------------------------------------- #
-class ProductAdminListView(ProductListMixin, APIView):
+# --- Shared base for admin list/filter (dedupes the two views) -------------
+class BaseAdminProductsView(ProductListMixin, APIView):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
     include_request_context = True
@@ -3621,31 +3619,43 @@ class ProductAdminListView(ProductListMixin, APIView):
     pagination_class = AdminPagination
     presign_in_lists = False
 
+    # Toggle in subclasses
+    APPLY_FILTERS: bool = False
+
     def get(self, request, *args, **kwargs):
         PRE_LIST_LIMIT = int(getattr(settings, "ADMIN_PRE_LIST_LIMIT", 1500))
 
-        qs = build_admin_queryset(request, apply_filters=False)
+        # Build, annotate, pre-limit by most-recent, then dedupe
+        qs = build_admin_queryset(request, apply_filters=self.APPLY_FILTERS)
         qs = self._annotate_norm_code(qs)
 
-        # pre-limit by “most recently updated”, then dedupe
         updated = self._best_updated_field(qs) or "id"
         qs = qs.order_by(F(updated).desc(nulls_last=True), "-id")[:PRE_LIST_LIMIT]
         deduped = self._dedupe_by_norm_code_fast(qs)
 
-        # light payload for list rows
+        # Light payload for list rows
         deduped = deduped.select_related("program_id", "language_id").defer(
             "update_ref__product_downloads",
             "update_ref__summary_of_guidance",
         )
 
-        # final sort (respects ?sort_by=…)
+        # Final sort (respects ?sort_by=…)
         sorted_qs = self.get_sorted_queryset(deduped, request)
 
-        # use the mixin’s paginator + cache path
+        # Paginate + cache + (no presign for admin lists)
         data, paginator = self.paginate_and_serialize(
             sorted_qs, request, serializer_class=ProductSerializer, is_search=False
         )
         return paginator.get_paginated_response(data)
+
+
+# --------------------------------------------------------------------------- #
+# Admin: List                                                                 #
+# --------------------------------------------------------------------------- #
+class ProductAdminListView(BaseAdminProductsView):
+    """Admin list (no facets applied)."""
+
+    APPLY_FILTERS = False
 
 
 # --------------------------------------------------------------------------- #
@@ -3937,35 +3947,10 @@ class ProductUsersFilterView(ProductListMixin, APIView):
 # --------------------------------------------------------------------------- #
 
 
-class ProductAdminFilterView(ProductListMixin, APIView):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
-    include_request_context = True
-    cache_timeout = getattr(settings, "CACHE_TTL_LIST", 30)
-    pagination_class = AdminPagination
-    presign_in_lists = False
+class ProductAdminFilterView(BaseAdminProductsView):
+    """Admin list with faceted filters applied."""
 
-    def get(self, request, *args, **kwargs):
-        PRE_LIST_LIMIT = int(getattr(settings, "ADMIN_PRE_LIST_LIMIT", 1500))
-
-        qs = build_admin_queryset(request, apply_filters=True)
-        qs = self._annotate_norm_code(qs)
-
-        updated = self._best_updated_field(qs) or "id"
-        qs = qs.order_by(F(updated).desc(nulls_last=True), "-id")[:PRE_LIST_LIMIT]
-        deduped = self._dedupe_by_norm_code_fast(qs)
-
-        deduped = deduped.select_related("program_id", "language_id").defer(
-            "update_ref__product_downloads",
-            "update_ref__summary_of_guidance",
-        )
-
-        sorted_qs = self.get_sorted_queryset(deduped, request)
-
-        data, paginator = self.paginate_and_serialize(
-            sorted_qs, request, serializer_class=ProductSerializer, is_search=False
-        )
-        return paginator.get_paginated_response(data)
+    APPLY_FILTERS = True
 
 
 # --------------------------------------------------------------------------- #

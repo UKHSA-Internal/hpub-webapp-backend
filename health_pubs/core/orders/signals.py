@@ -10,7 +10,7 @@ from django.db import transaction
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from configs.get_secret_config import Config
-
+from core.utils.address_normalizer import normalize_address_instance
 from .models import Order
 
 config = Config()
@@ -99,18 +99,8 @@ def prepare_order_data(order_instance):
         "mobile_number": user_instance.mobile_number,
         "organization_ref": user_instance.organization_ref,
     }
-
-    address = {
-        "address_lines": [
-            address_instance.address_line1,
-            address_instance.address_line2,
-            address_instance.address_line3,
-        ],
-        "city": address_instance.city,
-        "county": address_instance.county,
-        "postcode": address_instance.postcode,
-        "country": address_instance.country,
-    }
+    #  use the normalizer to enforce limits + spillover
+    address = normalize_address_instance(address_instance)
 
     order_data = {
         "orderReference": str(order_instance.order_id),
@@ -120,10 +110,10 @@ def prepare_order_data(order_instance):
         "deliveryContactPhone": user_info.get("mobile_number", ""),
         "deliveryContactFullAddress": {
             "addressLines": address["address_lines"],
-            "city": address.get("city", ""),
-            "county": address.get("county", ""),
-            "postcode": address.get("postcode", ""),
-            "country": address.get("country", "England"),
+            "city": address["city"],
+            "county": address["county"],
+            "postcode": address["postcode"],
+            "country": address["country"],
         },
         "companyKey": order_instance.full_external_key,
         "items": [

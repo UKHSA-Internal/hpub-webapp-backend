@@ -567,10 +567,12 @@ def invalidate_product_caches(product_code: str | None = None):
 # --------------------------------------------------------------------------- #
 # Function: build_admin_queryset                                               #
 # --------------------------------------------------------------------------- #
+
+
 def build_admin_queryset(request, *, apply_filters: bool = False):
     """
     Build queryset for admin list/filter views.
-    - If apply_filters=True → apply faceted filters + product_code filters
+    - If apply_filters=True → apply faceted filters + product_code/product_title filters
     - Else → just return all products (deduped and sorted)
     """
     mapping = {
@@ -582,19 +584,20 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
         "product_type": "update_ref__product_type__in",
         "languages": "language_name__in",
         "access_type": "tag__in",
-        "status": "status__in",
+        "status": "status__in",  # only applied if explicitly passed
         "program_names": "program_name__in",
         "program_ids": "program_id__in",
     }
 
     q = Q()
     if apply_filters:
+        # --- Faceted filters ---
         for param, lookup in mapping.items():
             vals = request.GET.getlist(param, [])
             if vals:
                 q &= Q(**{lookup: vals})
 
-        #  product_code filters
+        # --- Product code filters ---
         codes = request.GET.getlist("product_code")
         if codes:
             code_q = Q()
@@ -604,6 +607,17 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
                     product_code_no_dashes__icontains=normed
                 )
             q &= code_q
+
+        # --- Product title filters (partial + case-insensitive) ---
+        titles = request.GET.getlist("product_title")
+        if titles:
+            title_q = Q()
+            for t in titles:
+                clean_t = t.strip()
+                title_q |= Q(product_title__icontains=clean_t) | Q(
+                    product_title__icontains=clean_t
+                )
+            q &= title_q
 
     qs = Product.objects.filter(q).select_related(
         "program_id", "language_id", "update_ref"
@@ -3596,35 +3610,52 @@ class ProductListMixin:
         )
 
 
-# --------------------------------------------------------------------------- #
-# Admin: List                                                                 #
-# --------------------------------------------------------------------------- #
-class ProductAdminListView(ProductListMixin, APIView):
+# --- Shared base for admin list/filter (dedupes the two views) -------------
+class BaseAdminProductsView(ProductListMixin, APIView):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
     include_request_context = True
-    cache_timeout = 0
+    cache_timeout = getattr(settings, "CACHE_TTL_LIST", 30)
     pagination_class = AdminPagination
     presign_in_lists = False
 
-    def get(self, request, *args, **kwargs) -> Response:
-        try:
-            qs = build_admin_queryset(request, apply_filters=False)
-            qs = self._annotate_norm_code(qs)
-            deduped = self._dedupe_by_norm_code_fast(qs)
-            sorted_qs = self.get_sorted_queryset(deduped, request)
+    # Toggle in subclasses
+    APPLY_FILTERS: bool = False
 
-            data, paginator = self.paginate_and_serialize(
-                sorted_qs, request, serializer_class=ProductSerializer, is_search=False
-            )
-            return paginator.get_paginated_response(data)
-        except Exception:
-            logger.exception("Admin list error")
-            return handle_error(
-                ErrorCode.INTERNAL_SERVER_ERROR,
-                ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+    def get(self, request, *args, **kwargs):
+        PRE_LIST_LIMIT = int(getattr(settings, "ADMIN_PRE_LIST_LIMIT", 1500))
+
+        # Build, annotate, pre-limit by most-recent, then dedupe
+        qs = build_admin_queryset(request, apply_filters=self.APPLY_FILTERS)
+        qs = self._annotate_norm_code(qs)
+
+        updated = self._best_updated_field(qs) or "id"
+        qs = qs.order_by(F(updated).desc(nulls_last=True), "-id")[:PRE_LIST_LIMIT]
+        deduped = self._dedupe_by_norm_code_fast(qs)
+
+        # Light payload for list rows
+        deduped = deduped.select_related("program_id", "language_id").defer(
+            "update_ref__product_downloads",
+            "update_ref__summary_of_guidance",
+        )
+
+        # Final sort (respects ?sort_by=…)
+        sorted_qs = self.get_sorted_queryset(deduped, request)
+
+        # Paginate + cache + (no presign for admin lists)
+        data, paginator = self.paginate_and_serialize(
+            sorted_qs, request, serializer_class=ProductSerializer, is_search=False
+        )
+        return paginator.get_paginated_response(data)
+
+
+# --------------------------------------------------------------------------- #
+# Admin: List                                                                 #
+# --------------------------------------------------------------------------- #
+class ProductAdminListView(BaseAdminProductsView):
+    """Admin list (no facets applied)."""
+
+    APPLY_FILTERS = False
 
 
 # --------------------------------------------------------------------------- #
@@ -3914,32 +3945,12 @@ class ProductUsersFilterView(ProductListMixin, APIView):
 # --------------------------------------------------------------------------- #
 # Admin: Faceted Filter                                                       #
 # --------------------------------------------------------------------------- #
-class ProductAdminFilterView(ProductListMixin, APIView):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
-    pagination_class = AdminPagination
-    include_request_context = True
-    cache_timeout = 0
-    presign_in_lists = False
 
-    def get(self, request, *args, **kwargs) -> Response:
-        try:
-            qs = build_admin_queryset(request, apply_filters=True)
-            qs = self._annotate_norm_code(qs)
-            deduped = self._dedupe_by_norm_code_fast(qs)
-            sorted_qs = self.get_sorted_queryset(deduped, request)
 
-            data, paginator = self.paginate_and_serialize(
-                sorted_qs, request, serializer_class=ProductSerializer, is_search=False
-            )
-            return paginator.get_paginated_response(data)
-        except Exception:
-            logger.exception("Admin filter error")
-            return handle_error(
-                ErrorCode.INTERNAL_SERVER_ERROR,
-                ErrorMessage.INTERNAL_SERVER_ERROR,
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+class ProductAdminFilterView(BaseAdminProductsView):
+    """Admin list with faceted filters applied."""
+
+    APPLY_FILTERS = True
 
 
 # --------------------------------------------------------------------------- #
@@ -4010,10 +4021,11 @@ class ProductUsersSearchFilterAPIView(generics.ListAPIView, ProductListMixin):
 class ProgramProductsView(ProductListMixin, generics.ListAPIView):
     """
     GET /api/v1/programmes/<program_id>/products/
-      Supports:
-        - program scoping (diseases/vaccinations tied to program)
-        - optional facets (same as user filter)
-        - uniform ?sort_by=
+    Supports:
+      - program scoping (diseases/vaccinations tied to program)
+      - optional facets (same as user filter)
+      - uniform ?sort_by=
+      - cache key versioned by latest updated_at (auto-refresh on data change)
     """
 
     serializer_class = ProductSerializer
@@ -4023,12 +4035,16 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
     cache_timeout = settings.CACHE_TTL_LIST
 
     def get_cache_key(self, request, program_id):
+        """Base cache key (user + path)."""
         user_id = (
             request.user.id
             if getattr(request, "user", None) and request.user.is_authenticated
             else "anon"
         )
-        return f"prog_products:{program_id}:user:{user_id}:{request.get_full_path()}"
+        path = request.get_full_path()
+        return f"prog_products:{program_id}:user:{user_id}:{path}"
+
+    # -------------------- Query & Facets --------------------
 
     def _build_facets(self, request) -> Q:
         q = Q()
@@ -4052,7 +4068,7 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
         diseases = Disease.objects.filter(programs=program)
         vaccinations = Vaccination.objects.filter(programs=program)
 
-        # Base program scope (live, latest)
+        # Base scope: live + latest
         qs = (
             Product.objects.select_related("update_ref")
             .prefetch_related(
@@ -4068,42 +4084,47 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
             )
         )
 
-        # Optional facets
+        # Apply optional facets
         facet_q = self._build_facets(self.request)
         if facet_q:
             qs = qs.filter(facet_q)
 
-        # Normalize + dedupe
-        qs = self._dedupe_by_norm_code(qs)
-        return qs
-
-    def _dedupe_by_norm_code(self, qs):
         return self._dedupe_by_norm_code_fast(qs)
 
+    # -------------------- Main List --------------------
+
     def list(self, request, *args, **kwargs):
-        cache_key = self.get_cache_key(request, kwargs["program_id"])
+        program_id = kwargs["program_id"]
+
+        # Build queryset (used for both data + versioning)
+        qs = self.get_queryset()
+        qs = self.get_sorted_queryset(qs, request)
+
+        # Compute cache key with version suffix (based on updated_at freshness)
+        base_key = self.get_cache_key(request, program_id)
+        version = self._queryset_version(qs)  # from ProductListMixin
+        cache_key = f"{base_key}:v{version}"
+
         cached = cache.get(cache_key)
         if cached:
             return Response(cached)
 
-        # Apply uniform ?sort_by= before pagination
-        qs = self.get_queryset()
-        qs = self.get_sorted_queryset(qs, request)
-
+        # Paginate + serialize
         page = self.paginate_queryset(qs)
         if page is not None:
             serializer = self.get_serializer(
                 page, many=True, context=self.get_serializer_context()
             )
-            # Attachment-style presigns
+
+            # Generate presigned URLs for attachments
             all_urls = extract_s3_urls(serializer.data)
             presigned = generate_presigned_urls(all_urls)
             update_product_urls(serializer.data, presigned)
 
             response = self.get_paginated_response(serializer.data)
 
-            # Include program diseases/vaccinations in the payload
-            program = get_object_or_404(Program, pk=kwargs["program_id"])
+            # Add related program context
+            program = get_object_or_404(Program, pk=program_id)
             response.data["diseases"] = DiseaseSerializer(
                 Disease.objects.filter(programs=program), many=True
             ).data
@@ -4123,7 +4144,7 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
         presigned = generate_presigned_urls(all_urls)
         update_product_urls(data, presigned)
 
-        program = get_object_or_404(Program, pk=kwargs["program_id"])
+        program = get_object_or_404(Program, pk=program_id)
         payload = {
             "results": data,
             "diseases": DiseaseSerializer(
@@ -4133,6 +4154,7 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
                 Vaccination.objects.filter(programs=program), many=True
             ).data,
         }
+
         cache.set(cache_key, payload, self.cache_timeout)
         return Response(payload, status=status.HTTP_200_OK)
 

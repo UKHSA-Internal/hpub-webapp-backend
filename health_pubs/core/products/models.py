@@ -239,6 +239,17 @@ class Product(Page):
         blank=True,
         help_text="If not provided, set to now on every save.",
     )
+    last_updated_by_name = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="Full name (first + last) of the user who last updated this product.",
+    )
+    last_updated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp of the last product update (via PATCH or admin).",
+    )
 
     # Panels for Wagtail Admin
     content_panels = Page.content_panels + [
@@ -274,6 +285,9 @@ class Product(Page):
                 self.updated_at = now
         else:
             self.updated_at = now
+            # Keep last_updated_at in sync unless overridden
+            if not self.last_updated_at:
+                self.last_updated_at = now
 
         if self.product_code:
             self.product_code_no_dashes = (

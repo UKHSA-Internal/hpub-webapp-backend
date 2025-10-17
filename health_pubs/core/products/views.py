@@ -2606,9 +2606,22 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                 return handle_error(
                     ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
                 )
+
             serializer.save()
+
+            # --- Record who updated the product ---
+            user = request.user
+            full_name = f"{user.first_name} {user.last_name}".strip()
+            product.last_updated_by_name = full_name
+            product.last_updated_at = timezone.now()
+            product.save(
+                update_fields=["last_updated_by_name", "last_updated_at", "updated_at"]
+            )
+
             logger.info(
-                "Product patched successfully for product_code=%s", decoded_product_code
+                "Product patched successfully for product_code=%s by %s",
+                decoded_product_code,
+                full_name,
             )
 
         # --------------- OUTSIDE ATOMIC: Order limits ------------------------ #

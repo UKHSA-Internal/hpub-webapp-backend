@@ -341,6 +341,8 @@ class ProductSerializer(serializers.ModelSerializer):
             "order_limits",
             "created_at",
             "updated_at",
+            "last_updated_by_name",
+            "last_updated_at",
         )
 
     def validate(self, data):

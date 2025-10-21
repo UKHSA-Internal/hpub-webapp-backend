@@ -569,59 +569,31 @@ def invalidate_product_caches(product_code: str | None = None):
 # --------------------------------------------------------------------------- #
 
 
-def build_admin_queryset(request, *, apply_filters: bool = False):
+def build_admin_queryset(request, *, apply_filters=False):
     """
-    Build queryset for admin list/filter views.
-    - If apply_filters=True → apply faceted filters + product_code/product_title filters
-    - Else → just return all products (deduped and sorted)
+    Build the base queryset for admin list, without heavy joins.
     """
-    mapping = {
-        "diseases": "update_ref__diseases_ref__name__in",
-        "vaccinations": "update_ref__vaccination_ref__name__in",
-        "audiences": "update_ref__audience_ref__name__in",
-        "where_to_use": "update_ref__where_to_use_ref__name__in",
-        "alternative_type": "update_ref__alternative_type__in",
-        "product_type": "update_ref__product_type__in",
-        "languages": "language_name__in",
-        "access_type": "tag__in",
-        "status": "status__in",  # only applied if explicitly passed
-        "program_names": "program_name__in",
-        "program_ids": "program_id__in",
-    }
+    params = request.query_params
+    qs = Product.objects.all()
 
-    q = Q()
+    # Example basic filters (adapt to your filters)
+    status_param = params.get("status")
+    if status_param:
+        qs = qs.filter(status=status_param)
+
+    program_param = params.get("program")
+    if program_param:
+        qs = qs.filter(program_id__program_name__icontains=program_param)
+
+    language_param = params.get("language")
+    if language_param:
+        qs = qs.filter(language_id__language_name__icontains=language_param)
+
+    # Base lean related fields (no update_ref join)
+    qs = qs.select_related("program_id", "language_id")
+
     if apply_filters:
-        # --- Faceted filters ---
-        for param, lookup in mapping.items():
-            vals = request.GET.getlist(param, [])
-            if vals:
-                q &= Q(**{lookup: vals})
-
-        # --- Product code filters ---
-        codes = request.GET.getlist("product_code")
-        if codes:
-            code_q = Q()
-            for c in codes:
-                normed = re.sub(r"[-_\s]+", "", c).upper().strip()
-                code_q |= Q(product_code__icontains=c) | Q(
-                    product_code_no_dashes__icontains=normed
-                )
-            q &= code_q
-
-        # --- Product title filters (partial + case-insensitive) ---
-        titles = request.GET.getlist("product_title")
-        if titles:
-            title_q = Q()
-            for t in titles:
-                clean_t = t.strip()
-                title_q |= Q(product_title__icontains=clean_t) | Q(
-                    product_title__icontains=clean_t
-                )
-            q &= title_q
-
-    qs = Product.objects.filter(q).select_related(
-        "program_id", "language_id", "update_ref"
-    )
+        qs = qs.distinct()  # avoid duplicates when filtering by related fields
 
     return qs
 
@@ -3611,41 +3583,74 @@ class ProductListMixin:
 
 
 # --- Shared base for admin list/filter (dedupes the two views) -------------
+
+
 class BaseAdminProductsView(ProductListMixin, APIView):
+    """
+    Optimized admin list view.
+    Fetches IDs in a first lean phase, then hydrates only the visible page.
+    """
+
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
-    include_request_context = True
-    cache_timeout = getattr(settings, "CACHE_TTL_LIST", 30)
     pagination_class = AdminPagination
+    include_request_context = False  # avoid heavy serializer context for list
+    APPLY_FILTERS = True
     presign_in_lists = False
 
-    # Toggle in subclasses
-    APPLY_FILTERS: bool = False
-
     def get(self, request, *args, **kwargs):
-        PRE_LIST_LIMIT = int(getattr(settings, "ADMIN_PRE_LIST_LIMIT", 1500))
+        logger.info("Admin product list request: %s", request.query_params)
 
-        # Build, annotate, pre-limit by most-recent, then dedupe
+        PRE_LIST_LIMIT = int(getattr(settings, "ADMIN_PRE_LIST_LIMIT", 600))
+
+        # ---------- Phase 1: Fast ID query ----------
         qs = build_admin_queryset(request, apply_filters=self.APPLY_FILTERS)
         qs = self._annotate_norm_code(qs)
 
-        updated = self._best_updated_field(qs) or "id"
-        qs = qs.order_by(F(updated).desc(nulls_last=True), "-id")[:PRE_LIST_LIMIT]
-        deduped = self._dedupe_by_norm_code_fast(qs)
+        if self.APPLY_FILTERS:
+            qs = qs.distinct()  # prevent duplicate rows from M2M joins
 
-        # Light payload for list rows
-        deduped = deduped.select_related("program_id", "language_id").defer(
+        updated = self._best_updated_field(qs) or "id"
+
+        lean_qs = (
+            qs.only("id", "product_code", updated).order_by(
+                F(updated).desc(nulls_last=True), "-id"
+            )
+        )[:PRE_LIST_LIMIT]
+
+        deduped_qs = self._dedupe_by_norm_code_fast(lean_qs)
+        deduped_ids = list(deduped_qs.values_list("id", flat=True))
+
+        if not deduped_ids:
+            logger.info("No products found for admin list")
+            return JsonResponse({"results": [], "count": 0}, status=200)
+
+        # ---------- Phase 2: Paginate IDs ----------
+        paginator = self.pagination_class()
+        page_ids = paginator.paginate_queryset(deduped_ids, request, view=self)
+
+        # ---------- Phase 3: Hydrate page ----------
+        when_clauses = [When(id=pid, then=pos) for pos, pid in enumerate(page_ids)]
+        ordered = (
+            Product.objects.filter(id__in=page_ids)
+            .annotate(
+                _pos=Case(*when_clauses, default=999999, output_field=IntegerField())
+            )
+            .order_by("_pos")
+        )
+
+        ordered = ordered.select_related("program_id", "language_id").defer(
             "update_ref__product_downloads",
             "update_ref__summary_of_guidance",
+            "update_ref__alternative_type",
         )
 
-        # Final sort (respects ?sort_by=…)
-        sorted_qs = self.get_sorted_queryset(deduped, request)
-
-        # Paginate + cache + (no presign for admin lists)
-        data, paginator = self.paginate_and_serialize(
-            sorted_qs, request, serializer_class=ProductSerializer, is_search=False
+        # ---------- Phase 4: Serialize ----------
+        serializer = ProductSerializer(
+            ordered, many=True, context=self.get_serializer_context()
         )
+        data = serializer.data
+
         return paginator.get_paginated_response(data)
 
 

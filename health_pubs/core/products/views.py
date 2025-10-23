@@ -3996,12 +3996,22 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
     cache_timeout = settings.CACHE_TTL_LIST
 
     def get_cache_key(self, request, program_id):
+        """
+        Generate a cache key that is:
+        - unique per user and per URL
+        - safe for Redis/Memcached key naming
+        - resistant to invalid characters or long query strings
+        """
         user_id = (
             request.user.id
             if getattr(request, "user", None) and request.user.is_authenticated
             else "anon"
         )
-        path_hash = hashlib.md5(request.get_full_path().encode()).hexdigest()
+
+        # Always use UTF-8 encoding to avoid UnicodeEncodeError
+        full_path = request.get_full_path().encode("utf-8")
+        path_hash = hashlib.md5(full_path).hexdigest()
+
         return f"prog_products:{program_id}:user:{user_id}:{path_hash}"
 
     def _build_facets(self, request) -> Q:

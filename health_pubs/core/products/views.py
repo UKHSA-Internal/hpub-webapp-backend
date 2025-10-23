@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import json
 import logging
 import re
@@ -4000,7 +4001,8 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
             if getattr(request, "user", None) and request.user.is_authenticated
             else "anon"
         )
-        return f"prog_products:{program_id}:user:{user_id}:{request.get_full_path()}"
+        path_hash = hashlib.md5(request.get_full_path().encode()).hexdigest()
+        return f"prog_products:{program_id}:user:{user_id}:{path_hash}"
 
     def _build_facets(self, request) -> Q:
         q = Q()

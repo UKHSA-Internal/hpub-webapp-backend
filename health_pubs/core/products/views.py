@@ -3997,10 +3997,8 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
 
     def get_cache_key(self, request, program_id):
         """
-        Generate a cache key that is:
-        - unique per user and per URL
-        - safe for Redis/Memcached key naming
-        - resistant to invalid characters or long query strings
+        Generate a deterministic, cache-safe key.
+        Uses SHA-256 (secure, no collision risk, SonarQube safe).
         """
         user_id = (
             request.user.id
@@ -4008,10 +4006,8 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
             else "anon"
         )
 
-        # Always use UTF-8 encoding to avoid UnicodeEncodeError
         full_path = request.get_full_path().encode("utf-8")
-        path_hash = hashlib.md5(full_path).hexdigest()
-
+        path_hash = hashlib.sha256(full_path).hexdigest()
         return f"prog_products:{program_id}:user:{user_id}:{path_hash}"
 
     def _build_facets(self, request) -> Q:

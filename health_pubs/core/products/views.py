@@ -19,7 +19,6 @@ from django.db.models import (
     F,
     Value,
     IntegerField,
-    OuterRef,
     Subquery,
     Case,
     When,
@@ -57,6 +56,8 @@ from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.filters import OrderingFilter, SearchFilter
 from django_filters.rest_framework import DjangoFilterBackend
+from django.db.models.functions import RowNumber
+from django.db.models.expressions import Window
 from django.conf import settings
 from django.core.cache import cache
 
@@ -76,7 +77,7 @@ from rest_framework import generics
 from .filters import ProductFilter
 from rest_framework.exceptions import ValidationError
 from django.db import DatabaseError, transaction
-from django.db.models import Q
+from django.db.models import Q, F, Case, When, IntegerField, Subquery, Value
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils.text import slugify
@@ -569,32 +570,54 @@ def invalidate_product_caches(product_code: str | None = None):
 # --------------------------------------------------------------------------- #
 
 
-def build_admin_queryset(request, *, apply_filters=False):
+def build_admin_queryset(request, *, apply_filters: bool = False):
     """
-    Build the base queryset for admin list, without heavy joins.
+    Build the queryset for admin list/filter views, intentionally LEAN:
+    - No select_related('update_ref') here
+    - Only join program/language (cheap)
+    - Optional facets applied through related paths; caller may .distinct()
     """
-    params = request.query_params
-    qs = Product.objects.all()
+    params = request.GET
 
-    # Example basic filters (adapt to your filters)
-    status_param = params.get("status")
-    if status_param:
-        qs = qs.filter(status=status_param)
+    mapping = {
+        "diseases": "update_ref__diseases_ref__name__in",
+        "vaccinations": "update_ref__vaccination_ref__name__in",
+        "audiences": "update_ref__audience_ref__name__in",
+        "where_to_use": "update_ref__where_to_use_ref__name__in",
+        "alternative_type": "update_ref__alternative_type__in",
+        "product_type": "update_ref__product_type__in",
+        "languages": "language_name__in",
+        "access_type": "tag__in",
+        "status": "status__in",
+        "program_names": "program_name__in",
+        "program_ids": "program_id__in",
+    }
 
-    program_param = params.get("program")
-    if program_param:
-        qs = qs.filter(program_id__program_name__icontains=program_param)
-
-    language_param = params.get("language")
-    if language_param:
-        qs = qs.filter(language_id__language_name__icontains=language_param)
-
-    # Base lean related fields (no update_ref join)
-    qs = qs.select_related("program_id", "language_id")
-
+    q = Q()
     if apply_filters:
-        qs = qs.distinct()  # avoid duplicates when filtering by related fields
+        # facets
+        for param, lookup in mapping.items():
+            vals = params.getlist(param)
+            if vals:
+                q &= Q(**{lookup: vals})
 
+        # product_code (trim/normalize too)
+        codes = params.getlist("product_code")
+        for c in codes:
+            if not c:
+                continue
+            c = c.strip()
+            c_norm = "".join(ch for ch in c if ch.isalnum()).upper()
+            q &= Q(product_code__icontains=c) | Q(product_code__icontains=c_norm)
+
+        # product_title
+        titles = params.getlist("product_title")
+        for t in titles:
+            t = (t or "").strip()
+            if t:
+                q &= Q(product_title__icontains=t)
+
+    qs = Product.objects.filter(q).select_related("program_id", "language_id")
     return qs
 
 
@@ -3339,8 +3362,6 @@ if "PRODUCT_CODE_PATTERN" not in globals():
 # --------------------------------------------------------------------------- #
 # Core mixin: sorting + normalization/dedupe + pagination/presign/cache       #
 # --------------------------------------------------------------------------- #
-
-
 class ProductListMixin:
     serializer_class = ProductSerializer
     search_serializer_class = ProductSearchSerializer
@@ -3353,6 +3374,7 @@ class ProductListMixin:
 
     @staticmethod
     def _with_norm_fields(qs):
+        # Computes uppercase, dash/underscore/space-stripped code once for ranking/dedupe
         norm_expr = Upper(
             Replace(
                 Replace(
@@ -3413,33 +3435,25 @@ class ProductListMixin:
         sv = sort_by.strip()
         return sv if sv in ALLOWED_SORT_FIELDS else None
 
-    def _dedupe_by_norm_code_fast(self, qs):
-        try:
-            q = qs
-            q_query = getattr(qs, "query", None)
-            low_mark = getattr(q_query, "low_mark", 0) or 0
-            high_mark = getattr(q_query, "high_mark", None)
-            if low_mark or high_mark is not None:
-                q = Product.objects.filter(id__in=Subquery(qs.values("id")))
-        except Exception:
-            q = Product.objects.filter(id__in=Subquery(qs.values("id")))
+    def _dedupe_by_norm_code_fast(self, qs, *, order_field: str | None = None):
+        """
+        Keep a single row per normalized code (norm_code) by newest first,
+        using ROW_NUMBER() OVER (PARTITION BY norm_code ORDER BY <order>).
 
-        q = self._annotate_norm_code(q).filter(product_code=F("code_trim"))
-        updated_field = self._best_updated_field(q) or "id"
+        IMPORTANT: Caller must NOT pass a sliced queryset. Slice only after this.
+        """
+        q = qs
+        updated_field = order_field or self._best_updated_field(q) or "id"
 
-        best_row_for_norm = (
-            q.filter(norm_code=OuterRef("norm_code"))
-            .order_by(F(updated_field).desc(nulls_last=True), F("id").desc())
-            .values("id")[:1]
-        )
+        q = q.annotate(
+            rn=Window(
+                expression=RowNumber(),
+                partition_by=[F("norm_code")],
+                order_by=[F(updated_field).desc(nulls_last=True), F("id").desc()],
+            )
+        ).filter(rn=1)
 
-        best_ids = (
-            q.values("norm_code")
-            .annotate(best_id=Subquery(best_row_for_norm))
-            .values("best_id")
-        )
-
-        return Product.objects.filter(id__in=Subquery(best_ids))
+        return q
 
     def get_sorted_queryset(self, queryset, request):
         requested = self._normalize_sort_param(request.GET.get("sort_by"))
@@ -3582,76 +3596,106 @@ class ProductListMixin:
         )
 
 
-# --- Shared base for admin list/filter (dedupes the two views) -------------
-
-
 class BaseAdminProductsView(ProductListMixin, APIView):
     """
-    Optimized admin list view.
-    Fetches IDs in a first lean phase, then hydrates only the visible page.
+    Fast admin list WITHOUT is_latest:
+      1) Lean base queryset (+ optional facets)
+      2) Pre-window limit by recency to bound work
+      3) Dedupe across ALL versions via ROW_NUMBER() over norm_code
+      4) Paginate IDs, hydrate only the page
+      5) Cache final paginated payload using _queryset_version() for freshness
     """
 
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
     pagination_class = AdminPagination
-    include_request_context = False  # avoid heavy serializer context for list
+    include_request_context = True
     APPLY_FILTERS = True
-    presign_in_lists = False
+    presign_in_lists = False  # no presign needed for admin lists
+
+    # knobs
+    PRE_WINDOW_LIMIT = int(getattr(settings, "ADMIN_PRE_WINDOW_LIMIT", 10000))
+    PRE_LIST_LIMIT = int(getattr(settings, "ADMIN_PRE_LIST_LIMIT", 800))
+    cache_timeout = int(getattr(settings, "CACHE_TTL_LIST", 30))  # reuse list TTL
 
     def get(self, request, *args, **kwargs):
-        logger.info("Admin product list request: %s", request.query_params)
-
-        PRE_LIST_LIMIT = int(getattr(settings, "ADMIN_PRE_LIST_LIMIT", 600))
-
-        # ---------- Phase 1: Fast ID query ----------
+        # -------- Phase 0: base (lean & optionally faceted) --------
         qs = build_admin_queryset(request, apply_filters=self.APPLY_FILTERS)
-        qs = self._annotate_norm_code(qs)
-
+        qs = self._annotate_norm_code(qs).filter(product_code=F("code_trim"))
         if self.APPLY_FILTERS:
-            qs = qs.distinct()  # prevent duplicate rows from M2M joins
+            qs = qs.distinct()
 
+        # Build a cache key **before** any slicing, versioned by recency.
+        # Key includes path + querystring (including page), and user id.
+        version = self._queryset_version(qs)
+        base_key = self.get_cache_key(request, prefix="admin_products")
+        cache_key = f"{base_key}:v{version}"
+
+        cached = (
+            cache.get(cache_key)
+            if (
+                self.cache_timeout
+                and self.cache_timeout > 0
+                and request.GET.get("fresh") != "1"
+            )
+            else None
+        )
+        if cached is not None:
+            # return a DRF Response with the cached paginated payload
+            return Response(cached, status=status.HTTP_200_OK)
+
+        # -------- Phase 1: pre-window bound by recency --------
         updated = self._best_updated_field(qs) or "id"
+        pre_window = qs.only("id", "product_code", updated).order_by(
+            F(updated).desc(nulls_last=True), "-id"
+        )
 
-        lean_qs = (
-            qs.only("id", "product_code", updated).order_by(
-                F(updated).desc(nulls_last=True), "-id"
-            )
-        )[:PRE_LIST_LIMIT]
+        # ✅ slice IDs inside a Subquery, then rematerialize a fresh queryset
+        limited_ids = Subquery(pre_window.values("id")[: self.PRE_WINDOW_LIMIT])
+        ordered = Product.objects.filter(id__in=limited_ids)
 
-        deduped_qs = self._dedupe_by_norm_code_fast(lean_qs)
-        deduped_ids = list(deduped_qs.values_list("id", flat=True))
+        # ✅ re-annotate norm_code because the new queryset lost annotations
+        ordered = self._annotate_norm_code(ordered).filter(product_code=F("code_trim"))
 
-        if not deduped_ids:
-            logger.info("No products found for admin list")
-            return JsonResponse({"results": [], "count": 0}, status=200)
+        # ✅ now it’s safe to dedupe and continue
+        deduped = self._dedupe_by_norm_code_fast(ordered, order_field=updated)
+        deduped = deduped[: self.PRE_LIST_LIMIT]
 
-        # ---------- Phase 2: Paginate IDs ----------
+        # -------- Phase 3: paginate IDs --------
+        id_list = list(deduped.values_list("id", flat=True))
         paginator = self.pagination_class()
-        page_ids = paginator.paginate_queryset(deduped_ids, request, view=self)
+        page_ids = paginator.paginate_queryset(id_list, request, view=self)
 
-        # ---------- Phase 3: Hydrate page ----------
-        when_clauses = [When(id=pid, then=pos) for pos, pid in enumerate(page_ids)]
-        ordered = (
+        # Preserve order of IDs for hydration
+        order_map = {pid: i for i, pid in enumerate(id_list)}
+        whens = [When(id=pid, then=order_map.get(pid, 999999)) for pid in page_ids]
+
+        page_qs = (
             Product.objects.filter(id__in=page_ids)
-            .annotate(
-                _pos=Case(*when_clauses, default=999999, output_field=IntegerField())
-            )
+            .annotate(_pos=Case(*whens, default=999999, output_field=IntegerField()))
             .order_by("_pos")
+            .select_related("program_id", "language_id")
+            .defer(
+                "update_ref__product_downloads",
+                "update_ref__summary_of_guidance",
+            )
         )
 
-        ordered = ordered.select_related("program_id", "language_id").defer(
-            "update_ref__product_downloads",
-            "update_ref__summary_of_guidance",
-            "update_ref__alternative_type",
-        )
-
-        # ---------- Phase 4: Serialize ----------
+        # -------- Phase 4: serialize + paginate response --------
         serializer = ProductSerializer(
-            ordered, many=True, context=self.get_serializer_context()
+            page_qs, many=True, context=self.get_serializer_context()
         )
-        data = serializer.data
+        response = paginator.get_paginated_response(serializer.data)
 
-        return paginator.get_paginated_response(data)
+        # -------- Phase 5: cache the final paginated payload --------
+        if (
+            self.cache_timeout
+            and self.cache_timeout > 0
+            and request.GET.get("fresh") != "1"
+        ):
+            cache.set(cache_key, response.data, timeout=self.cache_timeout)
+
+        return response
 
 
 # --------------------------------------------------------------------------- #
@@ -3799,7 +3843,6 @@ class ProductSearchUserView(BaseProductSearchView):
     cache_timeout = getattr(settings, "CACHE_TTL_LIST", 30)
     pagination_class = CustomPagination
 
-    # tuneable cap for the pre-ranked set (before dedupe/rank)
     PRE_RANK_LIMIT = int(getattr(settings, "SEARCH_PRE_RANK_LIMIT", 2000))
 
     def get(self, request, *args, **kwargs) -> Response:
@@ -3807,7 +3850,7 @@ class ProductSearchUserView(BaseProductSearchView):
             q = (request.GET.get("q") or "").strip()
             base = Product.objects.filter(is_latest=True, status="live")
 
-            # Case 1: Empty query → dedupe + default sort
+            # Empty query → dedupe + default sort
             if not q:
                 deduped = self._dedupe_by_norm_code_fast(base)
                 deduped = self.get_sorted_queryset(
@@ -3822,7 +3865,7 @@ class ProductSearchUserView(BaseProductSearchView):
                 data = filter_live_languages(data)
                 return paginator.get_paginated_response(data)
 
-            # Case 2: Search with query
+            # Search with query
             q_norm = self._normalize_term(q)
             looks_like_code = 1 if re.fullmatch(r"[A-Za-z0-9_-]+", q) else 0
 
@@ -3836,11 +3879,20 @@ class ProductSearchUserView(BaseProductSearchView):
             )
 
             updated_field = self._best_updated_field(restricted) or "id"
-            restricted = restricted.order_by(
-                F(updated_field).desc(nulls_last=True), "-id"
-            )[: self.PRE_RANK_LIMIT]
+            ordered = restricted.order_by(F(updated_field).desc(nulls_last=True), "-id")
 
-            deduped = self._dedupe_by_norm_code_fast(restricted)
+            # Bound candidate set WITHOUT passing a sliced QS to the deduper
+            if self.PRE_RANK_LIMIT:
+                limited_ids = Subquery(ordered.values("id")[: self.PRE_RANK_LIMIT])
+                ordered = Product.objects.filter(id__in=limited_ids)
+
+            # Re-annotate after rematerializing
+            ordered = self._annotate_norm_code(ordered).filter(
+                product_code=F("code_trim")
+            )
+
+            deduped = self._dedupe_by_norm_code_fast(ordered)
+
             ranked = self._annotate_norm_code(deduped)
             ranked = self._annotate_rank_signals(ranked, q, q_norm, looks_like_code)
 
@@ -3876,14 +3928,98 @@ class ProductSearchUserView(BaseProductSearchView):
 # --------------------------------------------------------------------------- #
 class ProductSearchAdminView(BaseProductSearchView):
     """
-    Admin-only search view.
+    Admin-only search view with caching.
+    GET /api/v1/products/admin/search/?q=...&page=1&sort_by=...
     """
 
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
+    pagination_class = AdminPagination
+    include_request_context = False
+    cache_timeout = int(getattr(settings, "CACHE_TTL_LIST", 30))
 
-    def get_default_query(self) -> Q:
-        return Q()
+    PRE_RANK_LIMIT = int(getattr(settings, "SEARCH_PRE_RANK_LIMIT", 2000))
+
+    def get(self, request, *args, **kwargs):
+        q = (request.GET.get("q") or "").strip()
+
+        base = Product.objects.all()
+        base = self._annotate_norm_code(base).filter(product_code=F("code_trim"))
+
+        # version for cache: any change in product/update timestamps busts cache
+        version = self._queryset_version(base)
+        base_key = self.get_cache_key(request, prefix="admin_search")
+        cache_key = f"{base_key}:v{version}"
+
+        cached = (
+            cache.get(cache_key)
+            if (
+                self.cache_timeout
+                and self.cache_timeout > 0
+                and request.GET.get("fresh") != "1"
+            )
+            else None
+        )
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
+
+        if not q:
+            # No query → dedupe + default ordering
+            qs = self._dedupe_by_norm_code_fast(base)
+            qs = self.get_sorted_queryset(qs, request)
+        else:
+            q_norm = self._normalize_term(q)
+            looks_like_code = 1 if re.fullmatch(r"[A-Za-z0-9_-]+", q) else 0
+
+            restricted = base.filter(
+                Q(product_code__icontains=q)
+                | Q(product_title__icontains=q)
+                | Q(norm_code__icontains=q_norm)
+            )
+
+            updated_field = self._best_updated_field(restricted) or "id"
+            ordered = restricted.order_by(F(updated_field).desc(nulls_last=True), "-id")
+
+            limited_ids = Subquery(ordered.values("id")[: self.PRE_RANK_LIMIT])
+            ordered = Product.objects.filter(id__in=limited_ids)
+
+            # re-annotate + trim before dedupe/rank
+            ordered = self._annotate_norm_code(ordered).filter(
+                product_code=F("code_trim")
+            )
+
+            deduped = self._dedupe_by_norm_code_fast(ordered)
+            ranked = self._annotate_rank_signals(deduped, q, q_norm, looks_like_code)
+
+            sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
+            if sort_by:
+                qs = ranked.order_by("-rank", sort_by, "-id")
+            else:
+                updated_desc = self._resolve_sort_field(ranked, "-updated_at") or "-id"
+                qs = ranked.order_by("-rank", "product_title", updated_desc, "-id")
+
+        # Hydrate (admin lists don’t need update_ref joins)
+        qs = qs.select_related("program_id", "language_id").defer(
+            "update_ref__product_downloads",
+            "update_ref__summary_of_guidance",
+        )
+
+        # Paginate + serialize and cache the final paginated payload
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(qs, request, view=self)
+        serializer = ProductSerializer(
+            page, many=True, context=self.get_serializer_context()
+        )
+        response = paginator.get_paginated_response(serializer.data)
+
+        if (
+            self.cache_timeout
+            and self.cache_timeout > 0
+            and request.GET.get("fresh") != "1"
+        ):
+            cache.set(cache_key, response.data, timeout=self.cache_timeout)
+
+        return response
 
 
 # --------------------------------------------------------------------------- #
@@ -3925,7 +4061,9 @@ class ProductUsersFilterView(ProductListMixin, APIView):
                 if vals:
                     filters &= Q(**{f"{lookup}__in": vals})
 
+            # ✅ annotate before deduping
             qs = Product.objects.filter(base_q & filters)
+            qs = self._annotate_norm_code(qs)
             qs = self._dedupe_by_norm_code_fast(qs)
             qs = self.optimize_for_search(qs)
             qs = self.get_sorted_queryset(qs, request)
@@ -3938,6 +4076,7 @@ class ProductUsersFilterView(ProductListMixin, APIView):
             )
             data = filter_live_languages(data)
             return paginator.get_paginated_response(data)
+
         except Exception:
             logger.exception("User filter error")
             return handle_error(

@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import json
 import logging
 import re
@@ -4035,16 +4036,19 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
     cache_timeout = settings.CACHE_TTL_LIST
 
     def get_cache_key(self, request, program_id):
-        """Base cache key (user + path)."""
+        """
+        Generate a deterministic, cache-safe key.
+        Uses SHA-256 (secure, no collision risk).
+        """
         user_id = (
             request.user.id
             if getattr(request, "user", None) and request.user.is_authenticated
             else "anon"
         )
-        path = request.get_full_path()
-        return f"prog_products:{program_id}:user:{user_id}:{path}"
 
-    # -------------------- Query & Facets --------------------
+        full_path = request.get_full_path().encode("utf-8")
+        path_hash = hashlib.sha256(full_path).hexdigest()
+        return f"prog_products:{program_id}:user:{user_id}:{path_hash}"
 
     def _build_facets(self, request) -> Q:
         q = Q()

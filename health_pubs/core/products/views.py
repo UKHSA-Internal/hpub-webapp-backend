@@ -4038,7 +4038,7 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
     def get_cache_key(self, request, program_id):
         """
         Generate a deterministic, cache-safe key.
-        Uses SHA-256 (secure, no collision risk, SonarQube safe).
+        Uses SHA-256 (secure, no collision risk).
         """
         user_id = (
             request.user.id

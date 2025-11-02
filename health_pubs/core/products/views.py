@@ -3619,6 +3619,7 @@ class BaseAdminProductsView(ProductListMixin, APIView):
     cache_timeout = int(getattr(settings, "CACHE_TTL_LIST", 30))  # reuse list TTL
 
     def get(self, request, *args, **kwargs):
+        t_start = time.time()
         # -------- Phase 0: base (lean & optionally faceted) --------
         qs = build_admin_queryset(request, apply_filters=self.APPLY_FILTERS)
         qs = self._annotate_norm_code(qs).filter(product_code=F("code_trim"))
@@ -3626,43 +3627,115 @@ class BaseAdminProductsView(ProductListMixin, APIView):
             qs = qs.distinct()
 
         # Build a cache key **before** any slicing, versioned by recency.
-        # Key includes path + querystring (including page), and user id.
         version = self._queryset_version(qs)
         base_key = self.get_cache_key(request, prefix="admin_products")
-        cache_key = f"{base_key}:v{version}"
+        ids_cache_key = f"{base_key}:ids:v{version}"
+        page_cache_key = f"{base_key}:page:{request.GET.get('page', 1)}:v{version}"
 
-        cached = (
-            cache.get(cache_key)
-            if (
-                self.cache_timeout
-                and self.cache_timeout > 0
-                and request.GET.get("fresh") != "1"
+        bypass_cache = (self.cache_timeout or 0) <= 0 or request.GET.get("fresh") == "1"
+
+        # Attempt to return cached *paginated payload* first (fast path)
+        if not bypass_cache:
+            cached_response = cache.get(page_cache_key)
+            if cached_response is not None:
+                logger.info(
+                    "admin_products: returning cached paginated payload (page) in %.3fs",
+                    time.time() - t_start,
+                )
+                return Response(cached_response, status=status.HTTP_200_OK)
+
+        # -------- Phase 1: try to fetch cached deduped id list (heavy work cached) --------
+        id_list = None
+        if not bypass_cache:
+            id_list = cache.get(ids_cache_key)
+
+        if id_list is None:
+            phase1_start = time.time()
+            try:
+                # Pre-window: only id, product_code and updated field (lean)
+                updated = self._best_updated_field(qs) or "id"
+                pre_window = qs.only("id", "product_code", updated).order_by(
+                    F(updated).desc(nulls_last=True), "-id"
+                )
+
+                # Slice IDs inside a Subquery to bound work
+                limited_ids_subquery = Subquery(
+                    pre_window.values("id")[: self.PRE_WINDOW_LIMIT]
+                )
+                ordered = Product.objects.filter(id__in=limited_ids_subquery)
+
+                # Re-annotate (we lost annotations when creating a fresh QS)
+                ordered = self._annotate_norm_code(ordered).filter(
+                    product_code=F("code_trim")
+                )
+
+                # Deduplicate across norm_code; this is the expensive but necessary step
+                try:
+                    deduped_qs = self._dedupe_by_norm_code_fast(
+                        ordered, order_field=updated
+                    )
+                    # Bound the deduped list to PRE_LIST_LIMIT
+                    deduped_qs = deduped_qs[: self.PRE_LIST_LIMIT]
+                    id_list = list(deduped_qs.values_list("id", flat=True))
+                except Exception as e:
+                    # If window/dedupe fails (e.g. DB trouble under load), fallback to safe cheaper path
+                    logger.exception(
+                        "admin_products: dedupe_by_norm_code_fast failed; falling back to cheapest path: %s",
+                        e,
+                    )
+                    id_list = list(
+                        pre_window.values_list("id", flat=True)[: self.PRE_LIST_LIMIT]
+                    )
+
+                # If we got nothing (weird), ensure we at least have something sensible
+                if not id_list:
+                    logger.warning(
+                        "admin_products: deduped id_list empty, falling back to first PRE_LIST_LIMIT ids"
+                    )
+                    id_list = list(
+                        pre_window.values_list("id", flat=True)[: self.PRE_LIST_LIMIT]
+                    )
+
+                # Cache the id_list for the configured TTL if allowed
+                if self.cache_timeout and self.cache_timeout > 0 and not bypass_cache:
+                    try:
+                        cache.set(ids_cache_key, id_list, timeout=self.cache_timeout)
+                    except Exception:
+                        logger.exception(
+                            "admin_products: failed to cache id_list for %s",
+                            ids_cache_key,
+                        )
+
+                logger.info(
+                    "admin_products: built id_list (n=%d) in %.3fs",
+                    len(id_list),
+                    time.time() - phase1_start,
+                )
+            except DatabaseError as db_e:
+                # If DB is struggling — fail fast with a 503 and helpful message
+                logger.exception(
+                    "admin_products: DatabaseError while building id_list: %s", db_e
+                )
+                return Response(
+                    {
+                        "detail": "Service temporarily unavailable (database busy). Please try again shortly."
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            except Exception as e:
+                # Generic fallback: log it and attempt to continue with empty id_list (will end up empty page)
+                logger.exception(
+                    "admin_products: unexpected error while building id_list: %s", e
+                )
+                id_list = []
+        else:
+            logger.info(
+                "admin_products: used cached ids (n=%d) in %.3fs",
+                len(id_list),
+                time.time() - t_start,
             )
-            else None
-        )
-        if cached is not None:
-            # return a DRF Response with the cached paginated payload
-            return Response(cached, status=status.HTTP_200_OK)
 
-        # -------- Phase 1: pre-window bound by recency --------
-        updated = self._best_updated_field(qs) or "id"
-        pre_window = qs.only("id", "product_code", updated).order_by(
-            F(updated).desc(nulls_last=True), "-id"
-        )
-
-        # ✅ slice IDs inside a Subquery, then rematerialize a fresh queryset
-        limited_ids = Subquery(pre_window.values("id")[: self.PRE_WINDOW_LIMIT])
-        ordered = Product.objects.filter(id__in=limited_ids)
-
-        # ✅ re-annotate norm_code because the new queryset lost annotations
-        ordered = self._annotate_norm_code(ordered).filter(product_code=F("code_trim"))
-
-        # ✅ now it’s safe to dedupe and continue
-        deduped = self._dedupe_by_norm_code_fast(ordered, order_field=updated)
-        deduped = deduped[: self.PRE_LIST_LIMIT]
-
-        # -------- Phase 3: paginate IDs --------
-        id_list = list(deduped.values_list("id", flat=True))
+        # -------- Phase 2: paginate IDs (light) --------
         paginator = self.pagination_class()
         page_ids = paginator.paginate_queryset(id_list, request, view=self)
 
@@ -3670,6 +3743,7 @@ class BaseAdminProductsView(ProductListMixin, APIView):
         order_map = {pid: i for i, pid in enumerate(id_list)}
         whens = [When(id=pid, then=order_map.get(pid, 999999)) for pid in page_ids]
 
+        # -------- Phase 3: hydrate and serialize the page (only what's required) --------
         page_qs = (
             Product.objects.filter(id__in=page_ids)
             .annotate(_pos=Case(*whens, default=999999, output_field=IntegerField()))
@@ -3681,20 +3755,31 @@ class BaseAdminProductsView(ProductListMixin, APIView):
             )
         )
 
-        # -------- Phase 4: serialize + paginate response --------
         serializer = ProductSerializer(
             page_qs, many=True, context=self.get_serializer_context()
         )
         response = paginator.get_paginated_response(serializer.data)
 
-        # -------- Phase 5: cache the final paginated payload --------
+        # -------- Phase 4: cache the final paginated payload (optional) --------
         if (
             self.cache_timeout
             and self.cache_timeout > 0
             and request.GET.get("fresh") != "1"
         ):
-            cache.set(cache_key, response.data, timeout=self.cache_timeout)
+            try:
+                cache.set(page_cache_key, response.data, timeout=self.cache_timeout)
+            except Exception:
+                logger.exception(
+                    "admin_products: failed to cache paginated payload for %s",
+                    page_cache_key,
+                )
 
+        logger.info(
+            "admin_products: total get() time %.3fs (page %s, items %d)",
+            time.time() - t_start,
+            request.GET.get("page", 1),
+            len(page_ids),
+        )
         return response
 
 
@@ -4233,7 +4318,7 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
         if facet_q:
             qs = qs.filter(facet_q)
 
-        return self._dedupe_by_norm_code_fast(qs)
+        return self._dedupe_by_norm_code_fast(self._with_norm_fields(qs))
 
     # -------------------- Main List --------------------
 

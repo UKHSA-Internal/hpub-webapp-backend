@@ -23,7 +23,7 @@ jobs:
     strategy:
       max-parallel: 1
       matrix:
-        environment: ["preprod", "prod", "uat"]
+        environment: ["uat", "preprod", "prod"]
     if: github.event_name == 'release' && github.event.action == 'published'
     permissions:
       contents: write

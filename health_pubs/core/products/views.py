@@ -15,7 +15,6 @@ from datetime import timedelta
 
 from django.db.models import (
     Q,
-    Max,
     F,
     Value,
     IntegerField,
@@ -3466,29 +3465,15 @@ class ProductListMixin:
         return queryset.order_by(primary, "id" if primary.startswith("-") else "-id")
 
     def _queryset_version(self, qs) -> int:
-        def _safe_max(qs, field_name: str):
-            try:
-                return qs.aggregate(mx=Max(field_name))["mx"]
-            except Exception:
-                return None
+        # fallback to global max created_at across all products
+        from django.db.models import Max
 
-        candidates = []
-        for f in (
-            "updated_at",
-            "latest_revision_created_at",
-            "last_published_at",
-            "first_published_at",
-            "created_at",
-        ):
-            candidates.append(_safe_max(qs, f))
-        for f in (
-            "update_ref__updated_at",
-            "update_ref__latest_revision_created_at",
-            "update_ref__last_published_at",
-            "update_ref__first_published_at",
-        ):
-            candidates.append(_safe_max(qs, f))
-        dt = max([d for d in candidates if d], default=None)
+        base_dt = (
+            qs.aggregate(mx=Max("updated_at"))["mx"]
+            or qs.aggregate(mx=Max("created_at"))["mx"]
+        )
+        global_dt = Product.objects.aggregate(mx=Max("created_at"))["mx"]
+        dt = max(filter(None, [base_dt, global_dt]), default=None)
         return int(dt.timestamp()) if dt else 0
 
     @staticmethod
@@ -3649,70 +3634,176 @@ class BaseAdminProductsView(ProductListMixin, APIView):
         if not bypass_cache:
             id_list = cache.get(ids_cache_key)
 
+        # --- replace your existing "if id_list is None:" block with this ---
         if id_list is None:
             phase1_start = time.time()
+            lock_key = f"{ids_cache_key}:lock"
+            lock_ttl = (
+                30  # seconds - should be > expected worst-case build time, or tuned
+            )
+            wait_timeout = 20  # seconds total we'll wait for another process to finish
+            wait_interval = 0.25  # seconds between checks
+
             try:
-                # Pre-window: only id, product_code and updated field (lean)
-                updated = self._best_updated_field(qs) or "id"
-                pre_window = qs.only("id", "product_code", updated).order_by(
-                    F(updated).desc(nulls_last=True), "-id"
-                )
-
-                # Slice IDs inside a Subquery to bound work
-                limited_ids_subquery = Subquery(
-                    pre_window.values("id")[: self.PRE_WINDOW_LIMIT]
-                )
-                ordered = Product.objects.filter(id__in=limited_ids_subquery)
-
-                # Re-annotate (we lost annotations when creating a fresh QS)
-                ordered = self._annotate_norm_code(ordered).filter(
-                    product_code=F("code_trim")
-                )
-
-                # Deduplicate across norm_code; this is the expensive but necessary step
+                # Try to become the builder. cache.add is atomic on most backends:
+                got_lock = False
                 try:
-                    deduped_qs = self._dedupe_by_norm_code_fast(
-                        ordered, order_field=updated
-                    )
-                    # Bound the deduped list to PRE_LIST_LIMIT
-                    deduped_qs = deduped_qs[: self.PRE_LIST_LIMIT]
-                    id_list = list(deduped_qs.values_list("id", flat=True))
-                except Exception as e:
-                    # If window/dedupe fails (e.g. DB trouble under load), fallback to safe cheaper path
-                    logger.exception(
-                        "admin_products: dedupe_by_norm_code_fast failed; falling back to cheapest path: %s",
-                        e,
-                    )
-                    id_list = list(
-                        pre_window.values_list("id", flat=True)[: self.PRE_LIST_LIMIT]
-                    )
+                    got_lock = cache.add(lock_key, "1", timeout=lock_ttl)
+                except Exception:
+                    # If cache backend doesn't implement add or errors, proceed as if no lock;
+                    # we still fallback gracefully below.
+                    got_lock = False
 
-                # If we got nothing (weird), ensure we at least have something sensible
-                if not id_list:
-                    logger.warning(
-                        "admin_products: deduped id_list empty, falling back to first PRE_LIST_LIMIT ids"
-                    )
-                    id_list = list(
-                        pre_window.values_list("id", flat=True)[: self.PRE_LIST_LIMIT]
-                    )
-
-                # Cache the id_list for the configured TTL if allowed
-                if self.cache_timeout and self.cache_timeout > 0 and not bypass_cache:
+                if got_lock:
+                    logger.info("admin_products: acquired build lock; building id_list")
                     try:
-                        cache.set(ids_cache_key, id_list, timeout=self.cache_timeout)
-                    except Exception:
-                        logger.exception(
-                            "admin_products: failed to cache id_list for %s",
-                            ids_cache_key,
+                        # === existing heavy work (unchanged) ===
+                        updated = self._best_updated_field(qs) or "id"
+                        pre_window = qs.only("id", "product_code", updated).order_by(
+                            F(updated).desc(nulls_last=True), "-id"
                         )
 
-                logger.info(
-                    "admin_products: built id_list (n=%d) in %.3fs",
-                    len(id_list),
-                    time.time() - phase1_start,
-                )
+                        limited_ids_subquery = Subquery(
+                            pre_window.values("id")[: self.PRE_WINDOW_LIMIT]
+                        )
+                        ordered = Product.objects.filter(id__in=limited_ids_subquery)
+
+                        ordered = self._annotate_norm_code(ordered).filter(
+                            product_code=F("code_trim")
+                        )
+
+                        try:
+                            deduped_qs = self._dedupe_by_norm_code_fast(
+                                ordered, order_field=updated
+                            )
+                            deduped_qs = deduped_qs[: self.PRE_LIST_LIMIT]
+                            id_list = list(deduped_qs.values_list("id", flat=True))
+                        except Exception as e:
+                            logger.exception(
+                                "admin_products: dedupe_by_norm_code_fast failed; falling back to cheapest path: %s",
+                                e,
+                            )
+                            id_list = list(
+                                pre_window.values_list("id", flat=True)[
+                                    : self.PRE_LIST_LIMIT
+                                ]
+                            )
+
+                        if not id_list:
+                            logger.warning(
+                                "admin_products: deduped id_list empty, falling back to first PRE_LIST_LIMIT ids"
+                            )
+                            id_list = list(
+                                pre_window.values_list("id", flat=True)[
+                                    : self.PRE_LIST_LIMIT
+                                ]
+                            )
+                        # === end heavy work ===
+
+                        # Cache the id_list
+                        if (
+                            self.cache_timeout
+                            and self.cache_timeout > 0
+                            and not bypass_cache
+                        ):
+                            try:
+                                cache.set(
+                                    ids_cache_key, id_list, timeout=self.cache_timeout
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "admin_products: failed to cache id_list for %s",
+                                    ids_cache_key,
+                                )
+
+                        logger.info(
+                            "admin_products: built id_list (n=%d) in %.3fs",
+                            len(id_list),
+                            time.time() - phase1_start,
+                        )
+
+                    finally:
+                        # release lock
+                        try:
+                            cache.delete(lock_key)
+                        except Exception:
+                            pass
+
+                else:
+                    # Someone else is building — wait briefly for their cache to appear.
+                    logger.info(
+                        "admin_products: build lock held by other process; waiting up to %.1fs for cached ids",
+                        wait_timeout,
+                    )
+                    waited = 0.0
+                    id_list = None
+                    while waited < wait_timeout:
+                        id_list = cache.get(ids_cache_key)
+                        if id_list is not None:
+                            logger.info(
+                                "admin_products: observed cached id_list after %.3fs (n=%d)",
+                                waited,
+                                len(id_list),
+                            )
+                            break
+                        time.sleep(wait_interval)
+                        waited += wait_interval
+
+                    if id_list is None:
+                        # waited but no cache: fallback to building locally to avoid indefinite stalls.
+                        logger.warning(
+                            "admin_products: waited %.3fs but no cached ids; attempting to build locally",
+                            waited,
+                        )
+                        # duplicate the builder work here (or call the same code path above).
+                        # For brevity, we'll re-run the same block as the 'got_lock' branch.
+                        updated = self._best_updated_field(qs) or "id"
+                        pre_window = qs.only("id", "product_code", updated).order_by(
+                            F(updated).desc(nulls_last=True), "-id"
+                        )
+                        try:
+                            limited_ids_subquery = Subquery(
+                                pre_window.values("id")[: self.PRE_WINDOW_LIMIT]
+                            )
+                            ordered = Product.objects.filter(
+                                id__in=limited_ids_subquery
+                            )
+                            ordered = self._annotate_norm_code(ordered).filter(
+                                product_code=F("code_trim")
+                            )
+                            deduped_qs = self._dedupe_by_norm_code_fast(
+                                ordered, order_field=updated
+                            )
+                            deduped_qs = deduped_qs[: self.PRE_LIST_LIMIT]
+                            id_list = list(deduped_qs.values_list("id", flat=True))
+                        except Exception as e:
+                            logger.exception(
+                                "admin_products: fallback build failed; using pre_window ids: %s",
+                                e,
+                            )
+                            id_list = list(
+                                pre_window.values_list("id", flat=True)[
+                                    : self.PRE_LIST_LIMIT
+                                ]
+                            )
+
+                        # try set cache for subsequent requests
+                        if (
+                            self.cache_timeout
+                            and self.cache_timeout > 0
+                            and not bypass_cache
+                        ):
+                            try:
+                                cache.set(
+                                    ids_cache_key, id_list, timeout=self.cache_timeout
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "admin_products: failed to cache id_list after fallback for %s",
+                                    ids_cache_key,
+                                )
+
             except DatabaseError as db_e:
-                # If DB is struggling — fail fast with a 503 and helpful message
                 logger.exception(
                     "admin_products: DatabaseError while building id_list: %s", db_e
                 )
@@ -3723,17 +3814,10 @@ class BaseAdminProductsView(ProductListMixin, APIView):
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
             except Exception as e:
-                # Generic fallback: log it and attempt to continue with empty id_list (will end up empty page)
                 logger.exception(
                     "admin_products: unexpected error while building id_list: %s", e
                 )
                 id_list = []
-        else:
-            logger.info(
-                "admin_products: used cached ids (n=%d) in %.3fs",
-                len(id_list),
-                time.time() - t_start,
-            )
 
         # -------- Phase 2: paginate IDs (light) --------
         paginator = self.pagination_class()

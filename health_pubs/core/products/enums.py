@@ -20,12 +20,8 @@ class required_event_fields_draft(Enum):
     status = "status"
     unit_of_measure = "unit_of_measure"
     run_to_zero = "run_to_zero"
-    cost_centre = "cost_centre"
-    local_code = "local_code"
     stock_owner_email_address = "stock_owner_email_address"
     order_referral_email_address = "order_referral_email_address"
-    minimum_stock_level = "minimum_stock_level"
-    file_url = "file_url"
 
 
 class required_event_fields_live(Enum):

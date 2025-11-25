@@ -107,6 +107,7 @@ from .serializers import (
     ProductSerializer,
     ProductUpdateSerializer,
     RelatedProductSerializer,
+    AdminProductSerializer,
 )
 from wagtail.models import Page
 from treebeard.mp_tree import MP_Node
@@ -2155,6 +2156,9 @@ class ProductDetailDelete(ErrorHandlingMixin, View):
             )
 
         # Change product status to 'withdrawn' instead of deleting it.
+        editor = getattr(request, "user", None)
+        if isinstance(editor, User):
+            product.user_ref = editor
         product.status = "withdrawn"
         product.save()
         return JsonResponse(
@@ -2240,6 +2244,10 @@ class ProductStatusUpdateView(APIView):
                 logger.info(
                     f"Moving product {product.product_code} live→draft; suppress_event set to True"
                 )
+
+            editor = getattr(request, "user", None)
+            if isinstance(editor, User):
+                product.user_ref = editor
             product.status = new_status
 
             # If transitioning to "live" and publish_date is not already set, update it to today's date.
@@ -2480,6 +2488,10 @@ class ProductUpdateView(APIView):
 
             # Parse and validate the request data
             data = json.loads(request.body)
+            editor = getattr(request, "user", None)
+            if isinstance(editor, User):
+                product.user_ref = editor
+
             serializer = ProductSerializer(
                 product, data=data, partial=True, context={"request": request}
             )
@@ -2601,6 +2613,10 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                 decoded_product_code,
                 product_update.id,
             )
+            # ✅ Set last-updated-by before saving
+            editor = getattr(request, "user", None)
+            if isinstance(editor, User):
+                product.user_ref = editor
 
             # Update foreign keys
             self.update_foreign_keys(product_update, data)
@@ -3157,7 +3173,12 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         )
 
         parent_page = self.get_or_create_parent_page()
-        user_instance = self.get_user_instance(data.get("user_id"))
+        auth_user = getattr(request, "user", None)
+        if isinstance(auth_user, User):
+            user_instance = auth_user
+        else:
+            user_instance = self.get_user_instance(data.get("user_id"))
+
         product_instance = self.create_product_instance(
             data, program, parent_page, user_instance, request
         )
@@ -3636,8 +3657,8 @@ class BaseAdminProductsView(ProductListMixin, APIView):
         qs = build_admin_queryset(
             request, apply_filters=self.APPLY_FILTERS
         ).select_related(
-            "program_id", "language_id", "update_ref"
-        )  # <-- ONLY THIS
+            "program_id", "language_id", "update_ref", "user_ref"
+        )  # optimized for admin view
 
         # Sort BEFORE slicing
         qs = self.get_sorted_queryset(qs, request)
@@ -3655,7 +3676,7 @@ class BaseAdminProductsView(ProductListMixin, APIView):
 
         # Pagination & serialization
         data, paginator = self.paginate_and_serialize(
-            qs, request, serializer_class=ProductSerializer, is_search=False
+            qs, request, serializer_class=AdminProductSerializer, is_search=False
         )
         response = paginator.get_paginated_response(data)
 

@@ -384,9 +384,9 @@ class AdminProductSerializer(ProductSerializer):
             last = getattr(user, "last_name", "") or ""
             name = f"{first} {last}".strip()
 
-        # Fallback to email / username
+        # Fallback to email
         if not name:
-            name = getattr(user, "email", None) or getattr(user, "username", None)
+            name = getattr(user, "email", None)
 
         return name or None
 

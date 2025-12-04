@@ -575,6 +575,7 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
     """
     Build queryset for admin list/filter views.
     - If apply_filters=True → apply faceted filters + product_code/product_title filters
+      + last_modified_by + publish_date filters
     - Else → just return all products (deduped and sorted)
     """
     mapping = {
@@ -592,8 +593,9 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
     }
 
     q = Q()
+
     if apply_filters:
-        # --- Faceted filters ---
+        # --- Faceted filters (audiences, diseases, etc.) ---
         for param, lookup in mapping.items():
             vals = request.GET.getlist(param, [])
             if vals:
@@ -616,13 +618,78 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
             title_q = Q()
             for t in titles:
                 clean_t = t.strip()
-                title_q |= Q(product_title__icontains=clean_t) | Q(
-                    product_title__icontains=clean_t
+                if not clean_t:
+                    continue
+                title_q |= Q(product_title__icontains=clean_t)
+            if title_q:
+                q &= title_q
+
+        # -------------------------------
+        # NEW: last_modified_by filter
+        # -------------------------------
+        # Accepts multiple values:
+        #  - "me" → current authenticated user
+        #  - a user_id (uuid) → matches User.user_id
+        #  - an email → matches User.email (case-insensitive)
+        last_modified_vals = request.GET.getlist("last_modified_by", [])
+        if last_modified_vals:
+            lm_q = Q()
+            user = getattr(request, "user", None)
+
+            for raw_val in last_modified_vals:
+                token = (raw_val or "").strip()
+                if not token:
+                    continue
+
+                # Special shortcut: ?last_modified_by=me
+                if token.lower() == "me" and user and user.is_authenticated:
+                    lm_q |= Q(user_ref=user)
+                    continue
+
+                # Try matching against user_id (uuid-like) and email
+                lm_q |= Q(user_ref__user_id__iexact=token) | Q(
+                    user_ref__email__iexact=token
                 )
-            q &= title_q
+
+            if lm_q:
+                q &= lm_q
+
+        # -------------------------------
+        # NEW: publish_date filters
+        # -------------------------------
+        # Supports:
+        #  - ?publish_date=YYYY-MM-DD
+        #  - ?publish_date_from=YYYY-MM-DD
+        #  - ?publish_date_to=YYYY-MM-DD
+        def _parse_date(val: str | None):
+            val = (val or "").strip()
+            if not val:
+                return None
+            for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+                try:
+                    return datetime.datetime.strptime(val, fmt).date()
+                except ValueError:
+                    continue
+            logger.warning("Invalid publish_date value %r – ignoring", val)
+            return None
+
+        exact_date = _parse_date(request.GET.get("publish_date"))
+        date_from = _parse_date(request.GET.get("publish_date_from"))
+        date_to = _parse_date(request.GET.get("publish_date_to"))
+
+        if exact_date:
+            q &= Q(publish_date=exact_date)
+        else:
+            if date_from:
+                q &= Q(publish_date__gte=date_from)
+            if date_to:
+                q &= Q(publish_date__lte=date_to)
 
     qs = Product.objects.filter(q).select_related(
-        "program_id", "language_id", "update_ref"
+        "program_id",
+        "language_id",
+        "update_ref",
+        "user_ref",  # so admin list has editor info without extra queries
     )
 
     return qs
@@ -3372,6 +3439,8 @@ if "ALLOWED_SORT_FIELDS" not in globals():
         "-product_title",
         "created_at",
         "-created_at",
+        "publish_date",
+        "-publish_date",
         "updated_at",
         "-updated_at",
         "program_id",
@@ -3455,7 +3524,6 @@ class ProductListMixin:
         Lightweight preparation for user-facing lists.
         Does NOT change admin queryset behavior.
         """
-
         qs = self._annotate_norm_code(qs)
         qs = qs.filter(product_code=F("code_trim"))
 
@@ -3484,6 +3552,7 @@ class ProductListMixin:
             "last_published_at",
             "first_published_at",
             "created_at",
+            "publish_date",
         ):
             if self._model_has_field(qs.model, name):
                 return name
@@ -3498,10 +3567,19 @@ class ProductListMixin:
         sign = "-" if field.startswith("-") else ""
         raw = field.lstrip("-")
 
+        # 1) Explicit publish_date should *stay* publish_date
+        if raw == "publish_date":
+            if self._model_has_field(qs.model, "publish_date"):
+                return f"{sign}publish_date"
+            # If model doesn't have publish_date, fall back safely
+            return f"{sign}id"
+
+        # 2) For updated_at / created_at, pick the "best" available date field
         if raw in {"updated_at", "created_at"}:
             best = self._best_updated_field(qs)
             return f"{sign}{best}" if best else f"{sign}id"
 
+        # 3) All other fields: honour exactly if they exist, else fall back to id
         return f"{sign}{raw}" if self._model_has_field(qs.model, raw) else f"{sign}id"
 
     def get_sorted_queryset(self, qs, request):
@@ -3621,6 +3699,29 @@ class ProductListMixin:
     # QUERYSET VERSIONING
     # ---------------------------------------------------------------------- #
 
+    @staticmethod
+    def _to_aware_datetime(value: Any) -> Optional[datetime.datetime]:
+        """
+        Normalise a value that may be a date or datetime into an aware datetime.
+        Returns None if it can't be interpreted.
+        """
+        if value is None:
+            return None
+
+        # DateField (e.g. publish_date) → midnight that day
+        if isinstance(value, datetime.date) and not isinstance(
+            value, datetime.datetime
+        ):
+            dt = datetime.datetime.combine(value, datetime.time.min)
+        elif isinstance(value, datetime.datetime):
+            dt = value
+        else:
+            return None
+
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone.get_default_timezone())
+        return dt
+
     def _queryset_version(self, qs):
         def safe_max(qs, field):
             try:
@@ -3628,18 +3729,29 @@ class ProductListMixin:
             except Exception:
                 return None
 
-        candidates = []
+        # Collect raw maxima (may be date or datetime or None)
+        raw_candidates = []
         for f in (
             "updated_at",
             "latest_revision_created_at",
             "last_published_at",
             "first_published_at",
             "created_at",
+            "publish_date",
         ):
-            candidates.append(safe_max(qs, f))
+            raw_candidates.append(safe_max(qs, f))
 
-        d = max([x for x in candidates if x], default=None)
-        return int(d.timestamp()) if d else 0
+        # Coerce to aware datetimes and drop anything we can't parse
+        dt_candidates = [
+            self._to_aware_datetime(x) for x in raw_candidates if x is not None
+        ]
+        dt_candidates = [x for x in dt_candidates if x is not None]
+
+        if not dt_candidates:
+            return 0
+
+        d = max(dt_candidates)
+        return int(d.timestamp())
 
 
 class BaseAdminProductsView(ProductListMixin, APIView):

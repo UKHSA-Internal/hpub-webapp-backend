@@ -118,6 +118,61 @@ class VaccinationCreateViewSet(viewsets.ModelViewSet):
             raise ValidationError({"error": "Error creating/retrieving parent page."})
 
 
+class VaccinationEditViewSet(viewsets.ModelViewSet):
+    """
+    Allows admin users to update or partially update existing Vaccination records.
+    """
+
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    queryset = Vaccination.objects.all()
+    serializer_class = VaccinationSerializer
+
+    def update(self, request, *args, **kwargs):
+        """PUT - Full update"""
+        try:
+            vaccination = self.get_object()
+            serializer = self.get_serializer(vaccination, data=request.data)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            logger.info(f"Vaccination '{vaccination.name}' updated successfully.")
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Vaccination.DoesNotExist:
+            return Response(
+                {"error": "Vaccination not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except Exception as e:
+            logger.error(f"Error updating vaccination: {str(e)}")
+            return Response(
+                {"error": "Failed to update vaccination."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    def partial_update(self, request, *args, **kwargs):
+        """PATCH - Partial update"""
+        try:
+            vaccination = self.get_object()
+            serializer = self.get_serializer(
+                vaccination, data=request.data, partial=True
+            )
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            logger.info(f"Vaccination '{vaccination.name}' partially updated.")
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Vaccination.DoesNotExist:
+            return Response(
+                {"error": "Vaccination not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except Exception as e:
+            logger.error(f"Error partially updating vaccination: {str(e)}")
+            return Response(
+                {"error": "Failed to partially update vaccination."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
 class VaccinationListViewSet(viewsets.ReadOnlyModelViewSet):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]

@@ -315,6 +315,7 @@ class ProductSerializer(serializers.ModelSerializer):
 
     update_ref = ProductUpdateSerializer(read_only=True)
     product_code_no_dashes = serializers.CharField(read_only=True)
+    user_order_limit = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -340,6 +341,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "suppress_event",
             "update_ref",
             "order_limits",
+            "user_order_limit",
             "created_at",
             "updated_at",
         )
@@ -350,6 +352,38 @@ class ProductSerializer(serializers.ModelSerializer):
 
     def get_existing_languages(self, obj):
         return obj.existing_languages
+
+    def get_user_order_limit(self, obj):
+        """
+        Return the order_limit for this product for the current user's organisation.
+        If the user is not authenticated, has no organisation, or no matching
+        OrderLimitPage exists, return None.
+        """
+        request = self.context.get("request")
+        if not request:
+            return None
+
+        user = getattr(request, "user", None)
+        # Your custom User has its own is_authenticated, but this guards the DRF/AnonUser too
+        if not user or not getattr(user, "is_authenticated", False):
+            return 5  # Default order limit for unauthenticated users
+
+        org = getattr(user, "organization_ref", None)
+        if not org:
+            return 5  # Default order limit for users without an organization
+
+        # Use the reverse relation: Product -> OrderLimitPage (order_limits)
+        # If order_limits is prefetched, this stays in memory; otherwise it's a small query.
+        try:
+            limit_obj = obj.order_limits.filter(organization_ref=org).first()
+        except Exception:
+            # Defensive: if for some reason order_limits is not a manager
+            return None
+
+        if not limit_obj:
+            return None
+
+        return limit_obj.order_limit
 
     def create(self, validated_data):
         # Check if the 'product_id' is provided in the request

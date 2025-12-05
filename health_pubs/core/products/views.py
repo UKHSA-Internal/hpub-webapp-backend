@@ -1573,6 +1573,9 @@ class ProductUtilsMixin:
         return created
 
 
+# ------------------------------------------------------------------ #
+# Main ViewSet  : Product Bulk Upload, Related Publications           #
+# ------------------------------------------------------------------ #
 class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
     authentication_classes: List = []
     permission_classes: List = []
@@ -2057,12 +2060,32 @@ class PresignedUrlMixin:
 # Product detail view
 # --------------------------------------------------------------------------- #
 class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
+    """
+    Retrieves a single Product by its product_code.
+    Includes presigned S3 URLs, order limit prefetch, and caching.
+    """
+
     authentication_classes = [CustomTokenAuthentication, SessionAuthentication]
     permission_classes = [AllowAny]
 
     def retrieve(self, request, product_code=None, *args, **kwargs):
-        code = unquote(product_code or "")
-        product = Product.objects.filter(product_code=code).first()
+        # Decode and sanitize product code
+        code = unquote(product_code or "").strip()
+        if not code:
+            return handle_error(
+                ErrorCode.PRODUCT_NOT_FOUND,
+                ErrorMessage.PRODUCT_NOT_FOUND,
+                status.HTTP_404_NOT_FOUND,
+            )
+
+        #  Prefetch related order_limits for per-user org limit lookups
+        product = (
+            Product.objects.filter(product_code=code)
+            .select_related("update_ref")
+            .prefetch_related("order_limits")
+            .first()
+        )
+
         if not product:
             return handle_error(
                 ErrorCode.PRODUCT_NOT_FOUND,
@@ -2070,53 +2093,70 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
                 status.HTTP_404_NOT_FOUND,
             )
 
+        # Build version timestamp for cache key
         ver_ts = self._get_version_timestamp(product)
-        cache_key, bypass = self._get_cache_key_and_bypass(request, code, ver_ts)
+        cache_key, bypass_cache = self._get_cache_key_and_bypass(request, code, ver_ts)
 
-        if not bypass:
-            cached = cache.get(cache_key)
-            if cached:
-                return self._cached_response(cached, code, ver_ts)
+        # Try returning cached response (skip for staff or ?fresh=1)
+        if not bypass_cache:
+            cached_data = cache.get(cache_key)
+            if cached_data:
+                return self._cached_response(cached_data, code, ver_ts)
 
-        data = ProductSerializer(product, context={"request": request}).data
+        #  Serialize product with full context (for user-aware fields)
+        serializer = ProductSerializer(product, context={"request": request})
+        data = serializer.data
+
+        #  Apply presigned URLs and metadata
         self._process_presigned_urls(data)
 
+        #  Cache the result for faster repeated lookups
         ttl = getattr(settings, "CACHE_TTL_DETAIL", 60)
-        if ttl and ttl > 0 and not bypass:
+        if ttl > 0 and not bypass_cache:
             cache.set(cache_key, data, ttl)
 
+        #  Return the fresh JSON response
         return self._fresh_response(data, code, ver_ts)
 
+    # ------------------------------
+    # Internal helpers
+    # ------------------------------
+
     def _get_version_timestamp(self, product: Product) -> int:
-        ver_sources = []
+        """Build a version-based timestamp using product + update_ref."""
+        timestamps = []
         if getattr(product, "updated_at", None):
-            ver_sources.append(product.updated_at)
+            timestamps.append(product.updated_at)
         if getattr(product, "update_ref", None) and getattr(
             product.update_ref, "updated_at", None
         ):
-            ver_sources.append(product.update_ref.updated_at)
-        return int(max(ver_sources).timestamp()) if ver_sources else 0
+            timestamps.append(product.update_ref.updated_at)
+        return int(max(timestamps).timestamp()) if timestamps else 0
 
     def _get_cache_key_and_bypass(
         self, request, code: str, ver_ts: int
     ) -> tuple[str, bool]:
+        """Compose cache key and determine whether to skip cache."""
         cache_key = f"product_detail:v{ver_ts}:{code}"
-        bypass = (request.GET.get("fresh") == "1") or getattr(
+        bypass_cache = (request.GET.get("fresh") == "1") or getattr(
             request.user, "is_staff", False
         )
-        return cache_key, bypass
+        return cache_key, bypass_cache
 
     def _cached_response(self, cached: dict, code: str, ver_ts: int) -> JsonResponse:
+        """Return cached JSON response with headers."""
         resp = JsonResponse(cached, status=status.HTTP_200_OK)
         self._set_headers(resp, code, ver_ts)
         return resp
 
     def _fresh_response(self, data: dict, code: str, ver_ts: int) -> JsonResponse:
+        """Return new JSON response with proper headers."""
         resp = JsonResponse(data, status=status.HTTP_200_OK)
         self._set_headers(resp, code, ver_ts)
         return resp
 
     def _set_headers(self, resp: JsonResponse, code: str, ver_ts: int) -> None:
+        """Attach cache + version headers for client-side consistency."""
         resp["Cache-Control"] = "no-store"
         resp["ETag"] = f'W/"{code}-{ver_ts}"'
         if ver_ts:
@@ -2613,7 +2653,7 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                 decoded_product_code,
                 product_update.id,
             )
-            # ✅ Set last-updated-by before saving
+            #  Set last-updated-by before saving
             editor = getattr(request, "user", None)
             if isinstance(editor, User):
                 product.user_ref = editor

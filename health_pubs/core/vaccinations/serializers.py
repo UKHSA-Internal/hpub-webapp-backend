@@ -9,9 +9,9 @@ class VaccinationSerializer(serializers.ModelSerializer):
     program_names = serializers.ListField(
         child=serializers.CharField(),
         write_only=True,
-        required=True,
+        required=False,  # allow partial updates
     )
-    programs = serializers.SerializerMethodField()  # Read-only field
+    programs = serializers.SerializerMethodField()
 
     class Meta:
         model = Vaccination
@@ -20,31 +20,64 @@ class VaccinationSerializer(serializers.ModelSerializer):
             "name",
             "description",
             "key",
-            "program_names",
-            "programs",
+            "program_names",  # used for create OR adding
+            "programs",  # read-only list for UI
         ]
 
     def get_programs(self, obj):
-        # This method provides the output for the programs field
-        return [program.program_id for program in obj.programs.all()]
+        # Return readable programme names for frontend display
+        return [p.programme_name for p in obj.programs.all()]
 
+    # -------------------------
+    # CREATE (existing logic)
+    # -------------------------
     def create(self, validated_data):
-        # Handle creation logic, linking programs through program_names
-        program_names = validated_data.pop("program_names")
+        program_names = validated_data.pop("program_names", [])
         programs = []
+
         for program_name in program_names:
             try:
                 program = Program.objects.get(programme_name=program_name)
                 programs.append(program)
             except Program.DoesNotExist:
                 raise ValidationError(
-                    {"error": f"Program '{program_name}' does not exist."}
+                    {"error": f"Programme '{program_name}' does not exist."}
                 )
 
-        vaccination_instance = Vaccination.objects.create(**validated_data)
-        # Set many-to-many relationship
-        vaccination_instance.programs.set(programs)
-        return vaccination_instance
+        vaccination = Vaccination.objects.create(**validated_data)
+        vaccination.programs.set(programs)
+        return vaccination
+
+    # -------------------------
+    # UPDATE (NEW LOGIC)
+    # Only ADD new programmes; existing remain untouched
+    # -------------------------
+    def update(self, instance, validated_data):
+        # Update editable fields
+        instance.name = validated_data.get("name", instance.name)
+        instance.description = validated_data.get("description", instance.description)
+        instance.key = validated_data.get("key", instance.key)
+        instance.save()
+
+        # Existing programmes remain unchanged (AC rule)
+        existing_programs = set(instance.programs.all())
+
+        # New programmes to add
+        new_program_names = validated_data.get("program_names", [])
+        new_programs = set()
+
+        for name in new_program_names:
+            try:
+                p = Program.objects.get(programme_name=name)
+                new_programs.add(p)
+            except Program.DoesNotExist:
+                raise ValidationError({"error": f"Programme '{name}' does not exist."})
+
+        # Merge existing + new
+        final_programs = existing_programs.union(new_programs)
+        instance.programs.set(final_programs)
+
+        return instance
 
 
 class VaccinationListSerializer(serializers.Serializer):

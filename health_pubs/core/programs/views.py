@@ -142,10 +142,10 @@ class ProgramCreateViewSet(viewsets.ViewSet):
                     if bool(entry.get("is_featured")):
                         _assert_featured_capacity()
 
-                    # ✅ use your unique slug helper
+                    #  use your unique slug helper
                     slug = self.get_unique_slug(slugify(name))
 
-                    # ✅ use your next base-36 ID helper (≤ 22 chars)
+                    #  use your next base-36 ID helper (≤ 22 chars)
                     program_id = entry.get("program_id") or self.get_next_program_id()
 
                     program_instance = Program(
@@ -303,10 +303,42 @@ class ProgramListViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path=r"list/(?P<program_id>[^/]+)",
+        authentication_classes=[CustomTokenAuthentication],
+        permission_classes=[IsAuthenticated, IsAdminUser],
+    )
+    def list_by_program_id(self, request, program_id=None):
+        """
+        Admin-only endpoint to list programs by program_id.
+        Example: GET /api/v1/programs/list/ABC123/
+        """
+        try:
+            qs = Program.objects.filter(program_id=program_id)
+            if not qs.exists():
+                return Response(
+                    {"detail": f"No program found with program_id '{program_id}'."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            serializer = self.get_serializer(qs, many=True)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.exception("Error fetching programs by program_id")
+            return Response(
+                {"detail": "Unexpected error occurred.", "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
 
 class ProgramUpdateViewSet(viewsets.ModelViewSet):
     """
     Private/admin update + retrieve by program_id.
+    Allows updating ANY editable field on Program via the serializer,
+    with special handling to enforce capacity when toggling `is_featured` on.
     """
 
     authentication_classes = [CustomTokenAuthentication]
@@ -316,26 +348,52 @@ class ProgramUpdateViewSet(viewsets.ModelViewSet):
     serializer_class = ProgramSerializer
     lookup_field = "program_id"
 
-    def update(self, request, *args, **kwargs):
+    def _normalize_is_featured(self, data):
+        """
+        Normalise `is_featured` in incoming data to a real bool if present.
+        Returns (normalized_value_or_None, mutated_data_dict).
+        """
+        if "is_featured" not in data:
+            return None, data
+
+        raw = data.get("is_featured")
+
+        # If already a bool, just return it
+        if isinstance(raw, bool):
+            return raw, data
+
+        # Handle common string / numeric representations
+        if isinstance(raw, str):
+            value = raw.strip().lower()
+            if value in {"true", "1", "yes", "y"}:
+                data["is_featured"] = True
+                return True, data
+            if value in {"false", "0", "no", "n"}:
+                data["is_featured"] = False
+                return False, data
+
+        # Fallback: leave it as-is and let the serializer validate
+        return raw, data
+
+    def _update_instance(self, request, partial=False):
         instance: Program = self.get_object()
         data = request.data.copy()
 
-        wants_featured = data.get("is_featured", None)
-        if isinstance(wants_featured, str):
-            wants_featured = wants_featured.lower() in {"true", "1", "yes"}
+        # Normalise is_featured if present, but allow all other fields through
+        normalized_is_featured, data = self._normalize_is_featured(data)
 
         try:
             with transaction.atomic():
-                # Enforce cap only when going False -> True
-                if wants_featured is True and not instance.is_featured:
+                # Enforce cap only when we are turning is_featured from False -> True
+                if normalized_is_featured is True and instance.is_featured is False:
                     _assert_featured_capacity(exclude_program_id=instance.program_id)
 
-                ser = self.get_serializer(instance, data=data, partial=True)
-                ser.is_valid(raise_exception=True)
-                obj = ser.save()
-                obj.save()
+                serializer = self.get_serializer(instance, data=data, partial=partial)
+                serializer.is_valid(raise_exception=True)
+                obj = serializer.save()  # save all updated fields
+                obj.save()  # in case serializer does not call save() again
 
-            return Response(ser.data, status=status.HTTP_200_OK)
+            return Response(serializer.data, status=status.HTTP_200_OK)
 
         except (DRFValidationError, DjangoValidationError) as ve:
             return Response(
@@ -348,6 +406,18 @@ class ProgramUpdateViewSet(viewsets.ModelViewSet):
                 {"detail": "Unable to update program", "error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+    def update(self, request, *args, **kwargs):
+        """
+        PUT – typically full update (but we still allow missing fields via serializer config).
+        """
+        return self._update_instance(request, partial=False)
+
+    def partial_update(self, request, *args, **kwargs):
+        """
+        PATCH – partial update of any subset of fields.
+        """
+        return self._update_instance(request, partial=True)
 
 
 class ProgramDestroyViewSet(viewsets.ModelViewSet):

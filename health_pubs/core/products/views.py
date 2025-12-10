@@ -66,6 +66,9 @@ from rest_framework.filters import OrderingFilter, SearchFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from django.conf import settings
 from django.core.cache import cache
+from contextlib import contextmanager
+from aws_xray_sdk.core import xray_recorder
+
 
 from core.vaccinations.models import Vaccination
 from core.vaccinations.serializers import VaccinationSerializer
@@ -569,6 +572,29 @@ def invalidate_product_caches(product_code: str | None = None):
     except AttributeError:
         # Backend doesn't support delete_pattern — rely on TTL.
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Context manager: safe_subsegment                                          #
+# --------------------------------------------------------------------------- #
+@contextmanager
+def safe_subsegment(name: str):
+    """
+    Safely open an X-Ray subsegment only when a segment is active.
+    Avoids 'cannot find the current segment/subsegment' errors in dev/local.
+    """
+    try:
+        seg = xray_recorder.current_segment()
+    except Exception:
+        seg = None
+
+    if not seg:
+        # No active segment → no-op context manager
+        yield None
+        return
+
+    with xray_recorder.in_subsegment(name) as sub:
+        yield sub
 
 
 # --------------------------------------------------------------------------- #
@@ -2025,7 +2051,6 @@ class PresignedUrlMixin:
         for slot in slots:
             urls.extend(extract_from_val(product_downloads.get(slot)))
 
-        # de-dupe while preserving order
         seen, out = set(), []
         for u in urls:
             if u and u not in seen:
@@ -2033,7 +2058,6 @@ class PresignedUrlMixin:
                 out.append(u)
         return out
 
-    # -------- applicators --------
     @staticmethod
     def _is_doc_mime(m: str) -> bool:
         m = (m or "").lower()
@@ -2127,33 +2151,40 @@ class PresignedUrlMixin:
             if k in md:
                 item[k] = md[k]
 
-    # -------- main hook --------
     def _process_presigned_urls(self, response_data: Dict[str, Any]) -> None:
-        update_refs = response_data.get("update_ref")
-        if not isinstance(update_refs, dict):
-            return
+        """
+        Entry point used by detail view to attach metadata + presigned URLs.
+        Now wrapped in safe X-Ray subsegments.
+        """
+        with safe_subsegment("presign_process_product_downloads"):
+            update_refs = response_data.get("update_ref")
+            if not isinstance(update_refs, dict):
+                return
 
-        product_downloads = self._parse_product_downloads(
-            update_refs.get("product_downloads")
-        )
-        if not isinstance(product_downloads, dict):
-            return
-        update_refs["product_downloads"] = product_downloads
+            product_downloads = self._parse_product_downloads(
+                update_refs.get("product_downloads")
+            )
+            if not isinstance(product_downloads, dict):
+                return
+            update_refs["product_downloads"] = product_downloads
 
-        all_slots = list(self._ALL_SLOTS)
-        urls_all = self._collect_s3_urls(product_downloads, slots=all_slots)
-        if not urls_all:
-            return
+            all_slots = list(self._ALL_SLOTS)
+            urls_all = self._collect_s3_urls(product_downloads, slots=all_slots)
+            if not urls_all:
+                return
 
-        presigned, inline_presigned = self._generate_presigned_pairs(urls_all)
-        metadata_dict = self._build_metadata_dict(presigned, urls_all)
+            with safe_subsegment("generate_presigned_pairs"):
+                presigned, inline_presigned = self._generate_presigned_pairs(urls_all)
 
-        for slot in all_slots:
-            val = product_downloads.get(slot)
-            if val is not None:
-                product_downloads[slot] = self._apply_metadata_and_presigned(
-                    val, presigned, inline_presigned, metadata_dict
-                )
+            with safe_subsegment("build_metadata_dict"):
+                metadata_dict = self._build_metadata_dict(presigned, urls_all)
+
+            for slot in all_slots:
+                val = product_downloads.get(slot)
+                if val is not None:
+                    product_downloads[slot] = self._apply_metadata_and_presigned(
+                        val, presigned, inline_presigned, metadata_dict
+                    )
 
     def _parse_product_downloads(self, product_downloads: Any) -> Any:
         if isinstance(product_downloads, str):
@@ -2210,6 +2241,8 @@ class PresignedUrlMixin:
 # --------------------------------------------------------------------------- #
 # Product detail view
 # --------------------------------------------------------------------------- #
+
+
 class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
     """
     Retrieves a single Product by its product_code.
@@ -2220,7 +2253,6 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
     permission_classes = [AllowAny]
 
     def retrieve(self, request, product_code=None, *args, **kwargs):
-        # Decode and sanitize product code
         code = unquote(product_code or "").strip()
         if not code:
             return handle_error(
@@ -2229,13 +2261,23 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
                 status.HTTP_404_NOT_FOUND,
             )
 
-        #  Prefetch related order_limits for per-user org limit lookups
-        product = (
-            Product.objects.filter(product_code=code)
-            .select_related("update_ref")
-            .prefetch_related("order_limits")
-            .first()
-        )
+        # Annotate this request in X-Ray (only if segment exists)
+        try:
+            seg = xray_recorder.current_segment()
+        except Exception:
+            seg = None
+        if seg:
+            seg.put_annotation("endpoint", "products.detail")
+            seg.put_annotation("product_code", code)
+
+        # DB fetch
+        with safe_subsegment("db_fetch_product"):
+            product = (
+                Product.objects.filter(product_code=code)
+                .select_related("update_ref")
+                .prefetch_related("order_limits")
+                .first()
+            )
 
         if not product:
             return handle_error(
@@ -2248,23 +2290,25 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
         ver_ts = self._get_version_timestamp(product)
         cache_key, bypass_cache = self._get_cache_key_and_bypass(request, code, ver_ts)
 
-        # Try returning cached response (skip for staff or ?fresh=1)
         if not bypass_cache:
-            cached_data = cache.get(cache_key)
+            with safe_subsegment("cache_lookup_detail"):
+                cached_data = cache.get(cache_key)
             if cached_data:
                 return self._cached_response(cached_data, code, ver_ts)
 
-        #  Serialize product with full context (for user-aware fields)
-        serializer = ProductSerializer(product, context={"request": request})
-        data = serializer.data
+        # Serialize
+        with safe_subsegment("serialize_product"):
+            serializer = ProductSerializer(product, context={"request": request})
+            data = serializer.data
 
-        #  Apply presigned URLs and metadata
-        self._process_presigned_urls(data)
+        # Presign + metadata
+        with safe_subsegment("presign_and_metadata"):
+            self._process_presigned_urls(data)
 
-        #  Cache the result for faster repeated lookups
         ttl = getattr(settings, "CACHE_TTL_DETAIL", 60)
         if ttl > 0 and not bypass_cache:
-            cache.set(cache_key, data, ttl)
+            with safe_subsegment("cache_set_detail"):
+                cache.set(cache_key, data, ttl)
 
         #  Return the fresh JSON response
         return self._fresh_response(data, code, ver_ts)
@@ -2274,7 +2318,6 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
     # ------------------------------
 
     def _get_version_timestamp(self, product: Product) -> int:
-        """Build a version-based timestamp using product + update_ref."""
         timestamps = []
         if getattr(product, "updated_at", None):
             timestamps.append(product.updated_at)
@@ -3043,54 +3086,54 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         """
         Attach presigned URLs and file metadata to file_urls.
         Ensures TTL alignment with cache and safe defaults if metadata is missing.
+        Now wrapped in safe X-Ray subsegments for profiling.
         """
-        presign_ttl = int(getattr(settings, "PRESIGNED_URL_TTL", 3600))
-        effective_ttl = max(0, presign_ttl - 5)  # safety margin
+        with safe_subsegment("add_file_metadata"):
+            presign_ttl = int(getattr(settings, "PRESIGNED_URL_TTL", 3600))
+            effective_ttl = max(0, presign_ttl - 5)
 
-        # Collect URLs
-        all_urls = []
-        if file_urls.get("main_download_url"):
-            all_urls.append(file_urls["main_download_url"])
-        for key, value in file_urls.items():
-            if key != "main_download_url" and isinstance(value, list):
-                all_urls.extend(value)
+            all_urls = []
+            if file_urls.get("main_download_url"):
+                all_urls.append(file_urls["main_download_url"])
+            for key, value in file_urls.items():
+                if key != "main_download_url" and isinstance(value, list):
+                    all_urls.extend(value)
 
-        # Generate presigns
-        presigned = generate_presigned_urls(all_urls, expiration=effective_ttl)
-        inline_presigned = generate_inline_presigned_urls(
-            all_urls, expiration=effective_ttl
-        )
+            with safe_subsegment("metadata_presign"):
+                presigned = generate_presigned_urls(all_urls, expiration=effective_ttl)
+                inline_presigned = generate_inline_presigned_urls(
+                    all_urls, expiration=effective_ttl
+                )
 
-        # Metadata lookup (guarded by feature flag if needed)
-        metadata_dict = {}
-        if getattr(settings, "FILE_METADATA_ENABLED", True) and presigned:
-            metadata_list = get_file_metadata(list(presigned.values()))
-            metadata_dict = {meta["URL"]: meta for meta in metadata_list}
+            metadata_dict = {}
+            if getattr(settings, "FILE_METADATA_ENABLED", True) and presigned:
+                with safe_subsegment("metadata_fetch"):
+                    metadata_list = get_file_metadata(list(presigned.values()))
+                metadata_dict = {meta["URL"]: meta for meta in metadata_list}
 
-        # Build a new dict (don’t mutate in place)
-        result = {}
-        for key, value in file_urls.items():
-            if key == "main_download_url" and value:
-                presigned_url = presigned.get(value)
-                meta = metadata_dict.get(presigned_url, {"URL": value})
-                result[key] = {
-                    **meta,
-                    "s3_bucket_url": value,
-                    "inline_presigned_s3_url": inline_presigned.get(value, ""),
-                }
-            elif isinstance(value, list):
-                result[key] = [
-                    {
-                        **metadata_dict.get(presigned.get(url), {"URL": url}),
-                        "s3_bucket_url": url,
-                        "inline_presigned_s3_url": inline_presigned.get(url, ""),
+            result = {}
+            for key, value in file_urls.items():
+                if key == "main_download_url" and value:
+                    presigned_url = presigned.get(value)
+                    meta = metadata_dict.get(presigned_url, {"URL": value})
+                    result[key] = {
+                        **meta,
+                        "s3_bucket_url": value,
+                        "inline_presigned_s3_url": inline_presigned.get(value, ""),
                     }
-                    for url in value
-                ]
-            else:
-                result[key] = value
+                elif isinstance(value, list):
+                    result[key] = [
+                        {
+                            **metadata_dict.get(presigned.get(url), {"URL": url}),
+                            "s3_bucket_url": url,
+                            "inline_presigned_s3_url": inline_presigned.get(url, ""),
+                        }
+                        for url in value
+                    ]
+                else:
+                    result[key] = value
 
-        return result
+            return result
 
     def prepare_product_update_data(
         self,
@@ -3900,6 +3943,11 @@ class ProductListMixin:
 
 
 class BaseAdminProductsView(ProductListMixin, APIView):
+    """
+    Admin API endpoint for listing products.
+    Supports sorting, pagination, and (optionally) filters.
+    """
+
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAdminUser]
     include_request_context = True
@@ -3909,54 +3957,69 @@ class BaseAdminProductsView(ProductListMixin, APIView):
     APPLY_FILTERS = False
 
     def get(self, request, *args, **kwargs):
-        PRE_LIST_LIMIT = int(getattr(settings, "ADMIN_PRE_LIST_LIMIT", 1500))
+        # Annotate (safe)
+        try:
+            seg = xray_recorder.current_segment()
+        except Exception:
+            seg = None
+        if seg:
+            seg.put_annotation("endpoint", "admin.products_list")
+            seg.put_metadata("apply_filters", self.APPLY_FILTERS, "admin")
 
-        qs = build_admin_queryset(
-            request, apply_filters=self.APPLY_FILTERS
-        ).select_related("program_id", "language_id", "update_ref", "user_ref")
+        try:
+            PRE_LIST_LIMIT = int(getattr(settings, "ADMIN_PRE_LIST_LIMIT", 1500))
 
-        # Sort BEFORE slicing
-        qs = self.get_sorted_queryset(qs, request)
+            # Build queryset
+            with safe_subsegment("build_admin_queryset") as sub:
+                qs = build_admin_queryset(
+                    request, apply_filters=self.APPLY_FILTERS
+                ).select_related("program_id", "language_id", "update_ref", "user_ref")
+                if sub:
+                    sub.put_metadata("qs_count_initial", qs.count(), "db")
 
-        # Slice after ordering
-        qs = qs[:PRE_LIST_LIMIT]
+            # Sorting
+            with safe_subsegment("sort_queryset"):
+                qs = self.get_sorted_queryset(qs, request)
 
-        # Cache
-        admin_cache_key = (
-            f"admin_list:{request.get_full_path()}:v{self._queryset_version(qs)}"
-        )
-        cached = cache.get(admin_cache_key)
-        if cached:
-            return Response(cached)
+            # Slice for limit
+            with safe_subsegment("slice_queryset") as sub:
+                qs = qs[:PRE_LIST_LIMIT]
+                if sub:
+                    sub.put_metadata("limit", PRE_LIST_LIMIT, "admin")
 
-        # Pagination & serialization
-        data, paginator = self.paginate_and_serialize(
-            qs, request, serializer_class=AdminProductSerializer, is_search=False
-        )
-        response = paginator.get_paginated_response(data)
+            # Cache lookup
+            admin_cache_key = (
+                f"admin_list:{request.get_full_path()}:v{self._queryset_version(qs)}"
+            )
 
-        cache.set(admin_cache_key, response.data, 30)
-        return response
+            with safe_subsegment("cache_lookup_admin_list"):
+                cached = cache.get(admin_cache_key)
+            if cached:
+                return Response(cached)
 
-    # ------------------------------------------------------------------ #
-    # Default ordering by updated_at desc                                #
-    # ------------------------------------------------------------------ #
-    def get_sorted_queryset(self, qs, request):
-        """
-        Apply sorting based on request params (if provided),
-        otherwise default to most recently updated first.
-        """
-        sort_field = request.query_params.get("sort_by")
-        sort_order = request.query_params.get("order", "desc")
+            # Pagination + serialization
+            with safe_subsegment("paginate_serialize"):
+                data, paginator = self.paginate_and_serialize(
+                    qs,
+                    request,
+                    serializer_class=AdminProductSerializer,
+                    is_search=False,
+                )
+                response = paginator.get_paginated_response(data)
 
-        if sort_field:
-            # normalize
-            sort_field = sort_field.lstrip("-")  # <--- fix
-            prefix = "" if sort_order == "asc" else "-"
-            return qs.order_by(f"{prefix}{sort_field}")
+            # Cache write
+            with safe_subsegment("cache_set_admin_list"):
+                cache.set(admin_cache_key, response.data, 30)
 
-        # Default ordering
-        return qs.order_by("-updated_at")
+            return response
+
+        except Exception as e:
+            logger.exception("Admin list error: %s", e)
+            return handle_error(
+                ErrorCode.INTERNAL_SERVER_ERROR,
+                ErrorMessage.INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -3973,12 +4036,22 @@ class ProductUsersListView(ProductListMixin, APIView):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
     include_request_context = True
-    presign_in_lists = True  # ❗ USERS NEED PRESIGNED URLS
+    presign_in_lists = True
     cache_timeout = getattr(settings, "CACHE_TTL_LIST", 30)
 
     def get(self, request, *args, **kwargs):
+        # Annotate endpoint safely
         try:
-            base = Product.objects.filter(is_latest=True, status="live")
+            seg = xray_recorder.current_segment()
+        except Exception:
+            seg = None
+        if seg:
+            seg.put_annotation("endpoint", "products.users_list")
+
+        try:
+            with safe_subsegment("base_queryset"):
+                base = Product.objects.filter(is_latest=True, status="live")
+
             if not base.exists():
                 return handle_error(
                     ErrorCode.PRODUCT_NOT_FOUND,
@@ -3986,17 +4059,23 @@ class ProductUsersListView(ProductListMixin, APIView):
                     status_code=status.HTTP_404_NOT_FOUND,
                 )
 
-            qs = self.optimize_for_search(base)
-            sorted_qs = self.get_sorted_queryset(qs, request)
+            with safe_subsegment("optimize_for_search"):
+                qs = self.optimize_for_search(base)
 
-            data, paginator = self.paginate_and_serialize(
-                sorted_qs,
-                request,
-                serializer_class=ProductSearchSerializer,
-                is_search=False,
-            )
+            with safe_subsegment("sort_queryset"):
+                sorted_qs = self.get_sorted_queryset(qs, request)
 
-            data = filter_live_languages(data)
+            with safe_subsegment("paginate_serialize_presign"):
+                data, paginator = self.paginate_and_serialize(
+                    sorted_qs,
+                    request,
+                    serializer_class=ProductSearchSerializer,
+                    is_search=False,
+                )
+
+            with safe_subsegment("filter_live_languages"):
+                data = filter_live_languages(data)
+
             return paginator.get_paginated_response(data)
 
         except Exception as e:
@@ -4107,74 +4186,90 @@ class ProductSearchUserView(BaseProductSearchView):
     cache_timeout = getattr(settings, "CACHE_TTL_LIST", 30)
     pagination_class = CustomPagination
 
-    # tuneable cap for the pre-ranked set (before dedupe/rank)
     PRE_RANK_LIMIT = int(getattr(settings, "SEARCH_PRE_RANK_LIMIT", 2000))
 
     def get(self, request, *args, **kwargs) -> Response:
+        # Annotate safely
+        try:
+            seg = xray_recorder.current_segment()
+        except Exception:
+            seg = None
+        if seg:
+            seg.put_annotation("endpoint", "products.search_user")
+            seg.put_metadata("query", request.GET.get("q", ""), "search")
+
         try:
             q = (request.GET.get("q") or "").strip()
             base = Product.objects.filter(is_latest=True, status="live")
 
-            # Case 1: Empty query → dedupe + default sort
+            # Case 1: empty query
             if not q:
-                deduped = self._dedupe_by_norm_code_fast(base)
-                deduped = self.get_sorted_queryset(
-                    deduped.select_related("update_ref"), request
+                with safe_subsegment("search_empty_dedupe"):
+                    deduped = self._dedupe_by_norm_code_fast(base)
+                    deduped = self.get_sorted_queryset(
+                        deduped.select_related("update_ref"), request
+                    )
+                    data, paginator = self.paginate_and_serialize(
+                        deduped,
+                        request,
+                        serializer_class=ProductSearchSerializer,
+                        is_search=True,
+                    )
+                    data = filter_live_languages(data)
+                return paginator.get_paginated_response(data)
+
+            q_norm = self._normalize_term(q)
+            looks_like_code = 1 if re.fullmatch(r"[A-Za-z0-9_-]+", q) else 0
+
+            # Restrict initial candidate set
+            with safe_subsegment("search_restrict_queryset"):
+                restricted = base.filter(
+                    Q(product_code__icontains=q) | Q(product_title__icontains=q)
                 )
+                restricted = self._annotate_norm_code(restricted).filter(
+                    Q(norm_code__icontains=q_norm)
+                    | Q(product_code__icontains=q)
+                    | Q(product_title__icontains=q)
+                )
+
+            # Pre-rank and cap IDs
+            with safe_subsegment("search_pre_rank_ids"):
+                updated_field = self._best_updated_field(restricted) or "id"
+                restricted_ids = list(
+                    restricted.order_by(
+                        F(updated_field).desc(nulls_last=True), "-id"
+                    ).values_list("id", flat=True)[: self.PRE_RANK_LIMIT]
+                )
+
+            # Deduplicate and rank
+            with safe_subsegment("search_dedupe_rank"):
+                restricted_qs = Product.objects.filter(id__in=restricted_ids)
+                deduped = self._dedupe_by_norm_code_fast(restricted_qs)
+                ranked = self._annotate_norm_code(deduped)
+                ranked = self._annotate_rank_signals(ranked, q, q_norm, looks_like_code)
+
+                sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
+                if sort_by:
+                    ranked = ranked.order_by("-rank", sort_by, "-id")
+                else:
+                    updated_desc = (
+                        self._resolve_sort_field(ranked, "-updated_at") or "-id"
+                    )
+                    ranked = ranked.order_by(
+                        "-rank", "product_title", updated_desc, "-id"
+                    )
+                ranked = ranked.select_related("update_ref")
+
+            # Paginate & serialize
+            with safe_subsegment("search_paginate_serialize"):
                 data, paginator = self.paginate_and_serialize(
-                    deduped,
+                    ranked,
                     request,
                     serializer_class=ProductSearchSerializer,
                     is_search=True,
                 )
                 data = filter_live_languages(data)
-                return paginator.get_paginated_response(data)
 
-            # Case 2: Search with query
-            q_norm = self._normalize_term(q)
-            looks_like_code = 1 if re.fullmatch(r"[A-Za-z0-9_-]+", q) else 0
-
-            restricted = base.filter(
-                Q(product_code__icontains=q) | Q(product_title__icontains=q)
-            )
-            restricted = restricted.filter(
-                Q(product_code_no_dashes__contains=q_norm)
-                | Q(product_code__icontains=q)
-                | Q(product_title__icontains=q)
-            )
-
-            updated_field = self._best_updated_field(restricted) or "id"
-            # Slice safely → extract IDs first
-            restricted_ids = list(
-                restricted.order_by(
-                    F(updated_field).desc(nulls_last=True), "-id"
-                ).values_list("id", flat=True)[: self.PRE_RANK_LIMIT]
-            )
-
-            # Rebuild a non-sliced queryset
-            restricted_qs = Product.objects.filter(id__in=restricted_ids)
-
-            # Now dedupe is safe
-            deduped = self._dedupe_by_norm_code_fast(restricted_qs)
-
-            ranked = self._annotate_rank_signals(deduped, q, q_norm, looks_like_code)
-
-            sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
-            if sort_by:
-                ranked = ranked.order_by("-rank", sort_by, "-id")
-            else:
-                updated_desc = self._resolve_sort_field(ranked, "-updated_at") or "-id"
-                ranked = ranked.order_by("-rank", "product_title", updated_desc, "-id")
-
-            ranked = ranked.select_related("update_ref")
-
-            data, paginator = self.paginate_and_serialize(
-                ranked,
-                request,
-                serializer_class=ProductSearchSerializer,
-                is_search=True,
-            )
-            data = filter_live_languages(data)
             return paginator.get_paginated_response(data)
 
         except Exception:
@@ -4212,46 +4307,57 @@ class ProductUsersFilterView(ProductListMixin, APIView):
     cache_timeout = getattr(settings, "CACHE_TTL_LIST", 30)
 
     def get(self, request, *args, **kwargs):
+        # Annotate safely
         try:
-            base_q = Q(is_latest=True, status="live")
-            filters = Q()
+            seg = xray_recorder.current_segment()
+        except Exception:
+            seg = None
+        if seg:
+            seg.put_annotation("endpoint", "products.users_filter")
 
-            # Access type (normalize to hyphenated tags)
-            if request.GET.get("download_only", "").lower() == "true":
-                filters &= Q(tag="download-only")
-            elif request.GET.get("download_or_order", "").lower() == "true":
-                filters &= Q(tag="download-or-order")
-            elif request.GET.get("order_only", "").lower() == "true":
-                filters &= Q(tag="order-only")
+        try:
+            with safe_subsegment("build_filters"):
+                base_q = Q(is_latest=True, status="live")
+                filters = Q()
 
-            mapping = [
-                ("audiences", "update_ref__audience_ref__name"),
-                ("diseases", "update_ref__diseases_ref__name"),
-                ("vaccinations", "update_ref__vaccination_ref__name"),
-                ("program_names", "program_name"),
-                ("program_ids", "program_id"),
-                ("where_to_use", "update_ref__where_to_use_ref__name"),
-                ("alternative_type", "update_ref__alternative_type"),
-                ("product_type", "update_ref__product_type"),
-                ("languages", "language_name"),
-            ]
-            for param, lookup in mapping:
-                vals = request.GET.getlist(param)
-                if vals:
-                    filters &= Q(**{f"{lookup}__in": vals})
+                if request.GET.get("download_only", "").lower() == "true":
+                    filters &= Q(tag="download-only")
+                elif request.GET.get("download_or_order", "").lower() == "true":
+                    filters &= Q(tag="download-or-order")
+                elif request.GET.get("order_only", "").lower() == "true":
+                    filters &= Q(tag="order-only")
 
-            qs = Product.objects.filter(base_q & filters)
-            qs = self._dedupe_by_norm_code_fast(qs)
-            qs = self.optimize_for_search(qs)
-            qs = self.get_sorted_queryset(qs, request)
+                mapping = [
+                    ("audiences", "update_ref__audience_ref__name"),
+                    ("diseases", "update_ref__diseases_ref__name"),
+                    ("vaccinations", "update_ref__vaccination_ref__name"),
+                    ("program_names", "program_name"),
+                    ("program_ids", "program_id"),
+                    ("where_to_use", "update_ref__where_to_use_ref__name"),
+                    ("alternative_type", "update_ref__alternative_type"),
+                    ("product_type", "update_ref__product_type"),
+                    ("languages", "language_name"),
+                ]
+                for param, lookup in mapping:
+                    vals = request.GET.getlist(param)
+                    if vals:
+                        filters &= Q(**{f"{lookup}__in": vals})
 
-            data, paginator = self.paginate_and_serialize(
-                qs,
-                request,
-                serializer_class=ProductSearchSerializer,
-                is_search=True,
-            )
-            data = filter_live_languages(data)
+            with safe_subsegment("build_queryset"):
+                qs = Product.objects.filter(base_q & filters)
+                qs = self._dedupe_by_norm_code_fast(qs)
+                qs = self.optimize_for_search(qs)
+                qs = self.get_sorted_queryset(qs, request)
+
+            with safe_subsegment("paginate_serialize_presign"):
+                data, paginator = self.paginate_and_serialize(
+                    qs,
+                    request,
+                    serializer_class=ProductSearchSerializer,
+                    is_search=True,
+                )
+                data = filter_live_languages(data)
+
             return paginator.get_paginated_response(data)
         except Exception:
             logger.exception("User filter error")
@@ -4281,11 +4387,6 @@ class ProductAdminFilterView(BaseAdminProductsView):
 class ProductUsersSearchFilterAPIView(generics.ListAPIView, ProductListMixin):
     """
     GET /api/v1/products/user/search/filter/
-      Supports:
-        - ?search= (search in product_title, product_code_no_dashes)
-        - Faceted filters via ProductFilter
-        - ?sort_by= (uniform custom sorting)
-      Always presigns images/downloads for user-facing results.
     """
 
     authentication_classes = [SessionAuthentication]
@@ -4310,18 +4411,28 @@ class ProductUsersSearchFilterAPIView(generics.ListAPIView, ProductListMixin):
         return self._dedupe_by_norm_code_fast(qs)
 
     def list(self, request, *args, **kwargs):
+        # Annotate safely
         try:
-            qs = self.filter_queryset(self.get_queryset())
-            qs = self._dedupe_by_norm_code_fast(qs)
-            qs = self.get_sorted_queryset(qs, request)
+            seg = xray_recorder.current_segment()
+        except Exception:
+            seg = None
+        if seg:
+            seg.put_annotation("endpoint", "products.users_search_filter")
 
-            data, paginator = self.paginate_and_serialize(
-                qs,
-                request,
-                serializer_class=ProductSearchSerializer,
-                is_search=True,  #  ensures presign for user-facing
-            )
-            data = filter_live_languages(data)
+        try:
+            with safe_subsegment("filter_queryset"):
+                qs = self.filter_queryset(self.get_queryset())
+                qs = self.get_sorted_queryset(qs, request)
+
+            with safe_subsegment("paginate_serialize_presign"):
+                data, paginator = self.paginate_and_serialize(
+                    qs,
+                    request,
+                    serializer_class=ProductSearchSerializer,
+                    is_search=True,
+                )
+                data = filter_live_languages(data)
+
             return paginator.get_paginated_response(data)
 
         except Exception:
@@ -4339,11 +4450,6 @@ class ProductUsersSearchFilterAPIView(generics.ListAPIView, ProductListMixin):
 class ProgramProductsView(ProductListMixin, generics.ListAPIView):
     """
     GET /api/v1/programmes/<program_id>/products/
-    Supports:
-      - program scoping (diseases/vaccinations tied to program)
-      - optional facets (same as user filter)
-      - uniform ?sort_by=
-      - cache key versioned by latest updated_at (auto-refresh on data change)
     """
 
     serializer_class = ProductSerializer
@@ -4353,10 +4459,6 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
     cache_timeout = settings.CACHE_TTL_LIST
 
     def get_cache_key(self, request, program_id):
-        """
-        Generate a deterministic, cache-safe key.
-        Uses SHA-256 (secure, no collision risk).
-        """
         user_id = (
             request.user.id
             if getattr(request, "user", None) and request.user.is_authenticated
@@ -4389,7 +4491,6 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
         diseases = Disease.objects.filter(programs=program)
         vaccinations = Vaccination.objects.filter(programs=program)
 
-        # Base scope: live + latest
         qs = (
             Product.objects.select_related("update_ref")
             .prefetch_related(
@@ -4405,78 +4506,89 @@ class ProgramProductsView(ProductListMixin, generics.ListAPIView):
             )
         )
 
-        # Apply optional facets
         facet_q = self._build_facets(self.request)
         if facet_q:
             qs = qs.filter(facet_q)
 
         return self._dedupe_by_norm_code_fast(qs)
 
-    # -------------------- Main List --------------------
-
     def list(self, request, *args, **kwargs):
         program_id = kwargs["program_id"]
 
-        # Build queryset (used for both data + versioning)
-        qs = self.get_queryset()
-        qs = self.get_sorted_queryset(qs, request)
+        # Annotate safely
+        try:
+            seg = xray_recorder.current_segment()
+        except Exception:
+            seg = None
+        if seg:
+            seg.put_annotation("endpoint", "program.products")
+            seg.put_annotation("program_id", str(program_id))
 
-        # Compute cache key with version suffix (based on updated_at freshness)
+        # Build queryset
+        with safe_subsegment("program_queryset_build"):
+            qs = self.get_queryset()
+            qs = self.get_sorted_queryset(qs, request)
+
         base_key = self.get_cache_key(request, program_id)
-        version = self._queryset_version(qs)  # from ProductListMixin
+        version = self._queryset_version(qs)
         cache_key = f"{base_key}:v{version}"
 
-        cached = cache.get(cache_key)
+        with safe_subsegment("program_cache_lookup"):
+            cached = cache.get(cache_key)
         if cached:
             return Response(cached)
 
-        # Paginate + serialize
+        # Paginated path
         page = self.paginate_queryset(qs)
         if page is not None:
-            serializer = self.get_serializer(
-                page, many=True, context=self.get_serializer_context()
-            )
+            with safe_subsegment("program_paginate_serialize_presign"):
+                serializer = self.get_serializer(
+                    page, many=True, context=self.get_serializer_context()
+                )
 
-            # Generate presigned URLs for attachments
-            all_urls = extract_s3_urls(serializer.data)
-            presigned = generate_presigned_urls(all_urls)
-            update_product_urls(serializer.data, presigned)
+                all_urls = extract_s3_urls(serializer.data)
+                presigned = generate_presigned_urls(all_urls)
+                update_product_urls(serializer.data, presigned)
 
-            response = self.get_paginated_response(serializer.data)
+                response = self.get_paginated_response(serializer.data)
 
-            # Add related program context
-            program = get_object_or_404(Program, pk=program_id)
-            response.data["diseases"] = DiseaseSerializer(
-                Disease.objects.filter(programs=program), many=True
-            ).data
-            response.data["vaccinations"] = VaccinationSerializer(
-                Vaccination.objects.filter(programs=program), many=True
-            ).data
+                program = get_object_or_404(Program, pk=program_id)
+                response.data["diseases"] = DiseaseSerializer(
+                    Disease.objects.filter(programs=program), many=True
+                ).data
+                response.data["vaccinations"] = VaccinationSerializer(
+                    Vaccination.objects.filter(programs=program), many=True
+                ).data
 
-            cache.set(cache_key, response.data, self.cache_timeout)
+            with safe_subsegment("program_cache_set"):
+                cache.set(cache_key, response.data, self.cache_timeout)
+
             return response
 
-        # Non-paginated fallback (rare)
-        serializer = self.get_serializer(
-            qs, many=True, context=self.get_serializer_context()
-        )
-        data = serializer.data
-        all_urls = extract_s3_urls(data)
-        presigned = generate_presigned_urls(all_urls)
-        update_product_urls(data, presigned)
+        # Non-paginated fallback
+        with safe_subsegment("program_serialize_presign_no_pagination"):
+            serializer = self.get_serializer(
+                qs, many=True, context=self.get_serializer_context()
+            )
+            data = serializer.data
+            all_urls = extract_s3_urls(data)
+            presigned = generate_presigned_urls(all_urls)
+            update_product_urls(data, presigned)
 
-        program = get_object_or_404(Program, pk=program_id)
-        payload = {
-            "results": data,
-            "diseases": DiseaseSerializer(
-                Disease.objects.filter(programs=program), many=True
-            ).data,
-            "vaccinations": VaccinationSerializer(
-                Vaccination.objects.filter(programs=program), many=True
-            ).data,
-        }
+            program = get_object_or_404(Program, pk=program_id)
+            payload = {
+                "results": data,
+                "diseases": DiseaseSerializer(
+                    Disease.objects.filter(programs=program), many=True
+                ).data,
+                "vaccinations": VaccinationSerializer(
+                    Vaccination.objects.filter(programs=program), many=True
+                ).data,
+            }
 
-        cache.set(cache_key, payload, self.cache_timeout)
+        with safe_subsegment("program_cache_set_no_pagination"):
+            cache.set(cache_key, payload, self.cache_timeout)
+
         return Response(payload, status=status.HTTP_200_OK)
 
 

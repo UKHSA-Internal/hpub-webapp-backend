@@ -11,7 +11,28 @@ from configs.get_secret_config import Config
 from corsheaders.defaults import default_headers
 
 
+from aws_xray_sdk.core import xray_recorder
+
+
 config = Config()
+
+DEBUG = config.get_django_debug_value()
+
+# ================= AWS X-Ray Integration =================
+
+if not DEBUG:
+    from aws_xray_sdk.core import patch_all
+
+    xray_recorder.configure(
+        service="HPUB-Backend",
+        sampling=True,
+        context_missing="LOG_ERROR",  # or "IGNORE_ERROR" if you want silence
+    )
+
+    # Automatically patch supported libraries (psycopg2, requests, boto3, etc.)
+    patch_all()
+
+
 DB_NAME = config.get_db_name()
 DB_HOST = config.get_db_host()
 DB_USER = config.get_db_user()
@@ -41,7 +62,7 @@ PUBLIC_KEY = public_key
 PRIVATE_KEY = private_key
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = config.get_django_debug_value()
+
 ALLOWED_HOSTS = config.get_django_allowed_hosts()
 CORS_ALLOWED_ORIGINS = config.get_cors_allowed_origins()
 CORS_ALLOW_CREDENTIALS = True
@@ -164,6 +185,7 @@ INSTALLED_APPS = [
 
 # ================= Middleware =================
 MIDDLEWARE = [
+    *(["aws_xray_sdk.ext.django.middleware.XRayMiddleware"] if not DEBUG else []),
     "django.middleware.security.SecurityMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",

@@ -7,11 +7,14 @@ from .views import (
     AudienceCreateViewSet,
     AudienceListViewSet,
     AudienceNameCheckViewSet,
+    AudienceUpdateViewSet,
 )
 
 router = DefaultRouter()
 router.register(r"audiences/create", AudienceCreateViewSet, basename="audience-create")
 router.register(r"audiences/list", AudienceListViewSet, basename="audience-list")
+router.register(r"audiences/update", AudienceUpdateViewSet, basename="audience-update")
+
 router.register(
     r"audiences/name", AudienceNameCheckViewSet, basename="audience-name-check"
 )

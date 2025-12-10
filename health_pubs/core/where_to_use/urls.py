@@ -17,6 +17,10 @@ router.register(
     r"where-to-use/list", WhereToUseListViewSet, basename="where-to-use-list"
 )
 router.register(
+    r"where-to-use/update", WhereToUseCreateViewSet, basename="where-to-use-update"
+)
+
+router.register(
     r"where-to-use/name", WhereToUseNameCheckViewSet, basename="where-to-use-name-check"
 )
 router.register(

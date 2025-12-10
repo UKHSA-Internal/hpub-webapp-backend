@@ -260,8 +260,8 @@ class DiseaseDeleteViewSet(viewsets.ViewSet):
 
 
 class DiseaseListViewSet(viewsets.ReadOnlyModelViewSet):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
     serializer_class = DiseaseSerializer
 
     def get_queryset(self):
@@ -272,6 +272,15 @@ class DiseaseListViewSet(viewsets.ReadOnlyModelViewSet):
         queryset = self.get_queryset()
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def retrieve(self, request, pk=None, *args, **kwargs):
+        try:
+            disease = self.get_queryset().get(disease_id=pk)
+        except Disease.DoesNotExist:
+            return Response({"error": "Disease not found."}, status=404)
+
+        ser = self.get_serializer(disease)
+        return Response(ser.data, status=200)
 
 
 class DiseaseNameCheckViewSet(viewsets.ViewSet):

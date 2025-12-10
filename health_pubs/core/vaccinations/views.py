@@ -174,10 +174,23 @@ class VaccinationEditViewSet(viewsets.ModelViewSet):
 
 
 class VaccinationListViewSet(viewsets.ReadOnlyModelViewSet):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
     queryset = Vaccination.objects.all()
     serializer_class = VaccinationSerializer
+
+    def list(self, request, *args, **kwargs):
+        ser = self.get_serializer(self.get_queryset(), many=True)
+        return Response(ser.data)
+
+    def retrieve(self, request, pk=None, *args, **kwargs):
+        try:
+            vaccination = Vaccination.objects.get(vaccination_id=pk)
+        except Vaccination.DoesNotExist:
+            return Response({"error": "Vaccination not found."}, status=404)
+
+        ser = self.get_serializer(vaccination)
+        return Response(ser.data)
 
 
 class VaccinationDeleteViewSet(viewsets.ViewSet):

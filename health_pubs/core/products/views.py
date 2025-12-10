@@ -56,7 +56,6 @@ from core.establishments.models import Establishment
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from core.utils.extract_file_metadata import get_file_metadata
 from core.utils.generate_s3_presigned_url import (
-    generate_inline_presigned_urls,
     generate_presigned_urls,
 )
 from .filters import ProductFilter
@@ -117,6 +116,7 @@ from .serializers import (
 from wagtail.models import Page
 from treebeard.mp_tree import MP_Node
 from django.core.serializers.json import DjangoJSONEncoder
+from urllib.parse import urlparse, urlunparse
 
 from configs.get_secret_config import Config
 from django.core.exceptions import ValidationError
@@ -191,6 +191,29 @@ def normalize_tag(raw: str) -> str:
         if close:
             cleaned = close[0]
     return cleaned
+
+
+def canonicalize_s3_url(url: str) -> str:
+    """
+    Take any S3 HTTPS URL (including pre-signed) and strip query/fragment so
+    we only persist a stable 'https://bucket.s3-region.amazonaws.com/key' URL.
+
+    If parsing fails, fall back to stripping everything after '?'.
+    """
+    if not url:
+        return url
+
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            # not a URL we recognise – safest fallback
+            return url.split("?", 1)[0]
+
+        # drop query and fragment
+        cleaned = parsed._replace(query="", fragment="")
+        return urlunparse(cleaned)
+    except Exception:
+        return url.split("?", 1)[0]
 
 
 def normalize_product_code(value: str) -> str:
@@ -2732,7 +2755,7 @@ class ProductUpdateView(APIView):
             )
 
 
-class ProductPatchView(ErrorHandlingMixin, APIView):
+class ProductPatchView(PresignedUrlMixin, ErrorHandlingMixin, APIView):
     """
     Optimized view to handle product updates via PATCH requests.
     Pre-creates the ProductUpdate so that post_save signals see a valid update_ref.
@@ -2850,11 +2873,21 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                     e,
                 )
 
-        # Build response
+        # Build response (fresh snapshot from DB)
         response_data = ProductSerializer(product, context={"request": request}).data
         response_data["update_ref"] = ProductUpdateSerializer(
             product.update_ref, context={"request": request}
         ).data
+
+        # Inject fresh presigned URLs + inline URLs + metadata into response only
+        # (DB still only holds canonical s3_bucket_url + metadata)
+        try:
+            self._process_presigned_urls(response_data)
+        except Exception:
+            logger.exception(
+                "Failed to apply presigned URLs to PATCH response for %s",
+                decoded_product_code,
+            )
 
         logger.info(
             "PATCH request completed successfully for product_code=%s",
@@ -2952,29 +2985,36 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
 
     def initialize_file_urls(self, product_downloads: dict) -> dict:
         """
-        Pull out just the raw URL strings (so later code can safely do .split('.'))
-        whether the user passed ["https://…", …] or [{"URL": "https://…", …}, …].
+        Normalise incoming URLs from the request:
+        - Accept both raw strings and { URL: "..." } objects.
+        - Strip any pre-signed query strings.
+        - Return a dict of canonical bare S3 HTTPS URLs, ready to be persisted
+            as s3_bucket_url later.
         """
 
-        def extract_str(key):
+        def extract_str(key: str) -> str:
             raw = product_downloads.get(key, "")
             if isinstance(raw, dict):
-                return raw.get("URL", "")
-            return raw or ""
+                raw = raw.get("URL", "") or raw.get("s3_bucket_url", "")
+            if not raw:
+                return ""
+            return canonicalize_s3_url(str(raw))
 
-        def extract_list(key):
+        def extract_list(key: str) -> list[str]:
             raw = product_downloads.get(key, [])
             if not isinstance(raw, list):
                 return []
-            normalized = []
+
+            out: list[str] = []
             for item in raw:
                 if isinstance(item, dict):
-                    url = item.get("URL")
-                    if url:
-                        normalized.append(url)
-                elif isinstance(item, str):
-                    normalized.append(item)
-            return normalized
+                    candidate = item.get("URL") or item.get("s3_bucket_url")
+                else:
+                    candidate = item
+                if not candidate:
+                    continue
+                out.append(canonicalize_s3_url(str(candidate)))
+            return out
 
         return {
             "main_download_url": extract_str("main_download"),
@@ -3041,54 +3081,100 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
 
     def add_file_metadata(self, file_urls: dict) -> dict:
         """
-        Attach presigned URLs and file metadata to file_urls.
-        Ensures TTL alignment with cache and safe defaults if metadata is missing.
-        """
-        presign_ttl = int(getattr(settings, "PRESIGNED_URL_TTL", 3600))
-        effective_ttl = max(0, presign_ttl - 5)  # safety margin
+        Attach metadata to canonical S3 URLs WITHOUT persisting any pre-signed URLs.
 
-        # Collect URLs
-        all_urls = []
-        if file_urls.get("main_download_url"):
-            all_urls.append(file_urls["main_download_url"])
-        for key, value in file_urls.items():
-            if key != "main_download_url" and isinstance(value, list):
-                all_urls.extend(value)
-
-        # Generate presigns
-        presigned = generate_presigned_urls(all_urls, expiration=effective_ttl)
-        inline_presigned = generate_inline_presigned_urls(
-            all_urls, expiration=effective_ttl
-        )
-
-        # Metadata lookup (guarded by feature flag if needed)
-        metadata_dict = {}
-        if getattr(settings, "FILE_METADATA_ENABLED", True) and presigned:
-            metadata_list = get_file_metadata(list(presigned.values()))
-            metadata_dict = {meta["URL"]: meta for meta in metadata_list}
-
-        # Build a new dict (don’t mutate in place)
-        result = {}
-        for key, value in file_urls.items():
-            if key == "main_download_url" and value:
-                presigned_url = presigned.get(value)
-                meta = metadata_dict.get(presigned_url, {"URL": value})
-                result[key] = {
-                    **meta,
-                    "s3_bucket_url": value,
-                    "inline_presigned_s3_url": inline_presigned.get(value, ""),
+        - Input:  file_urls produced by initialize_file_urls, i.e.
+                {
+                    "main_download_url": "https://bucket.s3.../key.jpg",
+                    "web_download_url":  ["https://bucket.s3.../w1.pdf", ...],
+                    ...
                 }
-            elif isinstance(value, list):
-                result[key] = [
-                    {
-                        **metadata_dict.get(presigned.get(url), {"URL": url}),
-                        "s3_bucket_url": url,
-                        "inline_presigned_s3_url": inline_presigned.get(url, ""),
-                    }
-                    for url in value
-                ]
-            else:
-                result[key] = value
+
+        - Output: structure suitable for saving into ProductUpdate.product_downloads, e.g.
+                {
+                    "main_download_url": {
+                    "s3_bucket_url": "...",
+                    "file_size": "10.2 MB",
+                    "file_type": "image/jpeg",
+                    ...
+                    },
+                    "web_download_url": [
+                    { "s3_bucket_url": "...", "file_size": "...", ... },
+                    ...
+                    ],
+                    ...
+                }
+
+        Presigned URLs (URL / inline_presigned_s3_url) are NOT stored here. They will be
+        generated on read via PresignedUrlMixin._process_presigned_urls.
+        """
+        # Collect all canonical URLs we want metadata for
+        all_urls: list[str] = []
+
+        main = file_urls.get("main_download_url")
+        if main:
+            all_urls.append(main)
+
+        for key in ("web_download_url", "print_download_url", "transcript_url"):
+            urls = file_urls.get(key) or []
+            if isinstance(urls, list):
+                all_urls.extend([u for u in urls if u])
+
+        # Build metadata dict keyed by canonical URL
+        metadata_dict: dict[str, dict] = {}
+        if all_urls and getattr(settings, "FILE_METADATA_ENABLED", True):
+            try:
+                metas = get_file_metadata(all_urls, deep_for_doc_types=True)
+                for m in metas:
+                    if not isinstance(m, dict) or not m.get("URL"):
+                        continue
+                    canonical = canonicalize_s3_url(str(m["URL"]))
+                    metadata_dict[canonical] = m
+            except Exception:
+                logger.exception(
+                    "Failed to fetch file metadata; continuing without it."
+                )
+
+        def build_item(url: str) -> dict:
+            canon = canonicalize_s3_url(url)
+            md = metadata_dict.get(canon, {})
+            # Only persist stable data
+            out = {
+                "s3_bucket_url": canon,
+            }
+            if "file_size" in md:
+                out["file_size"] = md["file_size"]
+            if "file_type" in md:
+                out["file_type"] = md["file_type"]
+            if "number_of_pages" in md:
+                out["number_of_pages"] = md["number_of_pages"]
+            if "page_size" in md:
+                out["page_size"] = md["page_size"]
+            if "number_of_slides" in md:
+                out["number_of_slides"] = md["number_of_slides"]
+            if "dimensions" in md:
+                out["dimensions"] = md["dimensions"]
+            if "duration" in md:
+                out["duration"] = md["duration"]
+            return out
+
+        result: dict[str, object] = {}
+
+        # Main download: single object
+        if main:
+            result["main_download_url"] = build_item(main)
+
+        # Lists
+        for key in ("web_download_url", "print_download_url", "transcript_url"):
+            urls = file_urls.get(key) or []
+            if not isinstance(urls, list):
+                continue
+            result[key] = [build_item(u) for u in urls if u]
+
+        # Video URL is kept as plain string (we presign it on read)
+        video = file_urls.get("video_url")
+        if video:
+            result["video_url"] = canonicalize_s3_url(video)
 
         return result
 

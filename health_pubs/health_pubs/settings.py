@@ -70,7 +70,7 @@ CACHE_TTL_DETAIL = int(os.getenv("CACHE_TTL_DETAIL", 3 if DEBUG else 60))
 CACHE_TTL_LIST = int(os.getenv("CACHE_TTL_LIST", 30))
 ADMIN_PRE_LIST_LIMIT = int(os.getenv("ADMIN_PRE_LIST_LIMIT", 1500))
 # ---------------- Presign ----------------
-PRESIGNED_URL_TTL = int(os.getenv("PRESIGNED_URL_TTL", 60 * 60 * 1))  # 1 hour
+PRESIGNED_URL_TTL = int(os.getenv("PRESIGNED_URL_TTL", 60 * 60 * 24))  # 24 hour
 MINIMUM_PRESIGNED_URL_TTL = int(
     os.getenv("MINIMUM_PRESIGNED_URL_TTL", 60 * 30)
 )  # 30 minutes

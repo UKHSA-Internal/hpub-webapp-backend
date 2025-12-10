@@ -51,9 +51,44 @@ def skip_if_suppressed(fn):
     return wrapper
 
 
+def build_max_order_from_order_limits(product_instance):
+    """
+    Build maxOrder array from OrderLimitPage objects, skipping any entries
+    that have no companyKeys (empty full_external_keys).
+
+    Also deduplicates on (companyKeys, quantity) to avoid repeated rows.
+    """
+    max_order = []
+    seen = set()
+
+    for ol in product_instance.order_limits.all():
+        # Normalise keys to a clean list
+        keys = list(ol.full_external_keys or [])
+        # Skip if empty
+        if not keys:
+            continue
+
+        # Optionally dedupe identical rows (same key set + quantity)
+        key_tuple = tuple(sorted(keys))
+        sig = (key_tuple, ol.order_limit)
+        if sig in seen:
+            continue
+        seen.add(sig)
+
+        max_order.append(
+            {
+                "companyKeys": keys,
+                "quantity": ol.order_limit,
+            }
+        )
+
+    return max_order
+
+
 def prepare_product_data(product_instance, required_fields_enum, status):
     update = getattr(product_instance, "update_ref", None)
     normalised = STATUS_MAPPING.get(status, status)
+    max_order = build_max_order_from_order_limits(product_instance)
 
     # Minimal for archived/withdrawn
     if status in ("archived", "withdrawn"):
@@ -71,7 +106,7 @@ def prepare_product_data(product_instance, required_fields_enum, status):
             "publicationId": product_instance.product_code,
             "title": product_instance.product_title,
             "status": normalised,
-            "maxOrder": [],
+            "maxOrder": max_order,
             "uom": uom,
             "runToZero": getattr(update, "run_to_zero", False),
             "costCentre": "",
@@ -90,10 +125,7 @@ def prepare_product_data(product_instance, required_fields_enum, status):
         "publicationId": product_instance.product_code,
         "title": product_instance.product_title,
         "status": normalised,
-        "maxOrder": [
-            {"companyKeys": ol.full_external_keys, "quantity": ol.order_limit}
-            for ol in product_instance.order_limits.all()
-        ],
+        "maxOrder": max_order,
         "uom": uom,
         "runToZero": getattr(update, "run_to_zero", False),
         "costCentre": getattr(update, "cost_centre", ""),

@@ -1,3 +1,4 @@
+from collections import defaultdict
 import datetime
 import hashlib
 import json
@@ -48,6 +49,7 @@ from core.users.models import User
 from core.users.permissions import (
     IsAdminUser,
 )
+from core.establishments.models import Establishment
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from core.utils.extract_file_metadata import get_file_metadata
 from core.utils.generate_s3_presigned_url import (
@@ -3070,8 +3072,18 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         raise RuntimeError("Could not create or find ProductUpdate after retries")
 
     def update_order_limits(self, product: Product, order_limits: list):
-        parent_page = Page.objects.get(slug="products")
+        """
+        Upserts OrderLimitPage records for each organisation with latest order_limit
+        and full_external_keys derived from Establishment records.
+        Ensures there is only ONE record per organisation.
+        """
+        try:
+            parent_page = Page.objects.get(slug="products")
+        except Page.DoesNotExist:
+            logger.error("Parent page with slug 'products' not found.")
+            return
 
+        # Existing pages grouped by org name
         existing_pages = (
             OrderLimitPage.objects.child_of(parent_page)
             .filter(product_ref=product)
@@ -3079,46 +3091,70 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         )
         by_org = {p.organization_ref.name: p for p in existing_pages}
 
+        # Prefetch org + establishment data
         org_names = [
             lim["organization_name"]
             for lim in order_limits
             if lim.get("organization_name")
         ]
+
+        if not org_names:
+            # If no limits supplied, delete all existing for this product
+            for page in existing_pages:
+                page.delete()
+            return
+
         org_qs = Organization.objects.filter(name__in=org_names)
         org_cache = {org.name: org for org in org_qs}
 
+        est_qs = Establishment.objects.filter(organization_ref__in=org_qs).values(
+            "organization_ref_id", "full_external_key"
+        )
+        full_keys_map = defaultdict(list)
+        for est in est_qs:
+            full_keys_map[est["organization_ref_id"]].append(est["full_external_key"])
+
+        # --- Upsert loop ---
         seen_orgs = set()
         for lim in order_limits:
             org_name = lim.get("organization_name")
             if not org_name:
                 continue
-            seen_orgs.add(org_name)
 
             org = org_cache.get(org_name)
             if not org:
+                logger.warning("Organization '%s' not found. Skipping.", org_name)
                 continue
 
+            seen_orgs.add(org_name)
             limit_val = lim.get("order_limit_value", 0)
+            full_keys = full_keys_map.get(org.organization_id, [])
 
-            if org_name in by_org:
-                # ⚡ In-place update — no delete/recreate
-                page = by_org[org_name]
-                if page.order_limit != limit_val:
+            page = by_org.get(org_name)
+            if page:
+                # Only publish if something actually changed
+                if (
+                    page.order_limit != limit_val
+                    or page.full_external_keys != full_keys
+                ):
                     page.order_limit = limit_val
-                    page.save(update_fields=["order_limit"])
-            else:
-                # Only create when missing
-                new_page = OrderLimitPage(
-                    title=f"Order Limit for {org_name}",
-                    slug=slugify(f"{org_name}-order-limit-{uuid.uuid4()}"),
-                    order_limit=limit_val,
-                    product_ref=product,
-                    organization_ref=org,
-                )
-                parent_page.add_child(instance=new_page)
-                new_page.save()
+                    page.full_external_keys = full_keys
+                    page.save_revision().publish()
+                continue
 
-        # Delete pages no longer present
+            # Otherwise create a new one
+            new_page = OrderLimitPage(
+                title=f"Order Limit for {org_name}",
+                slug=slugify(f"{org_name}-order-limit-{uuid.uuid4()}"),
+                order_limit=limit_val,
+                product_ref=product,
+                organization_ref=org,
+                full_external_keys=full_keys,
+            )
+            parent_page.add_child(instance=new_page)
+            new_page.save_revision().publish()
+
+        # --- Delete any obsolete ones (not in current payload) ---
         for org_name, page in by_org.items():
             if org_name not in seen_orgs:
                 page.delete()
@@ -3768,9 +3804,7 @@ class BaseAdminProductsView(ProductListMixin, APIView):
 
         qs = build_admin_queryset(
             request, apply_filters=self.APPLY_FILTERS
-        ).select_related(
-            "program_id", "language_id", "update_ref", "user_ref"
-        )  # optimized for admin view
+        ).select_related("program_id", "language_id", "update_ref", "user_ref")
 
         # Sort BEFORE slicing
         qs = self.get_sorted_queryset(qs, request)
@@ -3794,6 +3828,26 @@ class BaseAdminProductsView(ProductListMixin, APIView):
 
         cache.set(admin_cache_key, response.data, 30)
         return response
+
+    # ------------------------------------------------------------------ #
+    # Default ordering by updated_at desc                                #
+    # ------------------------------------------------------------------ #
+    def get_sorted_queryset(self, qs, request):
+        """
+        Apply sorting based on request params (if provided),
+        otherwise default to most recently updated first.
+        """
+        sort_field = request.query_params.get("sort_by")
+        sort_order = request.query_params.get("order", "desc")
+
+        if sort_field:
+            # normalize
+            sort_field = sort_field.lstrip("-")  # <--- fix
+            prefix = "" if sort_order == "asc" else "-"
+            return qs.order_by(f"{prefix}{sort_field}")
+
+        # Default ordering
+        return qs.order_by("-updated_at")
 
 
 # --------------------------------------------------------------------------- #

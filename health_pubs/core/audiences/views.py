@@ -8,6 +8,7 @@ from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.utils.text import slugify
 from django.utils.timezone import now
+from django.shortcuts import get_object_or_404
 from rest_framework import status, viewsets
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
@@ -25,7 +26,7 @@ class AudienceCreateViewSet(viewsets.ModelViewSet):
     queryset = Audience.objects.all()
     serializer_class = AudienceSerializer
     authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAuthenticated, IsAdminUser]
 
     def create(self, request, *args, **kwargs):
         try:
@@ -69,15 +70,57 @@ class AudienceCreateViewSet(viewsets.ModelViewSet):
 
 
 class AudienceListViewSet(viewsets.ReadOnlyModelViewSet):
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
     queryset = Audience.objects.all()
     serializer_class = AudienceSerializer
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
 
-    def list(self, request, *args, **kwargs):
-        audiences = self.get_queryset()
-        serializer = self.get_serializer(audiences, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+    def list(self, request):
+        ser = self.get_serializer(self.get_queryset(), many=True)
+        return Response(ser.data)
+
+    def retrieve(self, request, pk=None):
+        try:
+            audience = Audience.objects.get(audience_id=pk)
+        except Audience.DoesNotExist:
+            return Response({"error": "Audience not found"}, status=404)
+
+        ser = self.get_serializer(audience)
+        return Response(ser.data)
+
+
+class AudienceUpdateViewSet(viewsets.ViewSet):
+    """
+    Update or partially update Audience entry.
+    Supports PUT and PATCH.
+    """
+
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def update(self, request, pk=None):
+        instance = get_object_or_404(Audience, pk=pk)
+        serializer = AudienceSerializer(instance, data=request.data, partial=False)
+
+        serializer.is_valid(raise_exception=True)
+
+        for attr, value in serializer.validated_data.items():
+            setattr(instance, attr, value)
+
+        instance.save()
+        return Response(serializer.data)
+
+    def partial_update(self, request, pk=None):
+        instance = get_object_or_404(Audience, pk=pk)
+        serializer = AudienceSerializer(instance, data=request.data, partial=True)
+
+        serializer.is_valid(raise_exception=True)
+
+        for attr, value in serializer.validated_data.items():
+            setattr(instance, attr, value)
+
+        instance.save()
+        return Response(serializer.data)
 
 
 class AudienceBulkUploadViewSet(viewsets.ViewSet):

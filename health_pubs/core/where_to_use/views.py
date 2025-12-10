@@ -14,6 +14,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from wagtail.models import Page
+from django.shortcuts import get_object_or_404
 
 from .models import WhereToUse
 from .serializers import WhereToUseSerializer
@@ -95,21 +96,57 @@ class WhereToUseCreateViewSet(viewsets.ViewSet):
 
 
 class WhereToUseListViewSet(viewsets.ViewSet):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
 
-    def list(self, request, *args, **kwargs):
-        logger.info("WhereToUseListView GET method called")
+    def list(self, request):
+        objects = WhereToUse.objects.all()
+        ser = WhereToUseSerializer(objects, many=True)
+        return Response(ser.data)
+
+    def retrieve(self, request, pk=None):
         try:
-            where_to_use = WhereToUse.objects.all()
-            serializer = WhereToUseSerializer(where_to_use, many=True)
-            return Response(serializer.data, status=status.HTTP_200_OK)
-        except Exception as e:
-            logger.error(f"Error retrieving where-to-use list: {str(e)}")
-            return Response(
-                {"error": "Failed to retrieve where-to-use list."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            obj = WhereToUse.objects.get(where_to_use_id=pk)
+        except WhereToUse.DoesNotExist:
+            return Response({"error": "Location not found"}, status=404)
+
+        ser = WhereToUseSerializer(obj)
+        return Response(ser.data)
+
+
+class WhereToUseUpdateViewSet(viewsets.ViewSet):
+    """
+    Update or partially update a WhereToUse entry.
+    Supports PUT and PATCH.
+    """
+
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def update(self, request, pk=None):
+        instance = get_object_or_404(WhereToUse, pk=pk)
+        serializer = WhereToUseSerializer(instance, data=request.data, partial=False)
+
+        serializer.is_valid(raise_exception=True)
+
+        # Update fields manually for Wagtail Page safe updating
+        for attr, value in serializer.validated_data.items():
+            setattr(instance, attr, value)
+
+        instance.save()
+        return Response(serializer.data)
+
+    def partial_update(self, request, pk=None):
+        instance = get_object_or_404(WhereToUse, pk=pk)
+        serializer = WhereToUseSerializer(instance, data=request.data, partial=True)
+
+        serializer.is_valid(raise_exception=True)
+
+        for attr, value in serializer.validated_data.items():
+            setattr(instance, attr, value)
+
+        instance.save()
+        return Response(serializer.data)
 
 
 class WhereToUseBulkUploadViewSet(viewsets.ViewSet):

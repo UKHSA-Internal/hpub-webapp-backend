@@ -142,10 +142,10 @@ class ProgramCreateViewSet(viewsets.ViewSet):
                     if bool(entry.get("is_featured")):
                         _assert_featured_capacity()
 
-                    # ✅ use your unique slug helper
+                    #  use your unique slug helper
                     slug = self.get_unique_slug(slugify(name))
 
-                    # ✅ use your next base-36 ID helper (≤ 22 chars)
+                    #  use your next base-36 ID helper (≤ 22 chars)
                     program_id = entry.get("program_id") or self.get_next_program_id()
 
                     program_instance = Program(
@@ -300,6 +300,36 @@ class ProgramListViewSet(viewsets.ReadOnlyModelViewSet):
             logger.exception("Error fetching filtered programmes")
             return Response(
                 {"detail": "Unexpected error.", "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path=r"list/(?P<program_id>[^/]+)",
+        authentication_classes=[CustomTokenAuthentication],
+        permission_classes=[IsAuthenticated, IsAdminUser],
+    )
+    def list_by_program_id(self, request, program_id=None):
+        """
+        Admin-only endpoint to list programs by program_id.
+        Example: GET /api/v1/programs/list/ABC123/
+        """
+        try:
+            qs = Program.objects.filter(program_id=program_id)
+            if not qs.exists():
+                return Response(
+                    {"detail": f"No program found with program_id '{program_id}'."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            serializer = self.get_serializer(qs, many=True)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.exception("Error fetching programs by program_id")
+            return Response(
+                {"detail": "Unexpected error occurred.", "error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 

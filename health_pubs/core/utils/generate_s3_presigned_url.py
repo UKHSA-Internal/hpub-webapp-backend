@@ -40,8 +40,13 @@ _FORCE_DOWNLOAD_EXTENSIONS = (
     ".gif",
 )
 
-DEFAULT_PRESIGNED_URL_TTL = getattr(settings, "PRESIGNED_URL_TTL", 60*60*1) # Defaults to 1 hour
-MINIMUM_PRESIGNED_URL_TTL = getattr(settings, "MINIMUM_PRESIGNED_URL_TTL", 60*30) # Defaults to 30 minutes
+DEFAULT_PRESIGNED_URL_TTL = getattr(
+    settings, "PRESIGNED_URL_TTL", 60 * 60 * 1
+)  # Defaults to 1 hour
+MINIMUM_PRESIGNED_URL_TTL = getattr(
+    settings, "MINIMUM_PRESIGNED_URL_TTL", 60 * 30
+)  # Defaults to 30 minutes
+
 
 def _get_cache_timeout_in_ms(presigned_url_expiration_ms: int):
     if presigned_url_expiration_ms > MINIMUM_PRESIGNED_URL_TTL:
@@ -105,7 +110,10 @@ def generate_presigned_urls(
             out[u] = signed
 
     if out:
-        cache.set_many({key_map[u]: s for u, s in out.items()}, timeout=_get_cache_timeout_in_ms(expiration))
+        cache.set_many(
+            {key_map[u]: s for u, s in out.items()},
+            timeout=_get_cache_timeout_in_ms(expiration),
+        )
     return out
 
 

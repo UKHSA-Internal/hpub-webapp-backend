@@ -40,8 +40,7 @@ _FORCE_DOWNLOAD_EXTENSIONS = (
     ".gif",
 )
 
-DEFAULT_PRESIGNED_URL_TTL = getattr(settings, "PRESIGNED_URL_TTL", 3600)
-
+DEFAULT_PRESIGNED_URL_TTL = getattr(settings, "PRESIGNED_URL_TTL", 60*60)
 
 def _parse_s3_url(url: str) -> Tuple[Optional[str], Optional[str]]:
     parsed = urlparse(url)
@@ -68,42 +67,51 @@ def _parse_s3_url(url: str) -> Tuple[Optional[str], Optional[str]]:
     return bucket_name, object_key
 
 
-def _cache_key_for(url: str, expiration: int, inline: bool) -> str:
+def __build_cache_key_name_for_asset(url: str, expiration: int, inline: bool) -> str:
     suffix = "inline" if inline else "download"
     url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()
     return f"presign:{expiration}:{suffix}:{url_hash}"
 
 
 def generate_presigned_urls(
-    urls: List[str],
-    expiration: int = DEFAULT_PRESIGNED_URL_TTL,
+    asset_urls: List[str],
+    url_expiration: int = DEFAULT_PRESIGNED_URL_TTL,
     force_download: bool = True,
     max_workers: int = 5,  # kept for signature compatibility
 ) -> Dict[str, str]:
     """
     Batch presign with cache. No duplicate work.
     """
-    key_map = {
-        u: _cache_key_for(u, expiration, inline=not force_download) for u in urls if u
-    }
-    existing = cache.get_many(list(key_map.values()))
-    out: Dict[str, str] = {
-        u: existing[ck] for u, ck in key_map.items() if ck in existing
-    }
+    # Get pre-signed url from cache
+    request_inline_url = not force_download
+    asset_url_to_cache_key_map: Dict[str, str] = {}
+    for asset_url in asset_urls:
+        if asset_url:
+            asset_url_to_cache_key_map[asset_url] =  __build_cache_key_name_for_asset(asset_url, url_expiration, request_inline_url)  
+    
+    cache_keys: List[str] = list(asset_url_to_cache_key_map.values())
+    presigned_urls_in_cache = cache.get_many(cache_keys)
 
-    to_sign = [u for u in urls if u and u not in out]
-    for u in to_sign:
-        signed = _presign_single_url(u, expiration, force_download)
-        if signed:
-            out[u] = signed
+    asset_url_to_presigned_url_map: Dict[str, str] = {}
+    for asset_url, cache_key in asset_url_to_cache_key_map.items():
+        if cache_key in presigned_urls_in_cache:
+            asset_url_to_presigned_url_map[asset_url] = str(presigned_urls_in_cache[cache_key])
 
-    if out:
-        cache.set_many({key_map[u]: s for u, s in out.items()}, timeout=expiration)
-    return out
+    # Generate new pre-signed url for remaining assets
+    asset_urls_not_in_cache = [asset_url for asset_url in asset_urls if asset_url and asset_url not in asset_url_to_presigned_url_map]
+    for asset_url in asset_urls_not_in_cache:
+        presigned_url = __generate_single_presigned_url(asset_url, url_expiration, force_download)
+        if presigned_url:
+            asset_url_to_presigned_url_map[asset_url] = presigned_url
+
+    if asset_url_to_presigned_url_map:
+        cache.set_many({asset_url_to_cache_key_map[asset_url]: presigned_url for asset_url, presigned_url in asset_url_to_presigned_url_map.items()}, timeout=url_expiration)
+    
+    return asset_url_to_presigned_url_map
 
 
 # -------- helpers --------
-def _presign_single_url(
+def __generate_single_presigned_url(
     url: str, expiration: int, force_download: bool
 ) -> Optional[str]:
     b, k = _parse_s3_url(url)
@@ -141,7 +149,7 @@ def generate_inline_presigned_urls(
     for u in urls:
         if not u:
             continue
-        ck = _cache_key_for(u, expiration, inline=True)
+        ck = __build_cache_key_name_for_asset(u, expiration, inline=True)
         cached = cache.get(ck)
         if cached:
             out[u] = cached

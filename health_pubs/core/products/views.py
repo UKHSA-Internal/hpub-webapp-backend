@@ -2081,10 +2081,10 @@ class PresignedUrlMixin:
     ) -> tuple[Dict[str, str], Dict[str, str]]:
         ttl = getattr(settings, "PRESIGNED_URL_TTL", 3600)
         presigned = generate_presigned_urls(
-            urls_all, expiration=ttl, force_download=True
+            urls_all, url_expiration=ttl, force_download=True
         )
         inline_presigned = generate_presigned_urls(
-            urls_all, expiration=ttl, force_download=False
+            urls_all, url_expiration=ttl, force_download=False
         )
         return presigned, inline_presigned
 
@@ -2932,7 +2932,7 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                 all_urls.extend(value)
 
         # Generate presigns
-        presigned = generate_presigned_urls(all_urls, expiration=effective_ttl)
+        presigned = generate_presigned_urls(all_urls, url_expiration=effective_ttl)
         inline_presigned = generate_inline_presigned_urls(
             all_urls, expiration=effective_ttl
         )
@@ -3686,7 +3686,7 @@ class ProductListMixin:
         if self.presign_in_lists:
             presign_ttl = int(getattr(settings, "PRESIGNED_URL_TTL", 3600))
             urls = extract_s3_urls(data)
-            presigned = generate_presigned_urls(urls, expiration=presign_ttl)
+            presigned = generate_presigned_urls(urls, url_expiration=presign_ttl)
             update_product_urls(data, presigned)
 
             cache.set(cache_key, data, timeout=min(self.cache_timeout, presign_ttl - 5))

@@ -7,6 +7,7 @@ from core.users.permissions import IsAdminUser
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from django.contrib.contenttypes.models import ContentType
 from django.db import IntegrityError, transaction
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.text import slugify
 from django.db.models import Max
@@ -217,6 +218,18 @@ class ProgramListViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = ProgramSerializer
     queryset = Program.objects.all()
 
+    def get_object(self):
+        """
+        Override default behaviour so retrieve() returns BOTH temporary and non-temporary programs.
+        """
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        lookup_value = self.kwargs.get(lookup_url_kwarg)
+
+        # Retrieve from full table — bypass get_queryset()
+        obj = get_object_or_404(Program, **{self.lookup_field: lookup_value})
+        self.check_object_permissions(self.request, obj)
+        return obj
+
     def get_queryset(self):
         if self.action == "list":
             return Program.objects.all()
@@ -312,11 +325,17 @@ class ProgramListViewSet(viewsets.ReadOnlyModelViewSet):
     )
     def list_by_program_id(self, request, program_id=None):
         """
-        Admin-only endpoint to list programs by program_id.
-        Example: GET /api/v1/programs/list/ABC123/
+        Admin-only endpoint to fetch a program by program_id,
+        returning BOTH temporary and non-temporary records.
+
+        Example:
+        GET /api/v1/programs/list/ABC123/
         """
+
         try:
+            # IMPORTANT: bypass get_queryset() so temporary programmes are included
             qs = Program.objects.filter(program_id=program_id)
+
             if not qs.exists():
                 return Response(
                     {"detail": f"No program found with program_id '{program_id}'."},

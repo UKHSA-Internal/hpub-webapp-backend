@@ -7,6 +7,7 @@ from .views import (
     WhereToUseCreateViewSet,
     WhereToUseListViewSet,
     WhereToUseNameCheckViewSet,
+    WhereToUseUpdateViewSet,
 )
 
 router = DefaultRouter()
@@ -17,7 +18,7 @@ router.register(
     r"where-to-use/list", WhereToUseListViewSet, basename="where-to-use-list"
 )
 router.register(
-    r"where-to-use/update", WhereToUseCreateViewSet, basename="where-to-use-update"
+    r"where-to-use/update", WhereToUseUpdateViewSet, basename="where-to-use-update"
 )
 
 router.register(

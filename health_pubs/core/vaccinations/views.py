@@ -173,24 +173,44 @@ class VaccinationEditViewSet(viewsets.ModelViewSet):
             )
 
 
-class VaccinationListViewSet(viewsets.ReadOnlyModelViewSet):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
-    queryset = Vaccination.objects.all()
+class VaccinationListViewSet(viewsets.ViewSet):
+    """
+    Public list of vaccinations.
+    Admin-only retrieve via token-protected @action.
+    """
+
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
     serializer_class = VaccinationSerializer
 
-    def list(self, request, *args, **kwargs):
-        ser = self.get_serializer(self.get_queryset(), many=True)
-        return Response(ser.data)
+    def get_queryset(self):
+        return Vaccination.objects.all()
 
-    def retrieve(self, request, pk=None, *args, **kwargs):
+    # PUBLIC LIST
+    def list(self, request):
+        queryset = self.get_queryset()
+        serializer = VaccinationSerializer(queryset, many=True)
+        return Response(serializer.data)
+
+    # ADMIN-ONLY RETRIEVE ACTION
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path=r"retrieve/(?P<pk>[^/]+)",
+        authentication_classes=[CustomTokenAuthentication],
+        permission_classes=[IsAuthenticated, IsAdminUser],
+    )
+    def retrieve_item(self, request, pk=None):
+        """
+        Token-protected retrieve endpoint.
+        """
         try:
             vaccination = Vaccination.objects.get(vaccination_id=pk)
         except Vaccination.DoesNotExist:
             return Response({"error": "Vaccination not found."}, status=404)
 
-        ser = self.get_serializer(vaccination)
-        return Response(ser.data)
+        serializer = VaccinationSerializer(vaccination)
+        return Response(serializer.data, status=200)
 
 
 class VaccinationDeleteViewSet(viewsets.ViewSet):

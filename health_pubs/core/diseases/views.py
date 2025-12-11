@@ -259,28 +259,44 @@ class DiseaseDeleteViewSet(viewsets.ViewSet):
             )
 
 
-class DiseaseListViewSet(viewsets.ReadOnlyModelViewSet):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
+class DiseaseListViewSet(viewsets.ViewSet):
+    """
+    Public list of diseases.
+    Admin-only retrieve via token-protected @action.
+    """
+
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
     serializer_class = DiseaseSerializer
 
     def get_queryset(self):
-        # Return only live diseases so that deletions are reflected in the list.
         return Disease.objects.filter(live=True)
 
-    def list(self, request, *args, **kwargs):
+    # PUBLIC LIST (AllowAny)
+    def list(self, request):
         queryset = self.get_queryset()
-        serializer = self.get_serializer(queryset, many=True)
+        serializer = DiseaseSerializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
-    def retrieve(self, request, pk=None, *args, **kwargs):
+    # ADMIN-ONLY RETRIEVE ACTION
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path=r"retrieve/(?P<pk>[^/]+)",
+        authentication_classes=[CustomTokenAuthentication],
+        permission_classes=[IsAuthenticated, IsAdminUser],
+    )
+    def retrieve_item(self, request, pk=None):
+        """
+        Token-protected retrieve endpoint.
+        """
         try:
             disease = self.get_queryset().get(disease_id=pk)
         except Disease.DoesNotExist:
             return Response({"error": "Disease not found."}, status=404)
 
-        ser = self.get_serializer(disease)
-        return Response(ser.data, status=200)
+        serializer = DiseaseSerializer(disease)
+        return Response(serializer.data, status=200)
 
 
 class DiseaseNameCheckViewSet(viewsets.ViewSet):

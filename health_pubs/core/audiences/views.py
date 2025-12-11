@@ -69,24 +69,44 @@ class AudienceCreateViewSet(viewsets.ModelViewSet):
         return Response(created_audiences, status=status.HTTP_201_CREATED)
 
 
-class AudienceListViewSet(viewsets.ReadOnlyModelViewSet):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
-    queryset = Audience.objects.all()
+class AudienceListViewSet(viewsets.ViewSet):
+    """
+    Public list of audiences.
+    Admin-only retrieve via token-protected @action.
+    """
+
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
     serializer_class = AudienceSerializer
 
-    def list(self, request):
-        ser = self.get_serializer(self.get_queryset(), many=True)
-        return Response(ser.data)
+    def get_queryset(self):
+        return Audience.objects.all()
 
-    def retrieve(self, request, pk=None):
+    # PUBLIC LIST
+    def list(self, request):
+        queryset = self.get_queryset()
+        serializer = AudienceSerializer(queryset, many=True)
+        return Response(serializer.data)
+
+    # ADMIN-ONLY RETRIEVE ACTION
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path=r"retrieve/(?P<pk>[^/]+)",
+        authentication_classes=[CustomTokenAuthentication],
+        permission_classes=[IsAuthenticated, IsAdminUser],
+    )
+    def retrieve_item(self, request, pk=None):
+        """
+        Token-protected retrieve endpoint.
+        """
         try:
             audience = Audience.objects.get(audience_id=pk)
         except Audience.DoesNotExist:
             return Response({"error": "Audience not found"}, status=404)
 
-        ser = self.get_serializer(audience)
-        return Response(ser.data)
+        serializer = AudienceSerializer(audience)
+        return Response(serializer.data)
 
 
 class AudienceUpdateViewSet(viewsets.ViewSet):

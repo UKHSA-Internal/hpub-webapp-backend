@@ -96,15 +96,33 @@ class WhereToUseCreateViewSet(viewsets.ViewSet):
 
 
 class WhereToUseListViewSet(viewsets.ViewSet):
-    authentication_classes = [CustomTokenAuthentication]
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    """
+    Default = public list (Session + AllowAny)
+    Admin-only retrieve is moved to a dedicated @action.
+    """
 
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+
+    # PUBLIC LIST
     def list(self, request):
-        objects = WhereToUse.objects.all()
-        ser = WhereToUseSerializer(objects, many=True)
+        objs = WhereToUse.objects.all()
+        ser = WhereToUseSerializer(objs, many=True)
         return Response(ser.data)
 
-    def retrieve(self, request, pk=None):
+    # ADMIN-ONLY RETRIEVE ACTION
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path=r"retrieve/(?P<pk>[^/]+)",
+        authentication_classes=[CustomTokenAuthentication],
+        permission_classes=[IsAuthenticated, IsAdminUser],
+    )
+    def retrieve_item(self, request, pk=None):
+        """
+        Replaces the standard retrieve() method.
+        Requires CustomToken + Admin.
+        """
         try:
             obj = WhereToUse.objects.get(where_to_use_id=pk)
         except WhereToUse.DoesNotExist:

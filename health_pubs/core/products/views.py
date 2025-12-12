@@ -26,12 +26,13 @@ from django.db.models import (
     Subquery,
     Case,
     When,
-    UUIDField,
+    TextField,
 )
 from django.db.models.functions import (
     Upper,
     Trim,
     Replace,
+    Concat,
 )
 
 import pandas as pd
@@ -577,15 +578,17 @@ def invalidate_product_caches(product_code: str | None = None):
 def build_admin_queryset(request, *, apply_filters: bool = False):
     """
     Build queryset for admin list/filter views.
-
-    - If apply_filters=True → apply faceted filters + product_code/product_title filters
-      + last_modified_by + created_by + publish_date filters.
-    - Else → return all products (deduped and sorted).
-
-    This version supports dynamic "created_by" annotation (via subquery)
-    without adding new DB fields.
+    Includes:
+    - faceted filters
+    - product code & title filters
+    - publish_date filters
+    - last_modified_by (author of latest version)
+    - created_by (original author)
     """
 
+    # --------------------------------------------
+    # Faceted filters
+    # --------------------------------------------
     mapping = {
         "diseases": "update_ref__diseases_ref__name__in",
         "vaccinations": "update_ref__vaccination_ref__name__in",
@@ -595,77 +598,87 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
         "product_type": "update_ref__product_type__in",
         "languages": "language_name__in",
         "access_type": "tag__in",
-        "status": "status__in",  # only applied if explicitly passed
+        "status": "status__in",
         "program_names": "program_name__in",
         "program_ids": "program_id__in",
     }
 
     q = Q()
 
-    # ------------------------------------------------------------------
-    # Apply filters (facets, product_code, title, last_modified_by, etc.)
-    # ------------------------------------------------------------------
+    # ============================================================
+    # FILTERS
+    # ============================================================
     if apply_filters:
-        # --- Faceted filters ---
+
+        # --------------------------------------------
+        # Faceted filters
+        # --------------------------------------------
         for param, lookup in mapping.items():
             vals = request.GET.getlist(param, [])
             if vals:
                 q &= Q(**{lookup: vals})
 
-        # --- Product code filters ---
+        # --------------------------------------------
+        # Product Code Filter
+        # --------------------------------------------
         codes = request.GET.getlist("product_code")
         if codes:
             code_q = Q()
             for c in codes:
-                normed = re.sub(r"[-_\s]+", "", c or "").upper().strip()
-                if not normed:
-                    continue
+                norm = re.sub(r"[-_\s]+", "", c).upper().strip()
                 code_q |= Q(product_code__icontains=c) | Q(
-                    product_code_no_dashes__icontains=normed
+                    product_code_no_dashes__icontains=norm
                 )
-            if code_q:
-                q &= code_q
+            q &= code_q
 
-        # --- Product title filters ---
+        # --------------------------------------------
+        # Product Title Filter
+        # --------------------------------------------
         titles = request.GET.getlist("product_title")
         if titles:
             title_q = Q()
             for t in titles:
-                t = (t or "").strip()
-                if not t:
-                    continue
-                title_q |= Q(product_title__icontains=t)
+                clean = (t or "").strip()
+                if clean:
+                    title_q |= Q(product_title__icontains=clean)
             if title_q:
                 q &= title_q
 
-        # ---------------------------------------------------------------
-        # last_modified_by filter
-        # ---------------------------------------------------------------
-        last_modified_vals = request.GET.getlist("last_modified_by", [])
-        if last_modified_vals:
+        # --------------------------------------------
+        # LAST MODIFIED BY FILTER
+        # --------------------------------------------
+        last_vals = request.GET.getlist("last_modified_by", [])
+        if last_vals:
             lm_q = Q()
-            user = getattr(request, "user", None)
+            current = getattr(request, "user", None)
 
-            for raw_val in last_modified_vals:
-                token = (raw_val or "").strip()
+            for raw_val in last_vals:
+                token = raw_val.strip()
                 if not token:
                     continue
 
-                # Shortcut: ?last_modified_by=me
-                if token.lower() == "me" and user and user.is_authenticated:
-                    lm_q |= Q(user_ref=user)
+                if token.lower() == "me" and current and current.is_authenticated:
+                    lm_q |= Q(user_ref=current)
                     continue
 
-                lm_q |= Q(user_ref__user_id__iexact=token) | Q(
-                    user_ref__email__iexact=token
+                matches = list(
+                    User.objects.filter(
+                        Q(user_id__iexact=token)
+                        | Q(email__icontains=token)
+                        | Q(first_name__icontains=token)
+                        | Q(last_name__icontains=token)
+                    ).values_list("user_id", flat=True)
                 )
+
+                if matches:
+                    lm_q |= Q(user_ref__user_id__in=matches)
 
             if lm_q:
                 q &= lm_q
 
-        # ---------------------------------------------------------------
-        # publish_date filters (supports =, from, to)
-        # ---------------------------------------------------------------
+        # --------------------------------------------
+        # PUBLISH DATE FILTERS
+        # --------------------------------------------
         def _parse_date(val: str | None):
             val = (val or "").strip()
             if not val:
@@ -674,79 +687,90 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
                 try:
                     return datetime.datetime.strptime(val, fmt).date()
                 except ValueError:
-                    continue
-            logger.warning("Invalid publish_date value %r – ignoring", val)
+                    pass
+            logger.warning("Invalid publish_date value %r – ignored", val)
             return None
 
-        exact_date = _parse_date(request.GET.get("publish_date"))
+        exact = _parse_date(request.GET.get("publish_date"))
         date_from = _parse_date(request.GET.get("publish_date_from"))
         date_to = _parse_date(request.GET.get("publish_date_to"))
 
-        if exact_date:
-            q &= Q(publish_date=exact_date)
+        if exact:
+            q &= Q(publish_date=exact)
         else:
             if date_from:
                 q &= Q(publish_date__gte=date_from)
             if date_to:
                 q &= Q(publish_date__lte=date_to)
 
-    # ------------------------------------------------------------------
-    # Base queryset
-    # ------------------------------------------------------------------
+    # ============================================================
+    # BASE QUERYSET
+    # ============================================================
     qs = Product.objects.filter(q).select_related(
         "program_id",
         "language_id",
         "update_ref",
-        "user_ref",  # last editor
+        "user_ref",
     )
 
-    # ------------------------------------------------------------------
-    # Annotate "creator_user_id" (original creator)
-    # ------------------------------------------------------------------
+    # ============================================================
+    # ANNOTATE ORIGINAL CREATOR USER_ID AS TEXT
+    # ============================================================
     creator_subquery = (
         Product.objects.filter(
             product_key=OuterRef("product_key"),
             language_id=OuterRef("language_id"),
         )
         .order_by("created_at", "version_number", "id")
-        .values("user_ref_id")[:1]
+        .values("user_ref__user_id")[:1]
     )
 
     qs = qs.annotate(
-        creator_user_id=Subquery(creator_subquery, output_field=UUIDField())
+        creator_user_id=Subquery(creator_subquery, output_field=TextField())
     )
 
-    # ------------------------------------------------------------------
-    # created_by filter (supports me, UUID, email, partial name)
-    # ------------------------------------------------------------------
-    created_by_vals = request.GET.getlist("created_by", [])
-    if created_by_vals:
-        cb_q = Q()
-        user = getattr(request, "user", None)
+    # ============================================================
+    # ANNOTATE CREATOR DISPLAY NAME (first + last)
+    # ============================================================
+    qs = qs.annotate(
+        creator_display_name=Concat(
+            F("user_ref__first_name"),
+            Value(" "),
+            F("user_ref__last_name"),
+            output_field=TextField(),
+        )
+    )
 
-        for raw_val in created_by_vals:
+    # ============================================================
+    # CREATED BY FILTER — SUPPORTS:
+    #  - ?created_by=user_id partial match
+    #  - ?created_by=first name partial
+    #  - ?created_by=last name partial
+    #  - ?created_by=full name partial
+    #  - ?created_by=me
+    # ============================================================
+    created_vals = request.GET.getlist("created_by", [])
+    if created_vals:
+        cb_q = Q()
+        current = getattr(request, "user", None)
+
+        for raw_val in created_vals:
             token = (raw_val or "").strip()
             if not token:
                 continue
 
             # ?created_by=me
-            if token.lower() == "me" and user and user.is_authenticated:
-                cb_q |= Q(creator_user_id=user.id)
+            if token.lower() == "me" and current and current.is_authenticated:
+                cb_q |= Q(creator_user_id=current.user_id)
                 continue
 
-            # Try to resolve to user IDs via multiple matching fields
-            matching_users = User.objects.filter(
-                Q(user_id__iexact=token)
-                | Q(email__icontains=token)
-                | Q(first_name__icontains=token)
-                | Q(last_name__icontains=token)
-            ).values_list("id", flat=True)
+            # Match user_id text
+            cb_q |= Q(creator_user_id__icontains=token)
 
-            if matching_users:
-                cb_q |= Q(creator_user_id__in=list(matching_users))
+            # Match display name text
+            cb_q |= Q(creator_display_name__icontains=token)
 
-        if cb_q:
-            qs = qs.filter(cb_q)
+        qs = qs.filter(cb_q)
 
     return qs
 
@@ -774,7 +798,7 @@ class CustomPagination(PageNumberPagination):
 
 class AdminPagination(CustomPagination):
     # Only the admin list should use this larger/smaller page size
-    page_size = getattr(settings, "ADMIN_PRODUCTS_PAGE_SIZE", 20)  # pick your number
+    page_size = getattr(settings, "ADMIN_PRODUCTS_PAGE_SIZE", 25)  # pick your number
 
 
 class ErrorHandlingMixin:

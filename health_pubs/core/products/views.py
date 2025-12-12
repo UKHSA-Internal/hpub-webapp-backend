@@ -609,7 +609,6 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
     # APPLY FILTERS
     # ============================================================
     if apply_filters:
-
         # --------------------------------------------
         # Faceted filters
         # --------------------------------------------

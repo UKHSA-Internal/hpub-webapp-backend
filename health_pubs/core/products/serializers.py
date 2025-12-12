@@ -398,21 +398,25 @@ class ProductSerializer(serializers.ModelSerializer):
 class AdminProductSerializer(ProductSerializer):
     last_updated_by = serializers.SerializerMethodField()
     last_updated_by_initials = serializers.SerializerMethodField()
+    created_by = serializers.SerializerMethodField()
+    created_by_initials = serializers.SerializerMethodField()
 
     class Meta(ProductSerializer.Meta):
         fields = ProductSerializer.Meta.fields + (
             "last_updated_by",
             "last_updated_by_initials",
+            "created_by",
+            "created_by_initials",
         )
 
     def _display_name(self, user: User | None) -> str | None:
         if not user:
             return None
 
-        # Try a explicit full_name field
+        # Try explicit full_name
         name = getattr(user, "full_name", None)
 
-        # Fallback to first + last name
+        # Fallback to first + last
         if not name:
             first = getattr(user, "first_name", "") or ""
             last = getattr(user, "last_name", "") or ""
@@ -430,8 +434,9 @@ class AdminProductSerializer(ProductSerializer):
         parts = [p for p in name.split() if p]
         if not parts:
             return None
-        # Take first letter of first 2 parts
         return "".join(p[0].upper() for p in parts[:2])
+
+    # ---------------- last updated ----------------
 
     def get_last_updated_by(self, obj):
         user = getattr(obj, "user_ref", None)
@@ -439,6 +444,33 @@ class AdminProductSerializer(ProductSerializer):
 
     def get_last_updated_by_initials(self, obj):
         name = self.get_last_updated_by(obj)
+        return self._initials_from_name(name)
+
+    # ---------------- created by (original author) ----------------
+
+    def _get_creator_user(self, obj) -> User | None:
+        """
+        Original author = earliest Product with same (product_key, language_id).
+        No schema change; purely derived.
+        """
+        root = (
+            Product.objects.filter(
+                product_key=obj.product_key,
+                language_id=obj.language_id,
+            )
+            .order_by("created_at", "version_number", "id")
+            .first()
+        )
+        if not root:
+            return None
+        return getattr(root, "user_ref", None)
+
+    def get_created_by(self, obj):
+        user = self._get_creator_user(obj)
+        return self._display_name(user)
+
+    def get_created_by_initials(self, obj):
+        name = self.get_created_by(obj)
         return self._initials_from_name(name)
 
 

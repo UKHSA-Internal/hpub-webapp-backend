@@ -26,11 +26,13 @@ from django.db.models import (
     Subquery,
     Case,
     When,
+    TextField,
 )
 from django.db.models.functions import (
     Upper,
     Trim,
     Replace,
+    Concat,
 )
 
 import pandas as pd
@@ -576,10 +578,17 @@ def invalidate_product_caches(product_code: str | None = None):
 def build_admin_queryset(request, *, apply_filters: bool = False):
     """
     Build queryset for admin list/filter views.
-    - If apply_filters=True → apply faceted filters + product_code/product_title filters
-      + last_modified_by + publish_date filters
-    - Else → just return all products (deduped and sorted)
+    Includes:
+    - faceted filters
+    - product code & title filters
+    - publish_date filters
+    - last_updated_by (latest editor)
+    - created_by (original author)
     """
+
+    # --------------------------------------------
+    # Faceted filters
+    # --------------------------------------------
     mapping = {
         "diseases": "update_ref__diseases_ref__name__in",
         "vaccinations": "update_ref__vaccination_ref__name__in",
@@ -589,80 +598,54 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
         "product_type": "update_ref__product_type__in",
         "languages": "language_name__in",
         "access_type": "tag__in",
-        "status": "status__in",  # only applied if explicitly passed
+        "status": "status__in",
         "program_names": "program_name__in",
         "program_ids": "program_id__in",
     }
 
     q = Q()
 
+    # ============================================================
+    # APPLY FILTERS
+    # ============================================================
     if apply_filters:
-        # --- Faceted filters (audiences, diseases, etc.) ---
+        # --------------------------------------------
+        # Faceted filters
+        # --------------------------------------------
         for param, lookup in mapping.items():
             vals = request.GET.getlist(param, [])
             if vals:
                 q &= Q(**{lookup: vals})
 
-        # --- Product code filters ---
+        # --------------------------------------------
+        # Product Code Filter
+        # --------------------------------------------
         codes = request.GET.getlist("product_code")
         if codes:
             code_q = Q()
             for c in codes:
-                normed = re.sub(r"[-_\s]+", "", c).upper().strip()
+                norm = re.sub(r"[-_\s]+", "", c).upper().strip()
                 code_q |= Q(product_code__icontains=c) | Q(
-                    product_code_no_dashes__icontains=normed
+                    product_code_no_dashes__icontains=norm
                 )
             q &= code_q
 
-        # --- Product title filters (partial + case-insensitive) ---
+        # --------------------------------------------
+        # Product Title Filter
+        # --------------------------------------------
         titles = request.GET.getlist("product_title")
         if titles:
             title_q = Q()
             for t in titles:
-                clean_t = t.strip()
-                if not clean_t:
-                    continue
-                title_q |= Q(product_title__icontains=clean_t)
+                clean = (t or "").strip()
+                if clean:
+                    title_q |= Q(product_title__icontains=clean)
             if title_q:
                 q &= title_q
 
-        # -------------------------------
-        # NEW: last_modified_by filter
-        # -------------------------------
-        # Accepts multiple values:
-        #  - "me" → current authenticated user
-        #  - a user_id (uuid) → matches User.user_id
-        #  - an email → matches User.email (case-insensitive)
-        last_modified_vals = request.GET.getlist("last_modified_by", [])
-        if last_modified_vals:
-            lm_q = Q()
-            user = getattr(request, "user", None)
-
-            for raw_val in last_modified_vals:
-                token = (raw_val or "").strip()
-                if not token:
-                    continue
-
-                # Special shortcut: ?last_modified_by=me
-                if token.lower() == "me" and user and user.is_authenticated:
-                    lm_q |= Q(user_ref=user)
-                    continue
-
-                # Try matching against user_id (uuid-like) and email
-                lm_q |= Q(user_ref__user_id__iexact=token) | Q(
-                    user_ref__email__iexact=token
-                )
-
-            if lm_q:
-                q &= lm_q
-
-        # -------------------------------
-        # NEW: publish_date filters
-        # -------------------------------
-        # Supports:
-        #  - ?publish_date=YYYY-MM-DD
-        #  - ?publish_date_from=YYYY-MM-DD
-        #  - ?publish_date_to=YYYY-MM-DD
+        # --------------------------------------------
+        # PUBLISH DATE FILTERS
+        # --------------------------------------------
         def _parse_date(val: str | None):
             val = (val or "").strip()
             if not val:
@@ -671,28 +654,126 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
                 try:
                     return datetime.datetime.strptime(val, fmt).date()
                 except ValueError:
-                    continue
-            logger.warning("Invalid publish_date value %r – ignoring", val)
+                    pass
+            logger.warning("Invalid publish_date value %r – ignored", val)
             return None
 
-        exact_date = _parse_date(request.GET.get("publish_date"))
+        exact = _parse_date(request.GET.get("publish_date"))
         date_from = _parse_date(request.GET.get("publish_date_from"))
         date_to = _parse_date(request.GET.get("publish_date_to"))
 
-        if exact_date:
-            q &= Q(publish_date=exact_date)
+        if exact:
+            q &= Q(publish_date=exact)
         else:
             if date_from:
                 q &= Q(publish_date__gte=date_from)
             if date_to:
                 q &= Q(publish_date__lte=date_to)
 
+    # ============================================================
+    # BASE QUERYSET
+    # ============================================================
     qs = Product.objects.filter(q).select_related(
         "program_id",
         "language_id",
         "update_ref",
-        "user_ref",  # so admin list has editor info without extra queries
+        "user_ref",
     )
+
+    # ============================================================
+    # ANNOTATE ORIGINAL CREATOR (first Product)
+    # ============================================================
+    creator_user_subquery = (
+        Product.objects.filter(
+            product_key=OuterRef("product_key"),
+            language_id=OuterRef("language_id"),
+        )
+        .order_by("created_at", "version_number", "id")
+        .values("user_ref__user_id")[:1]
+    )
+
+    creator_name_subquery = (
+        User.objects.filter(user_id=OuterRef("creator_user_id"))
+        .annotate(full_name=Concat(F("first_name"), Value(" "), F("last_name")))
+        .values("full_name")[:1]
+    )
+
+    qs = qs.annotate(
+        creator_user_id=Subquery(creator_user_subquery, output_field=TextField()),
+        creator_display_name=Subquery(creator_name_subquery, output_field=TextField()),
+    )
+
+    # ============================================================
+    # ANNOTATE LAST MODIFIED BY (latest Product)
+    # ============================================================
+    modifier_user_subquery = (
+        Product.objects.filter(
+            product_key=OuterRef("product_key"),
+            language_id=OuterRef("language_id"),
+        )
+        .order_by("-updated_at", "-version_number", "-id")
+        .values("user_ref__user_id")[:1]
+    )
+
+    modifier_name_subquery = (
+        User.objects.filter(user_id=OuterRef("modifier_user_id"))
+        .annotate(full_name=Concat(F("first_name"), Value(" "), F("last_name")))
+        .values("full_name")[:1]
+    )
+
+    qs = qs.annotate(
+        modifier_user_id=Subquery(modifier_user_subquery, output_field=TextField()),
+        modifier_display_name=Subquery(
+            modifier_name_subquery, output_field=TextField()
+        ),
+    )
+
+    # ============================================================
+    # CREATED BY FILTER — supports:
+    #  - ?created_by=me
+    #  - ?created_by=user_id (partial)
+    #  - ?created_by=first/last/full name (partial)
+    # ============================================================
+    created_vals = request.GET.getlist("created_by", [])
+    if created_vals:
+        cb_q = Q()
+        current = getattr(request, "user", None)
+
+        for raw_val in created_vals:
+            token = (raw_val or "").strip()
+            if not token:
+                continue
+
+            if token.lower() == "me" and current and current.is_authenticated:
+                cb_q |= Q(creator_user_id=current.user_id)
+                continue
+
+            cb_q |= Q(creator_user_id__icontains=token)
+            cb_q |= Q(creator_display_name__icontains=token)
+
+        qs = qs.filter(cb_q)
+
+    # ============================================================
+    # LAST MODIFIED BY FILTER — same pattern as CREATED BY
+    # ============================================================
+    modified_vals = request.GET.getlist("last_updated_by", [])
+    if modified_vals:
+        lm_q = Q()
+        current = getattr(request, "user", None)
+
+        for raw_val in modified_vals:
+            token = (raw_val or "").strip()
+            if not token:
+                continue
+
+            if token.lower() == "me" and current and current.is_authenticated:
+                lm_q |= Q(modifier_user_id=current.user_id)
+                continue
+
+            lm_q |= Q(modifier_user_id__icontains=token)
+            lm_q |= Q(modifier_display_name__icontains=token)
+
+        qs = qs.filter(lm_q)
 
     return qs
 
@@ -720,7 +801,7 @@ class CustomPagination(PageNumberPagination):
 
 class AdminPagination(CustomPagination):
     # Only the admin list should use this larger/smaller page size
-    page_size = getattr(settings, "ADMIN_PRODUCTS_PAGE_SIZE", 20)  # pick your number
+    page_size = getattr(settings, "ADMIN_PRODUCTS_PAGE_SIZE", 25)  # pick your number
 
 
 class ErrorHandlingMixin:

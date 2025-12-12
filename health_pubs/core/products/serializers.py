@@ -9,7 +9,6 @@ from core.programs.models import Program
 from core.vaccinations.serializers import VaccinationSerializer
 from core.where_to_use.serializers import WhereToUseSerializer
 from rest_framework import serializers
-from core.users.models import User
 
 from .models import Product, ProductUpdate
 from .choices import (
@@ -396,50 +395,45 @@ class ProductSerializer(serializers.ModelSerializer):
 
 
 class AdminProductSerializer(ProductSerializer):
+    user_order_limit = serializers.SerializerMethodField()
+
+    created_by = serializers.SerializerMethodField()
+    created_by_initials = serializers.SerializerMethodField()
     last_updated_by = serializers.SerializerMethodField()
     last_updated_by_initials = serializers.SerializerMethodField()
 
     class Meta(ProductSerializer.Meta):
         fields = ProductSerializer.Meta.fields + (
+            "created_by",
+            "created_by_initials",
             "last_updated_by",
             "last_updated_by_initials",
         )
 
-    def _display_name(self, user: User | None) -> str | None:
-        if not user:
+    # -------------------- HELPERS --------------------
+    def _initials(self, full_name: str | None):
+        if not full_name:
             return None
+        parts = [p for p in full_name.split() if p]
+        return "".join([p[0].upper() for p in parts[:2]]) if parts else None
 
-        # Try a explicit full_name field
-        name = getattr(user, "full_name", None)
+    # -------------------- CREATED BY --------------------
+    def get_created_by(self, obj):
+        """Return annotated creator display name."""
+        name = getattr(obj, "creator_display_name", None)
+        return name.strip() if name else None
 
-        # Fallback to first + last name
-        if not name:
-            first = getattr(user, "first_name", "") or ""
-            last = getattr(user, "last_name", "") or ""
-            name = f"{first} {last}".strip()
+    def get_created_by_initials(self, obj):
+        return self._initials(self.get_created_by(obj))
 
-        # Fallback to email
-        if not name:
-            name = getattr(user, "email", None)
-
-        return name or None
-
-    def _initials_from_name(self, name: str | None) -> str | None:
-        if not name:
-            return None
-        parts = [p for p in name.split() if p]
-        if not parts:
-            return None
-        # Take first letter of first 2 parts
-        return "".join(p[0].upper() for p in parts[:2])
-
+    # -------------------- LAST UPDATED BY --------------------
     def get_last_updated_by(self, obj):
-        user = getattr(obj, "user_ref", None)
-        return self._display_name(user)
+        """Return annotated modifier (last editor) display name."""
+        name = getattr(obj, "modifier_display_name", None)
+        return name.strip() if name else None
 
     def get_last_updated_by_initials(self, obj):
-        name = self.get_last_updated_by(obj)
-        return self._initials_from_name(name)
+        return self._initials(self.get_last_updated_by(obj))
 
 
 class ProductUpdateSearchSerializer(serializers.ModelSerializer):

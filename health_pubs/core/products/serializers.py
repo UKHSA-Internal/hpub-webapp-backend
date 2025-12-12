@@ -9,7 +9,6 @@ from core.programs.models import Program
 from core.vaccinations.serializers import VaccinationSerializer
 from core.where_to_use.serializers import WhereToUseSerializer
 from rest_framework import serializers
-from core.users.models import User
 
 from .models import Product, ProductUpdate
 from .choices import (
@@ -409,69 +408,30 @@ class AdminProductSerializer(ProductSerializer):
             "created_by_initials",
         )
 
-    def _display_name(self, user: User | None) -> str | None:
-        if not user:
-            return None
-
-        # Try explicit full_name
-        name = getattr(user, "full_name", None)
-
-        # Fallback to first + last
-        if not name:
-            first = getattr(user, "first_name", "") or ""
-            last = getattr(user, "last_name", "") or ""
-            name = f"{first} {last}".strip()
-
-        # Fallback to email
-        if not name:
-            name = getattr(user, "email", None)
-
-        return name or None
-
-    def _initials_from_name(self, name: str | None) -> str | None:
-        if not name:
-            return None
-        parts = [p for p in name.split() if p]
-        if not parts:
-            return None
-        return "".join(p[0].upper() for p in parts[:2])
-
     # ---------------- last updated ----------------
 
     def get_last_updated_by(self, obj):
         user = getattr(obj, "user_ref", None)
-        return self._display_name(user)
+        return f"{user.first_name} {user.last_name}".strip() if user else None
 
     def get_last_updated_by_initials(self, obj):
-        name = self.get_last_updated_by(obj)
-        return self._initials_from_name(name)
-
-    # ---------------- created by (original author) ----------------
-
-    def _get_creator_user(self, obj) -> User | None:
-        """
-        Original author = earliest Product with same (product_key, language_id).
-        No schema change; purely derived.
-        """
-        root = (
-            Product.objects.filter(
-                product_key=obj.product_key,
-                language_id=obj.language_id,
-            )
-            .order_by("created_at", "version_number", "id")
-            .first()
-        )
-        if not root:
+        user = getattr(obj, "user_ref", None)
+        if not user:
             return None
-        return getattr(root, "user_ref", None)
+        return f"{user.first_name[:1]}{user.last_name[:1]}".upper()
+
+    # ---------------- created by (uses annotations) ----------------
 
     def get_created_by(self, obj):
-        user = self._get_creator_user(obj)
-        return self._display_name(user)
+        name = getattr(obj, "creator_display_name", None)
+        return name or None
 
     def get_created_by_initials(self, obj):
-        name = self.get_created_by(obj)
-        return self._initials_from_name(name)
+        name = getattr(obj, "creator_display_name", None)
+        if not name:
+            return None
+        parts = [p for p in name.split() if p]
+        return "".join(p[0].upper() for p in parts[:2])
 
 
 class ProductUpdateSearchSerializer(serializers.ModelSerializer):

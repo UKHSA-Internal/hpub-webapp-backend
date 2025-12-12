@@ -26,6 +26,7 @@ from django.db.models import (
     Subquery,
     Case,
     When,
+    UUIDField,
 )
 from django.db.models.functions import (
     Upper,
@@ -576,10 +577,15 @@ def invalidate_product_caches(product_code: str | None = None):
 def build_admin_queryset(request, *, apply_filters: bool = False):
     """
     Build queryset for admin list/filter views.
+
     - If apply_filters=True → apply faceted filters + product_code/product_title filters
-      + last_modified_by + publish_date filters
-    - Else → just return all products (deduped and sorted)
+      + last_modified_by + created_by + publish_date filters.
+    - Else → return all products (deduped and sorted).
+
+    This version supports dynamic "created_by" annotation (via subquery)
+    without adding new DB fields.
     """
+
     mapping = {
         "diseases": "update_ref__diseases_ref__name__in",
         "vaccinations": "update_ref__vaccination_ref__name__in",
@@ -596,8 +602,11 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
 
     q = Q()
 
+    # ------------------------------------------------------------------
+    # Apply filters (facets, product_code, title, last_modified_by, etc.)
+    # ------------------------------------------------------------------
     if apply_filters:
-        # --- Faceted filters (audiences, diseases, etc.) ---
+        # --- Faceted filters ---
         for param, lookup in mapping.items():
             vals = request.GET.getlist(param, [])
             if vals:
@@ -608,31 +617,30 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
         if codes:
             code_q = Q()
             for c in codes:
-                normed = re.sub(r"[-_\s]+", "", c).upper().strip()
+                normed = re.sub(r"[-_\s]+", "", c or "").upper().strip()
+                if not normed:
+                    continue
                 code_q |= Q(product_code__icontains=c) | Q(
                     product_code_no_dashes__icontains=normed
                 )
-            q &= code_q
+            if code_q:
+                q &= code_q
 
-        # --- Product title filters (partial + case-insensitive) ---
+        # --- Product title filters ---
         titles = request.GET.getlist("product_title")
         if titles:
             title_q = Q()
             for t in titles:
-                clean_t = t.strip()
-                if not clean_t:
+                t = (t or "").strip()
+                if not t:
                     continue
-                title_q |= Q(product_title__icontains=clean_t)
+                title_q |= Q(product_title__icontains=t)
             if title_q:
                 q &= title_q
 
-        # -------------------------------
-        # NEW: last_modified_by filter
-        # -------------------------------
-        # Accepts multiple values:
-        #  - "me" → current authenticated user
-        #  - a user_id (uuid) → matches User.user_id
-        #  - an email → matches User.email (case-insensitive)
+        # ---------------------------------------------------------------
+        # last_modified_by filter
+        # ---------------------------------------------------------------
         last_modified_vals = request.GET.getlist("last_modified_by", [])
         if last_modified_vals:
             lm_q = Q()
@@ -643,12 +651,11 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
                 if not token:
                     continue
 
-                # Special shortcut: ?last_modified_by=me
+                # Shortcut: ?last_modified_by=me
                 if token.lower() == "me" and user and user.is_authenticated:
                     lm_q |= Q(user_ref=user)
                     continue
 
-                # Try matching against user_id (uuid-like) and email
                 lm_q |= Q(user_ref__user_id__iexact=token) | Q(
                     user_ref__email__iexact=token
                 )
@@ -656,13 +663,9 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
             if lm_q:
                 q &= lm_q
 
-        # -------------------------------
-        # NEW: publish_date filters
-        # -------------------------------
-        # Supports:
-        #  - ?publish_date=YYYY-MM-DD
-        #  - ?publish_date_from=YYYY-MM-DD
-        #  - ?publish_date_to=YYYY-MM-DD
+        # ---------------------------------------------------------------
+        # publish_date filters (supports =, from, to)
+        # ---------------------------------------------------------------
         def _parse_date(val: str | None):
             val = (val or "").strip()
             if not val:
@@ -687,12 +690,63 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
             if date_to:
                 q &= Q(publish_date__lte=date_to)
 
+    # ------------------------------------------------------------------
+    # Base queryset
+    # ------------------------------------------------------------------
     qs = Product.objects.filter(q).select_related(
         "program_id",
         "language_id",
         "update_ref",
-        "user_ref",  # so admin list has editor info without extra queries
+        "user_ref",  # last editor
     )
+
+    # ------------------------------------------------------------------
+    # Annotate "creator_user_id" (original creator)
+    # ------------------------------------------------------------------
+    creator_subquery = (
+        Product.objects.filter(
+            product_key=OuterRef("product_key"),
+            language_id=OuterRef("language_id"),
+        )
+        .order_by("created_at", "version_number", "id")
+        .values("user_ref_id")[:1]
+    )
+
+    qs = qs.annotate(
+        creator_user_id=Subquery(creator_subquery, output_field=UUIDField())
+    )
+
+    # ------------------------------------------------------------------
+    # created_by filter (supports me, UUID, email, partial name)
+    # ------------------------------------------------------------------
+    created_by_vals = request.GET.getlist("created_by", [])
+    if created_by_vals:
+        cb_q = Q()
+        user = getattr(request, "user", None)
+
+        for raw_val in created_by_vals:
+            token = (raw_val or "").strip()
+            if not token:
+                continue
+
+            # ?created_by=me
+            if token.lower() == "me" and user and user.is_authenticated:
+                cb_q |= Q(creator_user_id=user.id)
+                continue
+
+            # Try to resolve to user IDs via multiple matching fields
+            matching_users = User.objects.filter(
+                Q(user_id__iexact=token)
+                | Q(email__icontains=token)
+                | Q(first_name__icontains=token)
+                | Q(last_name__icontains=token)
+            ).values_list("id", flat=True)
+
+            if matching_users:
+                cb_q |= Q(creator_user_id__in=list(matching_users))
+
+        if cb_q:
+            qs = qs.filter(cb_q)
 
     return qs
 

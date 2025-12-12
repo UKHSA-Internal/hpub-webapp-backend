@@ -582,7 +582,7 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
     - faceted filters
     - product code & title filters
     - publish_date filters
-    - last_modified_by (author of latest version)
+    - last_updated_by (latest editor)
     - created_by (original author)
     """
 
@@ -606,7 +606,7 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
     q = Q()
 
     # ============================================================
-    # FILTERS
+    # APPLY FILTERS
     # ============================================================
     if apply_filters:
 
@@ -643,38 +643,6 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
                     title_q |= Q(product_title__icontains=clean)
             if title_q:
                 q &= title_q
-
-        # --------------------------------------------
-        # LAST MODIFIED BY FILTER
-        # --------------------------------------------
-        last_vals = request.GET.getlist("last_modified_by", [])
-        if last_vals:
-            lm_q = Q()
-            current = getattr(request, "user", None)
-
-            for raw_val in last_vals:
-                token = raw_val.strip()
-                if not token:
-                    continue
-
-                if token.lower() == "me" and current and current.is_authenticated:
-                    lm_q |= Q(user_ref=current)
-                    continue
-
-                matches = list(
-                    User.objects.filter(
-                        Q(user_id__iexact=token)
-                        | Q(email__icontains=token)
-                        | Q(first_name__icontains=token)
-                        | Q(last_name__icontains=token)
-                    ).values_list("user_id", flat=True)
-                )
-
-                if matches:
-                    lm_q |= Q(user_ref__user_id__in=matches)
-
-            if lm_q:
-                q &= lm_q
 
         # --------------------------------------------
         # PUBLISH DATE FILTERS
@@ -714,9 +682,9 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
     )
 
     # ============================================================
-    # ANNOTATE ORIGINAL CREATOR USER_ID AS TEXT
+    # ANNOTATE ORIGINAL CREATOR (first Product)
     # ============================================================
-    creator_subquery = (
+    creator_user_subquery = (
         Product.objects.filter(
             product_key=OuterRef("product_key"),
             language_id=OuterRef("language_id"),
@@ -725,29 +693,47 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
         .values("user_ref__user_id")[:1]
     )
 
+    creator_name_subquery = (
+        User.objects.filter(user_id=OuterRef("creator_user_id"))
+        .annotate(full_name=Concat(F("first_name"), Value(" "), F("last_name")))
+        .values("full_name")[:1]
+    )
+
     qs = qs.annotate(
-        creator_user_id=Subquery(creator_subquery, output_field=TextField())
+        creator_user_id=Subquery(creator_user_subquery, output_field=TextField()),
+        creator_display_name=Subquery(creator_name_subquery, output_field=TextField()),
     )
 
     # ============================================================
-    # ANNOTATE CREATOR DISPLAY NAME (first + last)
+    # ANNOTATE LAST MODIFIED BY (latest Product)
     # ============================================================
-    qs = qs.annotate(
-        creator_display_name=Concat(
-            F("user_ref__first_name"),
-            Value(" "),
-            F("user_ref__last_name"),
-            output_field=TextField(),
+    modifier_user_subquery = (
+        Product.objects.filter(
+            product_key=OuterRef("product_key"),
+            language_id=OuterRef("language_id"),
         )
+        .order_by("-updated_at", "-version_number", "-id")
+        .values("user_ref__user_id")[:1]
+    )
+
+    modifier_name_subquery = (
+        User.objects.filter(user_id=OuterRef("modifier_user_id"))
+        .annotate(full_name=Concat(F("first_name"), Value(" "), F("last_name")))
+        .values("full_name")[:1]
+    )
+
+    qs = qs.annotate(
+        modifier_user_id=Subquery(modifier_user_subquery, output_field=TextField()),
+        modifier_display_name=Subquery(
+            modifier_name_subquery, output_field=TextField()
+        ),
     )
 
     # ============================================================
-    # CREATED BY FILTER — SUPPORTS:
-    #  - ?created_by=user_id partial match
-    #  - ?created_by=first name partial
-    #  - ?created_by=last name partial
-    #  - ?created_by=full name partial
+    # CREATED BY FILTER — supports:
     #  - ?created_by=me
+    #  - ?created_by=user_id (partial)
+    #  - ?created_by=first/last/full name (partial)
     # ============================================================
     created_vals = request.GET.getlist("created_by", [])
     if created_vals:
@@ -759,18 +745,36 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
             if not token:
                 continue
 
-            # ?created_by=me
             if token.lower() == "me" and current and current.is_authenticated:
                 cb_q |= Q(creator_user_id=current.user_id)
                 continue
 
-            # Match user_id text
             cb_q |= Q(creator_user_id__icontains=token)
-
-            # Match display name text
             cb_q |= Q(creator_display_name__icontains=token)
 
         qs = qs.filter(cb_q)
+
+    # ============================================================
+    # LAST MODIFIED BY FILTER — same pattern as CREATED BY
+    # ============================================================
+    modified_vals = request.GET.getlist("last_updated_by", [])
+    if modified_vals:
+        lm_q = Q()
+        current = getattr(request, "user", None)
+
+        for raw_val in modified_vals:
+            token = (raw_val or "").strip()
+            if not token:
+                continue
+
+            if token.lower() == "me" and current and current.is_authenticated:
+                lm_q |= Q(modifier_user_id=current.user_id)
+                continue
+
+            lm_q |= Q(modifier_user_id__icontains=token)
+            lm_q |= Q(modifier_display_name__icontains=token)
+
+        qs = qs.filter(lm_q)
 
     return qs
 

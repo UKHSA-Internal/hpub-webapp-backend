@@ -395,43 +395,45 @@ class ProductSerializer(serializers.ModelSerializer):
 
 
 class AdminProductSerializer(ProductSerializer):
-    last_updated_by = serializers.SerializerMethodField()
-    last_updated_by_initials = serializers.SerializerMethodField()
+    user_order_limit = serializers.SerializerMethodField()
+
     created_by = serializers.SerializerMethodField()
     created_by_initials = serializers.SerializerMethodField()
+    last_updated_by = serializers.SerializerMethodField()
+    last_updated_by_initials = serializers.SerializerMethodField()
 
     class Meta(ProductSerializer.Meta):
         fields = ProductSerializer.Meta.fields + (
-            "last_updated_by",
-            "last_updated_by_initials",
             "created_by",
             "created_by_initials",
+            "last_updated_by",
+            "last_updated_by_initials",
         )
 
-    # ---------------- last updated ----------------
-
-    def get_last_updated_by(self, obj):
-        user = getattr(obj, "user_ref", None)
-        return f"{user.first_name} {user.last_name}".strip() if user else None
-
-    def get_last_updated_by_initials(self, obj):
-        user = getattr(obj, "user_ref", None)
-        if not user:
+    # -------------------- HELPERS --------------------
+    def _initials(self, full_name: str | None):
+        if not full_name:
             return None
-        return f"{user.first_name[:1]}{user.last_name[:1]}".upper()
+        parts = [p for p in full_name.split() if p]
+        return "".join([p[0].upper() for p in parts[:2]]) if parts else None
 
-    # ---------------- created by (uses annotations) ----------------
-
+    # -------------------- CREATED BY --------------------
     def get_created_by(self, obj):
+        """Return annotated creator display name."""
         name = getattr(obj, "creator_display_name", None)
-        return name or None
+        return name.strip() if name else None
 
     def get_created_by_initials(self, obj):
-        name = getattr(obj, "creator_display_name", None)
-        if not name:
-            return None
-        parts = [p for p in name.split() if p]
-        return "".join(p[0].upper() for p in parts[:2])
+        return self._initials(self.get_created_by(obj))
+
+    # -------------------- LAST UPDATED BY --------------------
+    def get_last_updated_by(self, obj):
+        """Return annotated modifier (last editor) display name."""
+        name = getattr(obj, "modifier_display_name", None)
+        return name.strip() if name else None
+
+    def get_last_updated_by_initials(self, obj):
+        return self._initials(self.get_last_updated_by(obj))
 
 
 class ProductUpdateSearchSerializer(serializers.ModelSerializer):

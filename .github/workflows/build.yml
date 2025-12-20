@@ -28,9 +28,9 @@ jobs:
     # Even further on, this should push to a centralised ECR registry.
     environment: dev
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         if: ${{ env.RUN_UNIT_TESTS == 'true' }}
         with:
           python-version: "3.11"
@@ -45,21 +45,21 @@ jobs:
           pytest
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
           role-session-name: build-${{ github.sha }}
           aws-region: ${{ env.AWS_REGION }}
       
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2
 
       - name: Build container image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         with:
@@ -83,16 +83,16 @@ jobs:
     outputs:
       release_tag: ${{ steps.tag_bump.outputs.new_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: ukhsa-collaboration/devops-github-actions/.github/actions/github-bump-tag@v0.8.0
+      - uses: ukhsa-collaboration/devops-github-actions/.github/actions/github-bump-tag@52f31c5544ee5204dd0e169728c595b6a402205f # v0.8.0
         id: tag_bump
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WITH_V: true
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           # AWS_ACCOUNT_ID_ECR_REGISTRY is used for pulling from a shared ECR repository
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
@@ -101,7 +101,7 @@ jobs:
 
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2
 
       - name: Pull, retag, and push Application image for release
         id: push
@@ -125,7 +125,7 @@ jobs:
     needs:
       - build
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0 
       
@@ -164,7 +164,7 @@ jobs:
           echo "New hotfix tag: $HOTFIX_TAG"
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           # AWS_ACCOUNT_ID_ECR_REGISTRY is used for pulling from a shared ECR repository
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
@@ -173,7 +173,7 @@ jobs:
 
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2
       
       - name: Setup Git
         run: |
@@ -219,7 +219,7 @@ jobs:
       - release
     steps:
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
           role-session-name: deploy-${{ github.sha }}
@@ -237,7 +237,7 @@ jobs:
 
       - name: Modify Amazon ECS task definition with updated image URI
         id: render-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        uses: aws-actions/amazon-ecs-render-task-definition@06472d439cb66af6210a6709bfc842c26b053706 # v1
         with:
           task-definition: task-definition.json
           container-name: app
@@ -245,7 +245,7 @@ jobs:
           image: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ needs.release.outputs.release_tag }}
 
       - name: Deploy to Amazon ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        uses: aws-actions/amazon-ecs-deploy-task-definition@c6e19c08506099e50400581201a3a767fd8e3ff4 # v2
         with:
           task-definition: ${{ steps.render-task-def.outputs.task-definition }}
           service: aw-hpub-euw2-${{ matrix.environment }}-ecssvc-${{ env.APP_NAME }}

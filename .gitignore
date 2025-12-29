@@ -17,3 +17,4 @@ local_secrets.json
 ZscalerRootCA.crt
 dump.rdb
 .DS_Store
+**database_access.sh

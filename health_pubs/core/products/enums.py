@@ -20,6 +20,8 @@ class required_event_fields_draft(Enum):
     status = "status"
     unit_of_measure = "unit_of_measure"
     run_to_zero = "run_to_zero"
+    stock_owner_email_address = "stock_owner_email_address"
+    order_referral_email_address = "order_referral_email_address"
 
 
 class required_event_fields_live(Enum):

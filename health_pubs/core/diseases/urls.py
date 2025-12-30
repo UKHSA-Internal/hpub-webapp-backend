@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     DiseaseBulkUploadViewSet,
     DiseaseCreateViewSet,
+    DiseaseEditViewSet,
     DiseaseDeleteViewSet,
     DiseaseListViewSet,
     DiseaseNameCheckViewSet,
@@ -10,6 +11,7 @@ from .views import (
 
 router = DefaultRouter()
 router.register(r"diseases/create", DiseaseCreateViewSet, basename="disease-create")
+router.register(r"diseases/edit", DiseaseEditViewSet, basename="disease-edit")
 router.register(r"diseases", DiseaseListViewSet, basename="disease-list")
 router.register(r"diseases/delete", DiseaseDeleteViewSet, basename="disease-delete")
 router.register(r"diseases/name", DiseaseNameCheckViewSet, basename="disease-check")

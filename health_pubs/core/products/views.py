@@ -1,3 +1,4 @@
+from collections import defaultdict
 import datetime
 import hashlib
 import json
@@ -48,6 +49,7 @@ from core.users.models import User
 from core.users.permissions import (
     IsAdminUser,
 )
+from core.establishments.models import Establishment
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from core.utils.extract_file_metadata import get_file_metadata
 from core.utils.generate_s3_presigned_url import (
@@ -107,6 +109,7 @@ from .serializers import (
     ProductSerializer,
     ProductUpdateSerializer,
     RelatedProductSerializer,
+    AdminProductSerializer,
 )
 from wagtail.models import Page
 from treebeard.mp_tree import MP_Node
@@ -574,6 +577,7 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
     """
     Build queryset for admin list/filter views.
     - If apply_filters=True → apply faceted filters + product_code/product_title filters
+      + last_modified_by + publish_date filters
     - Else → just return all products (deduped and sorted)
     """
     mapping = {
@@ -591,8 +595,9 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
     }
 
     q = Q()
+
     if apply_filters:
-        # --- Faceted filters ---
+        # --- Faceted filters (audiences, diseases, etc.) ---
         for param, lookup in mapping.items():
             vals = request.GET.getlist(param, [])
             if vals:
@@ -615,13 +620,78 @@ def build_admin_queryset(request, *, apply_filters: bool = False):
             title_q = Q()
             for t in titles:
                 clean_t = t.strip()
-                title_q |= Q(product_title__icontains=clean_t) | Q(
-                    product_title__icontains=clean_t
+                if not clean_t:
+                    continue
+                title_q |= Q(product_title__icontains=clean_t)
+            if title_q:
+                q &= title_q
+
+        # -------------------------------
+        # NEW: last_modified_by filter
+        # -------------------------------
+        # Accepts multiple values:
+        #  - "me" → current authenticated user
+        #  - a user_id (uuid) → matches User.user_id
+        #  - an email → matches User.email (case-insensitive)
+        last_modified_vals = request.GET.getlist("last_modified_by", [])
+        if last_modified_vals:
+            lm_q = Q()
+            user = getattr(request, "user", None)
+
+            for raw_val in last_modified_vals:
+                token = (raw_val or "").strip()
+                if not token:
+                    continue
+
+                # Special shortcut: ?last_modified_by=me
+                if token.lower() == "me" and user and user.is_authenticated:
+                    lm_q |= Q(user_ref=user)
+                    continue
+
+                # Try matching against user_id (uuid-like) and email
+                lm_q |= Q(user_ref__user_id__iexact=token) | Q(
+                    user_ref__email__iexact=token
                 )
-            q &= title_q
+
+            if lm_q:
+                q &= lm_q
+
+        # -------------------------------
+        # NEW: publish_date filters
+        # -------------------------------
+        # Supports:
+        #  - ?publish_date=YYYY-MM-DD
+        #  - ?publish_date_from=YYYY-MM-DD
+        #  - ?publish_date_to=YYYY-MM-DD
+        def _parse_date(val: str | None):
+            val = (val or "").strip()
+            if not val:
+                return None
+            for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+                try:
+                    return datetime.datetime.strptime(val, fmt).date()
+                except ValueError:
+                    continue
+            logger.warning("Invalid publish_date value %r – ignoring", val)
+            return None
+
+        exact_date = _parse_date(request.GET.get("publish_date"))
+        date_from = _parse_date(request.GET.get("publish_date_from"))
+        date_to = _parse_date(request.GET.get("publish_date_to"))
+
+        if exact_date:
+            q &= Q(publish_date=exact_date)
+        else:
+            if date_from:
+                q &= Q(publish_date__gte=date_from)
+            if date_to:
+                q &= Q(publish_date__lte=date_to)
 
     qs = Product.objects.filter(q).select_related(
-        "program_id", "language_id", "update_ref"
+        "program_id",
+        "language_id",
+        "update_ref",
+        "user_ref",  # so admin list has editor info without extra queries
     )
 
     return qs
@@ -1572,6 +1642,9 @@ class ProductUtilsMixin:
         return created
 
 
+# ------------------------------------------------------------------ #
+# Main ViewSet  : Product Bulk Upload, Related Publications           #
+# ------------------------------------------------------------------ #
 class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
     authentication_classes: List = []
     permission_classes: List = []
@@ -2056,12 +2129,32 @@ class PresignedUrlMixin:
 # Product detail view
 # --------------------------------------------------------------------------- #
 class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
+    """
+    Retrieves a single Product by its product_code.
+    Includes presigned S3 URLs, order limit prefetch, and caching.
+    """
+
     authentication_classes = [CustomTokenAuthentication, SessionAuthentication]
     permission_classes = [AllowAny]
 
     def retrieve(self, request, product_code=None, *args, **kwargs):
-        code = unquote(product_code or "")
-        product = Product.objects.filter(product_code=code).first()
+        # Decode and sanitize product code
+        code = unquote(product_code or "").strip()
+        if not code:
+            return handle_error(
+                ErrorCode.PRODUCT_NOT_FOUND,
+                ErrorMessage.PRODUCT_NOT_FOUND,
+                status.HTTP_404_NOT_FOUND,
+            )
+
+        #  Prefetch related order_limits for per-user org limit lookups
+        product = (
+            Product.objects.filter(product_code=code)
+            .select_related("update_ref")
+            .prefetch_related("order_limits")
+            .first()
+        )
+
         if not product:
             return handle_error(
                 ErrorCode.PRODUCT_NOT_FOUND,
@@ -2069,53 +2162,70 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
                 status.HTTP_404_NOT_FOUND,
             )
 
+        # Build version timestamp for cache key
         ver_ts = self._get_version_timestamp(product)
-        cache_key, bypass = self._get_cache_key_and_bypass(request, code, ver_ts)
+        cache_key, bypass_cache = self._get_cache_key_and_bypass(request, code, ver_ts)
 
-        if not bypass:
-            cached = cache.get(cache_key)
-            if cached:
-                return self._cached_response(cached, code, ver_ts)
+        # Try returning cached response (skip for staff or ?fresh=1)
+        if not bypass_cache:
+            cached_data = cache.get(cache_key)
+            if cached_data:
+                return self._cached_response(cached_data, code, ver_ts)
 
-        data = ProductSerializer(product, context={"request": request}).data
+        #  Serialize product with full context (for user-aware fields)
+        serializer = ProductSerializer(product, context={"request": request})
+        data = serializer.data
+
+        #  Apply presigned URLs and metadata
         self._process_presigned_urls(data)
 
+        #  Cache the result for faster repeated lookups
         ttl = getattr(settings, "CACHE_TTL_DETAIL", 60)
-        if ttl and ttl > 0 and not bypass:
+        if ttl > 0 and not bypass_cache:
             cache.set(cache_key, data, ttl)
 
+        #  Return the fresh JSON response
         return self._fresh_response(data, code, ver_ts)
 
+    # ------------------------------
+    # Internal helpers
+    # ------------------------------
+
     def _get_version_timestamp(self, product: Product) -> int:
-        ver_sources = []
+        """Build a version-based timestamp using product + update_ref."""
+        timestamps = []
         if getattr(product, "updated_at", None):
-            ver_sources.append(product.updated_at)
+            timestamps.append(product.updated_at)
         if getattr(product, "update_ref", None) and getattr(
             product.update_ref, "updated_at", None
         ):
-            ver_sources.append(product.update_ref.updated_at)
-        return int(max(ver_sources).timestamp()) if ver_sources else 0
+            timestamps.append(product.update_ref.updated_at)
+        return int(max(timestamps).timestamp()) if timestamps else 0
 
     def _get_cache_key_and_bypass(
         self, request, code: str, ver_ts: int
     ) -> tuple[str, bool]:
+        """Compose cache key and determine whether to skip cache."""
         cache_key = f"product_detail:v{ver_ts}:{code}"
-        bypass = (request.GET.get("fresh") == "1") or getattr(
+        bypass_cache = (request.GET.get("fresh") == "1") or getattr(
             request.user, "is_staff", False
         )
-        return cache_key, bypass
+        return cache_key, bypass_cache
 
     def _cached_response(self, cached: dict, code: str, ver_ts: int) -> JsonResponse:
+        """Return cached JSON response with headers."""
         resp = JsonResponse(cached, status=status.HTTP_200_OK)
         self._set_headers(resp, code, ver_ts)
         return resp
 
     def _fresh_response(self, data: dict, code: str, ver_ts: int) -> JsonResponse:
+        """Return new JSON response with proper headers."""
         resp = JsonResponse(data, status=status.HTTP_200_OK)
         self._set_headers(resp, code, ver_ts)
         return resp
 
     def _set_headers(self, resp: JsonResponse, code: str, ver_ts: int) -> None:
+        """Attach cache + version headers for client-side consistency."""
         resp["Cache-Control"] = "no-store"
         resp["ETag"] = f'W/"{code}-{ver_ts}"'
         if ver_ts:
@@ -2155,6 +2265,9 @@ class ProductDetailDelete(ErrorHandlingMixin, View):
             )
 
         # Change product status to 'withdrawn' instead of deleting it.
+        editor = getattr(request, "user", None)
+        if isinstance(editor, User):
+            product.user_ref = editor
         product.status = "withdrawn"
         product.save()
         return JsonResponse(
@@ -2240,6 +2353,10 @@ class ProductStatusUpdateView(APIView):
                 logger.info(
                     f"Moving product {product.product_code} live→draft; suppress_event set to True"
                 )
+
+            editor = getattr(request, "user", None)
+            if isinstance(editor, User):
+                product.user_ref = editor
             product.status = new_status
 
             # If transitioning to "live" and publish_date is not already set, update it to today's date.
@@ -2480,6 +2597,10 @@ class ProductUpdateView(APIView):
 
             # Parse and validate the request data
             data = json.loads(request.body)
+            editor = getattr(request, "user", None)
+            if isinstance(editor, User):
+                product.user_ref = editor
+
             serializer = ProductSerializer(
                 product, data=data, partial=True, context={"request": request}
             )
@@ -2601,6 +2722,10 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                 decoded_product_code,
                 product_update.id,
             )
+            #  Set last-updated-by before saving
+            editor = getattr(request, "user", None)
+            if isinstance(editor, User):
+                product.user_ref = editor
 
             # Update foreign keys
             self.update_foreign_keys(product_update, data)
@@ -2987,8 +3112,18 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         raise RuntimeError("Could not create or find ProductUpdate after retries")
 
     def update_order_limits(self, product: Product, order_limits: list):
-        parent_page = Page.objects.get(slug="products")
+        """
+        Upserts OrderLimitPage records for each organisation with latest order_limit
+        and full_external_keys derived from Establishment records.
+        Ensures there is only ONE record per organisation.
+        """
+        try:
+            parent_page = Page.objects.get(slug="products")
+        except Page.DoesNotExist:
+            logger.error("Parent page with slug 'products' not found.")
+            return
 
+        # Existing pages grouped by org name
         existing_pages = (
             OrderLimitPage.objects.child_of(parent_page)
             .filter(product_ref=product)
@@ -2996,46 +3131,70 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         )
         by_org = {p.organization_ref.name: p for p in existing_pages}
 
+        # Prefetch org + establishment data
         org_names = [
             lim["organization_name"]
             for lim in order_limits
             if lim.get("organization_name")
         ]
+
+        if not org_names:
+            # If no limits supplied, delete all existing for this product
+            for page in existing_pages:
+                page.delete()
+            return
+
         org_qs = Organization.objects.filter(name__in=org_names)
         org_cache = {org.name: org for org in org_qs}
 
+        est_qs = Establishment.objects.filter(organization_ref__in=org_qs).values(
+            "organization_ref_id", "full_external_key"
+        )
+        full_keys_map = defaultdict(list)
+        for est in est_qs:
+            full_keys_map[est["organization_ref_id"]].append(est["full_external_key"])
+
+        # --- Upsert loop ---
         seen_orgs = set()
         for lim in order_limits:
             org_name = lim.get("organization_name")
             if not org_name:
                 continue
-            seen_orgs.add(org_name)
 
             org = org_cache.get(org_name)
             if not org:
+                logger.warning("Organization '%s' not found. Skipping.", org_name)
                 continue
 
+            seen_orgs.add(org_name)
             limit_val = lim.get("order_limit_value", 0)
+            full_keys = full_keys_map.get(org.organization_id, [])
 
-            if org_name in by_org:
-                # ⚡ In-place update — no delete/recreate
-                page = by_org[org_name]
-                if page.order_limit != limit_val:
+            page = by_org.get(org_name)
+            if page:
+                # Only publish if something actually changed
+                if (
+                    page.order_limit != limit_val
+                    or page.full_external_keys != full_keys
+                ):
                     page.order_limit = limit_val
-                    page.save(update_fields=["order_limit"])
-            else:
-                # Only create when missing
-                new_page = OrderLimitPage(
-                    title=f"Order Limit for {org_name}",
-                    slug=slugify(f"{org_name}-order-limit-{uuid.uuid4()}"),
-                    order_limit=limit_val,
-                    product_ref=product,
-                    organization_ref=org,
-                )
-                parent_page.add_child(instance=new_page)
-                new_page.save()
+                    page.full_external_keys = full_keys
+                    page.save_revision().publish()
+                continue
 
-        # Delete pages no longer present
+            # Otherwise create a new one
+            new_page = OrderLimitPage(
+                title=f"Order Limit for {org_name}",
+                slug=slugify(f"{org_name}-order-limit-{uuid.uuid4()}"),
+                order_limit=limit_val,
+                product_ref=product,
+                organization_ref=org,
+                full_external_keys=full_keys,
+            )
+            parent_page.add_child(instance=new_page)
+            new_page.save_revision().publish()
+
+        # --- Delete any obsolete ones (not in current payload) ---
         for org_name, page in by_org.items():
             if org_name not in seen_orgs:
                 page.delete()
@@ -3157,7 +3316,12 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         )
 
         parent_page = self.get_or_create_parent_page()
-        user_instance = self.get_user_instance(data.get("user_id"))
+        auth_user = getattr(request, "user", None)
+        if isinstance(auth_user, User):
+            user_instance = auth_user
+        else:
+            user_instance = self.get_user_instance(data.get("user_id"))
+
         product_instance = self.create_product_instance(
             data, program, parent_page, user_instance, request
         )
@@ -3351,6 +3515,8 @@ if "ALLOWED_SORT_FIELDS" not in globals():
         "-product_title",
         "created_at",
         "-created_at",
+        "publish_date",
+        "-publish_date",
         "updated_at",
         "-updated_at",
         "program_id",
@@ -3434,7 +3600,6 @@ class ProductListMixin:
         Lightweight preparation for user-facing lists.
         Does NOT change admin queryset behavior.
         """
-
         qs = self._annotate_norm_code(qs)
         qs = qs.filter(product_code=F("code_trim"))
 
@@ -3463,6 +3628,7 @@ class ProductListMixin:
             "last_published_at",
             "first_published_at",
             "created_at",
+            "publish_date",
         ):
             if self._model_has_field(qs.model, name):
                 return name
@@ -3477,10 +3643,19 @@ class ProductListMixin:
         sign = "-" if field.startswith("-") else ""
         raw = field.lstrip("-")
 
+        # 1) Explicit publish_date should *stay* publish_date
+        if raw == "publish_date":
+            if self._model_has_field(qs.model, "publish_date"):
+                return f"{sign}publish_date"
+            # If model doesn't have publish_date, fall back safely
+            return f"{sign}id"
+
+        # 2) For updated_at / created_at, pick the "best" available date field
         if raw in {"updated_at", "created_at"}:
             best = self._best_updated_field(qs)
             return f"{sign}{best}" if best else f"{sign}id"
 
+        # 3) All other fields: honour exactly if they exist, else fall back to id
         return f"{sign}{raw}" if self._model_has_field(qs.model, raw) else f"{sign}id"
 
     def get_sorted_queryset(self, qs, request):
@@ -3600,6 +3775,29 @@ class ProductListMixin:
     # QUERYSET VERSIONING
     # ---------------------------------------------------------------------- #
 
+    @staticmethod
+    def _to_aware_datetime(value: Any) -> Optional[datetime.datetime]:
+        """
+        Normalise a value that may be a date or datetime into an aware datetime.
+        Returns None if it can't be interpreted.
+        """
+        if value is None:
+            return None
+
+        # DateField (e.g. publish_date) → midnight that day
+        if isinstance(value, datetime.date) and not isinstance(
+            value, datetime.datetime
+        ):
+            dt = datetime.datetime.combine(value, datetime.time.min)
+        elif isinstance(value, datetime.datetime):
+            dt = value
+        else:
+            return None
+
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone.get_default_timezone())
+        return dt
+
     def _queryset_version(self, qs):
         def safe_max(qs, field):
             try:
@@ -3607,18 +3805,29 @@ class ProductListMixin:
             except Exception:
                 return None
 
-        candidates = []
+        # Collect raw maxima (may be date or datetime or None)
+        raw_candidates = []
         for f in (
             "updated_at",
             "latest_revision_created_at",
             "last_published_at",
             "first_published_at",
             "created_at",
+            "publish_date",
         ):
-            candidates.append(safe_max(qs, f))
+            raw_candidates.append(safe_max(qs, f))
 
-        d = max([x for x in candidates if x], default=None)
-        return int(d.timestamp()) if d else 0
+        # Coerce to aware datetimes and drop anything we can't parse
+        dt_candidates = [
+            self._to_aware_datetime(x) for x in raw_candidates if x is not None
+        ]
+        dt_candidates = [x for x in dt_candidates if x is not None]
+
+        if not dt_candidates:
+            return 0
+
+        d = max(dt_candidates)
+        return int(d.timestamp())
 
 
 class BaseAdminProductsView(ProductListMixin, APIView):
@@ -3635,9 +3844,7 @@ class BaseAdminProductsView(ProductListMixin, APIView):
 
         qs = build_admin_queryset(
             request, apply_filters=self.APPLY_FILTERS
-        ).select_related(
-            "program_id", "language_id", "update_ref"
-        )  # <-- ONLY THIS
+        ).select_related("program_id", "language_id", "update_ref", "user_ref")
 
         # Sort BEFORE slicing
         qs = self.get_sorted_queryset(qs, request)
@@ -3655,12 +3862,32 @@ class BaseAdminProductsView(ProductListMixin, APIView):
 
         # Pagination & serialization
         data, paginator = self.paginate_and_serialize(
-            qs, request, serializer_class=ProductSerializer, is_search=False
+            qs, request, serializer_class=AdminProductSerializer, is_search=False
         )
         response = paginator.get_paginated_response(data)
 
         cache.set(admin_cache_key, response.data, 30)
         return response
+
+    # ------------------------------------------------------------------ #
+    # Default ordering by updated_at desc                                #
+    # ------------------------------------------------------------------ #
+    def get_sorted_queryset(self, qs, request):
+        """
+        Apply sorting based on request params (if provided),
+        otherwise default to most recently updated first.
+        """
+        sort_field = request.query_params.get("sort_by")
+        sort_order = request.query_params.get("order", "desc")
+
+        if sort_field:
+            # normalize
+            sort_field = sort_field.lstrip("-")  # <--- fix
+            prefix = "" if sort_order == "asc" else "-"
+            return qs.order_by(f"{prefix}{sort_field}")
+
+        # Default ordering
+        return qs.order_by("-updated_at")
 
 
 # --------------------------------------------------------------------------- #

@@ -5,6 +5,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     VaccinationBulkUploadViewSet,
     VaccinationCreateViewSet,
+    VaccinationEditViewSet,
     VaccinationDeleteViewSet,
     VaccinationListViewSet,
     VaccinationNameCheckViewSet,
@@ -13,6 +14,9 @@ from .views import (
 router = DefaultRouter()
 router.register(
     r"vaccinations/create", VaccinationCreateViewSet, basename="vaccination-create"
+)
+router.register(
+    r"vaccinations/edit", VaccinationEditViewSet, basename="vaccination-edit"
 )
 router.register(r"vaccinations", VaccinationListViewSet, basename="vaccination-list")
 router.register(

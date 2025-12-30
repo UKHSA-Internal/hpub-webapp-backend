@@ -13,14 +13,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
 
       - name: Set environment variables
         run: |
           echo "REPORTER=${{ github.event_name == 'pull_request' && 'github-pr-review' || 'github-check' }}" >> $GITHUB_ENV
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6
         with:
           python-version: '3.11'
 
@@ -28,7 +28,7 @@ jobs:
         run: pip install black==23.1.0
 
       - name: Run Black with ReviewDog
-        uses: reviewdog/action-black@v3
+        uses: reviewdog/action-black@644053a260402bc4278a865906107bd8aef7fae8 # v3
         with:
           black_args: "--check"
           reporter: ${{ env.REPORTER }}

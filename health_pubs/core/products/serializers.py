@@ -9,6 +9,7 @@ from core.programs.models import Program
 from core.vaccinations.serializers import VaccinationSerializer
 from core.where_to_use.serializers import WhereToUseSerializer
 from rest_framework import serializers
+from core.users.models import User
 
 from .models import Product, ProductUpdate
 from .choices import (
@@ -314,6 +315,7 @@ class ProductSerializer(serializers.ModelSerializer):
 
     update_ref = ProductUpdateSerializer(read_only=True)
     product_code_no_dashes = serializers.CharField(read_only=True)
+    user_order_limit = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -339,6 +341,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "suppress_event",
             "update_ref",
             "order_limits",
+            "user_order_limit",
             "created_at",
             "updated_at",
         )
@@ -350,6 +353,38 @@ class ProductSerializer(serializers.ModelSerializer):
     def get_existing_languages(self, obj):
         return obj.existing_languages
 
+    def get_user_order_limit(self, obj):
+        """
+        Return the order_limit for this product for the current user's organisation.
+        If the user is not authenticated, has no organisation, or no matching
+        OrderLimitPage exists, return None.
+        """
+        request = self.context.get("request")
+        if not request:
+            return None
+
+        user = getattr(request, "user", None)
+        # Your custom User has its own is_authenticated, but this guards the DRF/AnonUser too
+        if not user or not getattr(user, "is_authenticated", False):
+            return 5  # Default order limit for unauthenticated users
+
+        org = getattr(user, "organization_ref", None)
+        if not org:
+            return 5  # Default order limit for users without an organization
+
+        # Use the reverse relation: Product -> OrderLimitPage (order_limits)
+        # If order_limits is prefetched, this stays in memory; otherwise it's a small query.
+        try:
+            limit_obj = obj.order_limits.filter(organization_ref=org).first()
+        except Exception:
+            # Defensive: if for some reason order_limits is not a manager
+            return None
+
+        if not limit_obj:
+            return None
+
+        return limit_obj.order_limit
+
     def create(self, validated_data):
         # Check if the 'product_id' is provided in the request
         product_id = validated_data.get("product_id", None)
@@ -358,6 +393,53 @@ class ProductSerializer(serializers.ModelSerializer):
                 "product_id"
             ] = uuid.uuid4()  # Generate a UUID if no id is provided
         return super().create(validated_data)
+
+
+class AdminProductSerializer(ProductSerializer):
+    last_updated_by = serializers.SerializerMethodField()
+    last_updated_by_initials = serializers.SerializerMethodField()
+
+    class Meta(ProductSerializer.Meta):
+        fields = ProductSerializer.Meta.fields + (
+            "last_updated_by",
+            "last_updated_by_initials",
+        )
+
+    def _display_name(self, user: User | None) -> str | None:
+        if not user:
+            return None
+
+        # Try a explicit full_name field
+        name = getattr(user, "full_name", None)
+
+        # Fallback to first + last name
+        if not name:
+            first = getattr(user, "first_name", "") or ""
+            last = getattr(user, "last_name", "") or ""
+            name = f"{first} {last}".strip()
+
+        # Fallback to email
+        if not name:
+            name = getattr(user, "email", None)
+
+        return name or None
+
+    def _initials_from_name(self, name: str | None) -> str | None:
+        if not name:
+            return None
+        parts = [p for p in name.split() if p]
+        if not parts:
+            return None
+        # Take first letter of first 2 parts
+        return "".join(p[0].upper() for p in parts[:2])
+
+    def get_last_updated_by(self, obj):
+        user = getattr(obj, "user_ref", None)
+        return self._display_name(user)
+
+    def get_last_updated_by_initials(self, obj):
+        name = self.get_last_updated_by(obj)
+        return self._initials_from_name(name)
 
 
 class ProductUpdateSearchSerializer(serializers.ModelSerializer):

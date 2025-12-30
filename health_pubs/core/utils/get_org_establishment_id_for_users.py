@@ -123,12 +123,12 @@ def main():
     # — enrich original_data —
     uo_enriched = append_ids_to_user_original(uo_df, org_df, est_df)
     uo_enriched.to_excel(OUT_UO, index=False)
-    print(f"✅  Wrote {OUT_UO}")
+    print(f"  Wrote {OUT_UO}")
 
     # — update users.xlsx —
     users_updated = update_users_table(users_df, uo_enriched)
     users_updated.to_excel(OUT_USERS, index=False)
-    print(f"✅  Wrote {OUT_USERS}")
+    print(f"  Wrote {OUT_USERS}")
 
 
 if __name__ == "__main__":

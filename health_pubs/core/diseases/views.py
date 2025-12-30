@@ -154,6 +154,59 @@ class DiseaseCreateViewSet(viewsets.ModelViewSet):
             )
 
 
+class DiseaseEditViewSet(viewsets.ModelViewSet):
+    """
+    Allows admin users to update or partially update existing Disease records.
+    """
+
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    queryset = Disease.objects.all()
+    serializer_class = DiseaseSerializer
+
+    def update(self, request, *args, **kwargs):
+        """PUT - Full update"""
+        try:
+            disease = self.get_object()
+            serializer = self.get_serializer(disease, data=request.data)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            logger.info(f"Disease '{disease.name}' updated successfully.")
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Disease.DoesNotExist:
+            return Response(
+                {"error": "Disease not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except Exception as e:
+            logger.error(f"Error updating disease: {str(e)}")
+            return Response(
+                {"error": "Failed to update disease."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    def partial_update(self, request, *args, **kwargs):
+        """PATCH - Partial update"""
+        try:
+            disease = self.get_object()
+            serializer = self.get_serializer(disease, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            logger.info(f"Disease '{disease.name}' partially updated.")
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Disease.DoesNotExist:
+            return Response(
+                {"error": "Disease not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except Exception as e:
+            logger.error(f"Error partially updating disease: {str(e)}")
+            return Response(
+                {"error": "Failed to partially update disease."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
 class DiseaseDeleteViewSet(viewsets.ViewSet):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]
@@ -207,8 +260,8 @@ class DiseaseDeleteViewSet(viewsets.ViewSet):
 
 
 class DiseaseListViewSet(viewsets.ReadOnlyModelViewSet):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
     serializer_class = DiseaseSerializer
 
     def get_queryset(self):
@@ -219,6 +272,15 @@ class DiseaseListViewSet(viewsets.ReadOnlyModelViewSet):
         queryset = self.get_queryset()
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def retrieve(self, request, pk=None, *args, **kwargs):
+        try:
+            disease = self.get_queryset().get(disease_id=pk)
+        except Disease.DoesNotExist:
+            return Response({"error": "Disease not found."}, status=404)
+
+        ser = self.get_serializer(disease)
+        return Response(ser.data, status=200)
 
 
 class DiseaseNameCheckViewSet(viewsets.ViewSet):

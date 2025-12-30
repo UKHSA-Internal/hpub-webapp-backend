@@ -95,6 +95,8 @@ def generate_presigned_urls(
     """
     Batch presign with cache. No duplicate work.
     """
+    cache_timeout = _get_cache_timeout_in_ms(expiration)
+
     key_map = {
         u: _cache_key_for(u, expiration, inline=not force_download) for u in urls if u
     }
@@ -112,7 +114,7 @@ def generate_presigned_urls(
     if out:
         cache.set_many(
             {key_map[u]: s for u, s in out.items()},
-            timeout=_get_cache_timeout_in_ms(expiration),
+            timeout=cache_timeout,
         )
     return out
 
@@ -153,6 +155,8 @@ def generate_inline_presigned_urls(
     Inline presigns without pre-checking existence (avoids extra S3 API calls).
     """
     out: Dict[str, str] = {}
+    cache_timeout = _get_cache_timeout_in_ms(expiration)
+
     for u in urls:
         if not u:
             continue
@@ -171,8 +175,11 @@ def generate_inline_presigned_urls(
                 Params={"Bucket": b, "Key": k, "ResponseContentDisposition": "inline"},
                 ExpiresIn=expiration,
             )
-            out[u] = signed
-            cache.set(ck, signed, timeout=expiration)
+            if signed:
+                out[u] = signed
+
+                cache.set(ck, signed, timeout=cache_timeout)
+
         except ClientError as e:
             logger.warning("Inline presign error for %s: %s", u, e)
     return out

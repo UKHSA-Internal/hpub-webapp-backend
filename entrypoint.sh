@@ -31,30 +31,34 @@ echo "=============================="
 # Step 1: Check for migration files under "core" (or sub‐apps) and generate if empty
 # -----------------------------------------------------------------------------
 echo "=============================="
-echo "Checking for existing migration files under 'core/'…"
-# Count any files that look like migrations (e.g. 0001_initial.py, etc.)
-migration_count=$(find core -type f -path "*/migrations/[0-9]*_*.py" | wc -l)
-
-if [ "$migration_count" -eq 0 ]; then
-  echo "No migration files found (besides __init__.py)."
-  echo "Running 'makemigrations' to generate them…"
-  makemig_output=$(python manage.py makemigrations --verbosity=2 2>&1) || {
-    echo "MAKEMIGRATIONS FAILED:"
-    echo "$makemig_output"
-    exit 1
-  }
-  echo "$makemig_output"
-
-  # Re‐count after generating
-  migration_count=$(find core -type f -path "*/migrations/[0-9]*_*.py" | wc -l)
-  if [ "$migration_count" -eq 0 ]; then
-    echo "ERROR: Still no migration files after running makemigrations."
-    exit 1
-  fi
-
-  echo "Generated $migration_count migration file(s)."
+if [ "${SKIP_MAKEMIGRATIONS:-0}" = "1" ]; then
+  echo "SKIP_MAKEMIGRATIONS=1 set — skipping makemigrations."
 else
-  echo "Found $migration_count existing migration file(s)."
+  echo "Checking for existing migration files under 'core/'…"
+  # Count any files that look like migrations (e.g. 0001_initial.py, etc.)
+  migration_count=$(find core -type f -path "*/migrations/[0-9]*_*.py" | wc -l)
+
+  if [ "$migration_count" -eq 0 ]; then
+    echo "No migration files found (besides __init__.py)."
+    echo "Running 'makemigrations' to generate them…"
+    makemig_output=$(python manage.py makemigrations --verbosity=2 2>&1) || {
+      echo "MAKEMIGRATIONS FAILED:"
+      echo "$makemig_output"
+      exit 1
+    }
+    echo "$makemig_output"
+
+    # Re‐count after generating
+    migration_count=$(find core -type f -path "*/migrations/[0-9]*_*.py" | wc -l)
+    if [ "$migration_count" -eq 0 ]; then
+      echo "ERROR: Still no migration files after running makemigrations."
+      exit 1
+    fi
+
+    echo "Generated $migration_count migration file(s)."
+  else
+    echo "Found $migration_count existing migration file(s)."
+  fi
 fi
 echo "=============================="
 

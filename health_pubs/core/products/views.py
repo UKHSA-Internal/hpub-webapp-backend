@@ -3672,6 +3672,12 @@ class ProductListMixin:
         cache.set(cache_key, annotated, 300)
         return annotated
 
+    def _exclude_edge_spaces(self, qs):
+        """
+        Keep only rows whose product_code equals its trimmed version (no leading/trailing spaces).
+        """
+        return qs.filter(product_code=F("code_trim"))
+
     # ---------------------------------------------------------------------- #
     # SEARCH OPTIMIZATION (User-facing lists)
     # ---------------------------------------------------------------------- #

@@ -29,9 +29,7 @@ from django.db.models import (
     TextField,
 )
 from django.db.models.functions import (
-    Upper,
     Trim,
-    Replace,
     Concat,
 )
 
@@ -3645,21 +3643,9 @@ class ProductListMixin:
 
     @staticmethod
     def _norm_annotations():
-        norm_expr = Upper(
-            Replace(
-                Replace(
-                    Replace(Trim(F("product_code")), Value("-"), Value("")),
-                    Value("_"),
-                    Value(""),
-                ),
-                Value(" "),
-                Value(""),
-            )
-        )
-
         return {
             "code_trim": Trim(F("product_code")),
-            "norm_code": norm_expr,
+            "norm_code": F("product_code_no_dashes"),
         }
 
     def _annotate_norm_code(self, qs):
@@ -3771,13 +3757,15 @@ class ProductListMixin:
         updated_field = self._best_updated_field(q) or "id"
 
         best_row = (
-            q.filter(norm_code=OuterRef("norm_code"))
+            q.filter(product_code_no_dashes=OuterRef("product_code_no_dashes"))
             .order_by(F(updated_field).desc(nulls_last=True), F("id").desc())
             .values("id")[:1]
         )
 
         best_ids = (
-            q.values("norm_code").annotate(best_id=Subquery(best_row)).values("best_id")
+            q.values("product_code_no_dashes")
+            .annotate(best_id=Subquery(best_row))
+            .values("best_id")
         )
 
         result = Product.objects.filter(id__in=Subquery(best_ids))
@@ -4064,17 +4052,17 @@ class BaseProductSearchView(APIView, ProductListMixin):
                 output_field=IntegerField(),
             ),
             exact_norm=Case(
-                When(norm_code__exact=q_norm, then=Value(1)),
+                When(product_code_no_dashes__exact=q_norm, then=Value(1)),
                 default=Value(0),
                 output_field=IntegerField(),
             ),
             starts_norm=Case(
-                When(norm_code__startswith=q_norm, then=Value(1)),
+                When(product_code_no_dashes__startswith=q_norm, then=Value(1)),
                 default=Value(0),
                 output_field=IntegerField(),
             ),
             contains_norm=Case(
-                When(norm_code__contains=q_norm, then=Value(1)),
+                When(product_code_no_dashes__contains=q_norm, then=Value(1)),
                 default=Value(0),
                 output_field=IntegerField(),
             ),
@@ -4155,8 +4143,8 @@ class ProductSearchUserView(BaseProductSearchView):
             restricted = base.filter(
                 Q(product_code__icontains=q) | Q(product_title__icontains=q)
             )
-            restricted = self._annotate_norm_code(restricted).filter(
-                Q(norm_code__icontains=q_norm)
+            restricted = restricted.filter(
+                Q(product_code_no_dashes__contains=q_norm)
                 | Q(product_code__icontains=q)
                 | Q(product_title__icontains=q)
             )
@@ -4175,8 +4163,7 @@ class ProductSearchUserView(BaseProductSearchView):
             # Now dedupe is safe
             deduped = self._dedupe_by_norm_code_fast(restricted_qs)
 
-            ranked = self._annotate_norm_code(deduped)
-            ranked = self._annotate_rank_signals(ranked, q, q_norm, looks_like_code)
+            ranked = self._annotate_rank_signals(deduped, q, q_norm, looks_like_code)
 
             sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
             if sort_by:

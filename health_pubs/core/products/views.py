@@ -22,6 +22,7 @@ from django.db.models import (
     F,
     Value,
     IntegerField,
+    Window,
     OuterRef,
     Subquery,
     Case,
@@ -29,6 +30,8 @@ from django.db.models import (
     TextField,
 )
 from django.db.models.functions import (
+    Coalesce,
+    RowNumber,
     Trim,
     Concat,
 )
@@ -3649,14 +3652,7 @@ class ProductListMixin:
         }
 
     def _annotate_norm_code(self, qs):
-        cache_key = f"annotate_norm:{hash(qs.query)}"
-        cached = cache.get(cache_key)
-        if cached:
-            return cached
-
-        annotated = qs.annotate(**self._norm_annotations())
-        cache.set(cache_key, annotated, 300)
-        return annotated
+        return qs.annotate(**self._norm_annotations())
 
     def _exclude_edge_spaces(self, qs):
         """
@@ -3748,28 +3744,26 @@ class ProductListMixin:
     # ---------------------------------------------------------------------- #
 
     def _dedupe_by_norm_code_fast(self, qs):
-        cache_key = f"dedupe_fast:{hash(qs.query)}"
-        cached = cache.get(cache_key)
-        if cached:
-            return cached
-
         q = self._annotate_norm_code(qs).filter(product_code=F("code_trim"))
+        q = q.annotate(
+            _dedupe_key=Coalesce(
+                "product_code_no_dashes",
+                "product_code",
+                "product_id",
+            )
+        )
         updated_field = self._best_updated_field(q) or "id"
 
-        best_row = (
-            q.filter(product_code_no_dashes=OuterRef("product_code_no_dashes"))
-            .order_by(F(updated_field).desc(nulls_last=True), F("id").desc())
-            .values("id")[:1]
-        )
-
-        best_ids = (
-            q.values("product_code_no_dashes")
-            .annotate(best_id=Subquery(best_row))
-            .values("best_id")
-        )
-
-        result = Product.objects.filter(id__in=Subquery(best_ids))
-        cache.set(cache_key, result, 300)
+        result = q.annotate(
+            _rn=Window(
+                expression=RowNumber(),
+                partition_by=[F("_dedupe_key")],
+                order_by=[
+                    F(updated_field).desc(nulls_last=True),
+                    F("id").desc(),
+                ],
+            )
+        ).filter(_rn=1)
         return result
 
     # ---------------------------------------------------------------------- #
@@ -4310,9 +4304,6 @@ class ProductUsersSearchFilterAPIView(generics.ListAPIView, ProductListMixin):
 
     def get_queryset(self):
         base = Product.objects.filter(status="live", is_latest=True)
-        base = self._annotate_norm_code(base)
-        base = self._exclude_edge_spaces(base)
-        base = self._dedupe_by_norm_code(base)
         return self.optimize_for_search(base)
 
     def _dedupe_by_norm_code(self, qs):
@@ -4321,6 +4312,7 @@ class ProductUsersSearchFilterAPIView(generics.ListAPIView, ProductListMixin):
     def list(self, request, *args, **kwargs):
         try:
             qs = self.filter_queryset(self.get_queryset())
+            qs = self._dedupe_by_norm_code_fast(qs)
             qs = self.get_sorted_queryset(qs, request)
 
             data, paginator = self.paginate_and_serialize(

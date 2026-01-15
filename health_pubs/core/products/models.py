@@ -276,9 +276,9 @@ class Product(Page):
             self.updated_at = now
 
         if self.product_code:
-            self.product_code_no_dashes = (
-                str(self.product_code).replace("-", "").replace(" ", "")
-            )
+            # Normalize for fast code search/dedupe (strip -, _, spaces; uppercase)
+            normalized = re.sub(r"[-_\\s]+", "", str(self.product_code)).upper()
+            self.product_code_no_dashes = normalized
 
         super().save(*args, **kwargs)
 

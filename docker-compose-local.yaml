@@ -29,10 +29,12 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: health_pubs.settings
       AWS_DEFAULT_REGION: eu-west-2
+      SKIP_MAKEMIGRATIONS: "1"
     ports:
       - "8080:8000"
     volumes:
       - ./health_pubs:/app
+      - ./entrypoint.sh:/app/entrypoint.sh
 
 volumes:
   pg_data:

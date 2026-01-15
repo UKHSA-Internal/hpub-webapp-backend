@@ -58,8 +58,7 @@ class ProductFilter(filters.FilterSet):
     def filter_search(self, qs, name, value):
         norm = re.sub(r"[-_\\s]+", "", (value or "")).upper()
         return qs.filter(
-            Q(product_title__icontains=value)
-            | Q(product_code_no_dashes__contains=norm)
+            Q(product_title__icontains=value) | Q(product_code_no_dashes__contains=norm)
         )
 
     def filter_download_mode(self, qs, name, value):

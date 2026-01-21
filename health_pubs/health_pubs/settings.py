@@ -156,6 +156,7 @@ INSTALLED_APPS = [
     "core.customer_support",
     "core.where_to_use",
     "core.languages",
+    "django_filters",
     "rest_framework",
     "taggit",
     "core",

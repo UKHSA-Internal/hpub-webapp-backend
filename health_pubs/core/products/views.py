@@ -4187,6 +4187,12 @@ class ProductSearchUserView(BaseProductSearchView):
         )[:limit]
         return list(suggestions)
 
+    def get_default_query(self) -> Q:
+        """
+        return only live, latest products for public search
+        """
+        return Q(is_latest=True, status="live")
+
     def get(self, request, *args, **kwargs) -> Response:
         try:
             q = (request.GET.get("q") or "").strip()
@@ -4234,6 +4240,21 @@ class ProductSearchUserView(BaseProductSearchView):
             # Now dedupe is safe
             deduped = self._dedupe_by_norm_code_fast(restricted_qs)
 
+            # if no results
+            if not deduped :
+                _, _, q_norm, q_code_norm = self._build_queryset(request)
+
+                # soft 'did you mean'
+                base = Product.objects.filter(self.get_default_query())
+                return Response(
+                    {
+                        "detail": "No products found.",
+                        "did_you_mean": self._did_you_mean(base, q_norm, q_code_norm),
+                    },
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+
             ranked = self._annotate_rank_signals(deduped, q, q_norm, looks_like_code)
 
             sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
@@ -4280,14 +4301,6 @@ class ProductSearchAdminView(BaseProductSearchView):
     def postprocess_response_data(self, response_data: dict, products) -> dict:
         response_data["recommended_products"] = get_recommended_products(products)
         return response_data
-
-
-class ProductSearchUserView(BaseProductSearchView):
-    authentication_classes = [SessionAuthentication]
-    permission_classes = [AllowAny]
-
-    def get_default_query(self) -> Q:
-        return Q(is_latest=True, status="live")
 
 
 class ProductAutocompleteView(APIView):

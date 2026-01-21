@@ -5,7 +5,7 @@ class Migration(migrations.Migration):
     atomic = False
     dependencies = [
         # Make sure this comes after 00xx_unaccent_imm_function
-        # e.g. ("products", "00xx_unaccent_imm_function")
+        ("products", "00xx_unaccent_imm_function")
     ]
 
     operations = [

@@ -111,9 +111,28 @@ if [ "$pending_count" -gt 0 ]; then
 else
   echo "No pending migrations found. Skipping migrate step."
 fi
+ 
+# -----------------------------------------------------------------------------
+# Step 5: Start the cron service and schedule the cron jobs
+# -----------------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────────────────────────
+# Schedule: check upcoming drafts at 07:00
+# ───────────────────────────────────────────────────────────────────────────────
+echo "0 7 * * * root cd /app && python manage.py check_upcoming_drafts \
+    >> /var/log/check_upcoming_drafts.log 2>&1" > /etc/cron.d/check_upcoming_drafts
+chmod 0644 /etc/cron.d/check_upcoming_drafts
+echo "Scheduled: check_upcoming_drafts at 07:00 daily."
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Schedule: publish scheduled products at 16:50 (GMT)
+# ───────────────────────────────────────────────────────────────────────────────
+echo "50 16 * * * root cd /app && python manage.py publish_scheduled_products \
+    >> /var/log/publish_scheduled_products.log 2>&1" > /etc/cron.d/publish_scheduled_products
+chmod 0644 /etc/cron.d/publish_scheduled_products
+echo "Scheduled: publish_scheduled_products at 16:50 GMT daily."
 
 # -----------------------------------------------------------------------------
-# Step 5: Verify search stack (extensions, function, indexes)
+# Step 6: Verify search stack (extensions, function, indexes)
 # -----------------------------------------------------------------------------
 echo "Checking search prerequisites (extensions/indexes)…"
 if ! python manage.py check_search_ready; then
@@ -122,7 +141,7 @@ fi
 
 
 # -----------------------------------------------------------------------------
-# Step 6: Start the Gunicorn WSGI server
+# Step 7: Start the Gunicorn WSGI server
 # -----------------------------------------------------------------------------
 echo "=============================="
 echo "Starting Gunicorn…"

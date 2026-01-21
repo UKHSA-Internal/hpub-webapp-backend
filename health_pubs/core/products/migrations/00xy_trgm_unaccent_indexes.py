@@ -1,11 +1,10 @@
 from django.db import migrations
 
-# We use CONCURRENTLY -> atomic must be False.
 class Migration(migrations.Migration):
     atomic = False
+
     dependencies = [
-        # Make sure this comes after 00xx_unaccent_imm_function
-        ("products", "00xx_unaccent_imm_function")
+        ("products", "00xx_unaccent_imm_function"),
     ]
 
     operations = [
@@ -13,7 +12,7 @@ class Migration(migrations.Migration):
             """
             CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_products_title_trgm_unaccent
             ON public.products_product
-            USING gin (public.unaccent_imm(lower(product_title)) gin_trgm_ops);
+            USING gin (public.unaccent_imm(lower(product_title)::text) gin_trgm_ops);
             """,
             """
             DROP INDEX CONCURRENTLY IF EXISTS idx_products_title_trgm_unaccent;
@@ -23,7 +22,7 @@ class Migration(migrations.Migration):
             """
             CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_products_code_trgm_unaccent
             ON public.products_product
-            USING gin (public.unaccent_imm(lower(product_code_no_dashes)) gin_trgm_ops);
+            USING gin (public.unaccent_imm(lower(product_code_no_dashes)::text) gin_trgm_ops);
             """,
             """
             DROP INDEX CONCURRENTLY IF EXISTS idx_products_code_trgm_unaccent;

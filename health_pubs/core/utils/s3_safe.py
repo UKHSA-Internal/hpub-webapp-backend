@@ -5,7 +5,7 @@ from django.conf import settings
 s3_client = boto3.client("s3")
 S3_EXPECTED_OWNER = getattr(settings, "AWS_EXPECTED_BUCKET_OWNER", None)
 
-#ExpectedBucketOwner isnt supported by all methods, leave it out
+# ExpectedBucketOwner isnt supported by all methods, leave it out
 UNSUPPORTED_METHODS = {"download_fileobj"}
 
 

@@ -9,4 +9,6 @@ from .views import (
     UserLoginView,
     UserSignUpView,
     PreRegistrationView,
+    DeleteAccountView
 )
+from .users import UsersV2

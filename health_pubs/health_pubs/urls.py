@@ -6,6 +6,7 @@ API_PREFIX = "api/v1/"
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("", include("core.self.urls")),
+    path("", include("core.auth.urls")),
     path(f"{API_PREFIX}", include("core.event_analytics.urls")),
     path(f"{API_PREFIX}", include("core.users.urls")),
     path(f"{API_PREFIX}products/", include("core.products.urls")),

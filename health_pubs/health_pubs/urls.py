@@ -8,7 +8,7 @@ urlpatterns = [
     path("", include("core.self.urls")),
     path("", include("core.auth.urls")),
     path(f"{API_PREFIX}", include("core.event_analytics.urls")),
-    path(f"{API_PREFIX}", include("core.users.urls")),
+    path("", include("core.users.urls")),
     path(f"{API_PREFIX}products/", include("core.products.urls")),
     path(f"{API_PREFIX}", include("core.roles.urls")),
     path(f"{API_PREFIX}", include("core.orders.urls")),

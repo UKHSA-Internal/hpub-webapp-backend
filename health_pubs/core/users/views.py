@@ -881,7 +881,6 @@ class UserDetailView(GenericAPIView):
     def delete(self, request, user_id):
         if not IsAdminUser().has_permission(request, self):
             return Response(status=status.HTTP_403_FORBIDDEN)
-        
         user = self.get_object()
         self.check_object_permissions(request, user)
         result = delete_user_and_dependencies(str(user_id))

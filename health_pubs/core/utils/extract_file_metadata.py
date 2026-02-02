@@ -361,7 +361,7 @@ def _deep_doc_meta(temp_path: Path, ext_with_dot: str) -> Dict[str, Union[str, i
 
     try:
         if ext in {".pdf", ".pptx", ".docx"}:
-            return {"pdf": _pdf_meta, ".pptx": _pptx_meta, ".docx": _docx_meta}[ext](
+            return {".pdf": _pdf_meta, ".pptx": _pptx_meta, ".docx": _docx_meta}[ext](
                 temp_path
             )
 

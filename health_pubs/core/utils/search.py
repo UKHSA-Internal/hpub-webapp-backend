@@ -8,6 +8,7 @@ from django.db.models import Case, When
 from django.db.models.expressions import Func
 from django.contrib.postgres.search import TrigramSimilarity
 
+
 # ---- NEW: immutable unaccent wrapper ----
 class UnaccentImm(Func):
     function = "unaccent_imm"

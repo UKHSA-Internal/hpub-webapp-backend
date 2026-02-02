@@ -4241,7 +4241,7 @@ class ProductSearchUserView(BaseProductSearchView):
             deduped = self._dedupe_by_norm_code_fast(restricted_qs)
 
             # if no results
-            if not deduped :
+            if not deduped:
                 _, _, q_norm, q_code_norm = self._build_queryset(request)
 
                 # soft 'did you mean'
@@ -4251,7 +4251,7 @@ class ProductSearchUserView(BaseProductSearchView):
                         "detail": "No products found.",
                         "did_you_mean": self._did_you_mean(base, q_norm, q_code_norm),
                     },
-                    status=status.HTTP_404_NOT_FOUND
+                    status=status.HTTP_404_NOT_FOUND,
                 )
 
 

@@ -19,6 +19,7 @@ from .views import (
     ProductUsersFilterView,
     ProgramProductsView,
     ProductViewSet,
+    ProductAutocompleteView,
 )
 
 router = DefaultRouter()
@@ -39,6 +40,11 @@ urlpatterns = [
         "search/admin/", ProductSearchAdminView.as_view(), name="product-search-admin"
     ),
     path("search/user/", ProductSearchUserView.as_view(), name="product-search-user"),
+    path(
+        "search/autocomplete/",
+        ProductAutocompleteView.as_view(),
+        name="product-autocomplete",
+    ),
     path("user_filter/", ProductUsersFilterView.as_view(), name="user-product-filter"),
     path(
         "admin_filter/", ProductAdminFilterView.as_view(), name="admin-product-filter"

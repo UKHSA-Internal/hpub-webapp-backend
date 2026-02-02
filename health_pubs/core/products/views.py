@@ -4254,7 +4254,6 @@ class ProductSearchUserView(BaseProductSearchView):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-
             ranked = self._annotate_rank_signals(deduped, q, q_norm, looks_like_code)
 
             sort_by = self._normalize_sort_param(request.GET.get("sort_by"))

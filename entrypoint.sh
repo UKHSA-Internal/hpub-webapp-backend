@@ -111,7 +111,7 @@ if [ "$pending_count" -gt 0 ]; then
 else
   echo "No pending migrations found. Skipping migrate step."
 fi
-
+ 
 # -----------------------------------------------------------------------------
 # Step 5: Start the cron service and schedule the cron jobs
 # -----------------------------------------------------------------------------
@@ -132,7 +132,16 @@ chmod 0644 /etc/cron.d/publish_scheduled_products
 echo "Scheduled: publish_scheduled_products at 16:50 GMT daily."
 
 # -----------------------------------------------------------------------------
-# Step 6: Start the Gunicorn WSGI server
+# Step 6: Verify search stack (extensions, function, indexes)
+# -----------------------------------------------------------------------------
+echo "Checking search prerequisites (extensions/indexes)…"
+if ! python manage.py check_search_ready; then
+  echo "Search readiness check failed. Refusing to start."; exit 1
+fi
+
+
+# -----------------------------------------------------------------------------
+# Step 7: Start the Gunicorn WSGI server
 # -----------------------------------------------------------------------------
 echo "=============================="
 echo "Starting Gunicorn…"

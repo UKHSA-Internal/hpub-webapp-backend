@@ -3318,8 +3318,8 @@ class ProductCheckExistingView(APIView):
     needs: product_title, language_id, programme_name
     returns: exists, product_code
     """
-    # authentication_classes = [CustomTokenAuthentication]
-    # permission_classes = [IsAuthenticated, IsAdminUser]
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get(self, request, *args, **kwargs):
         product_title = request.query_params.get("product_title", "").strip()

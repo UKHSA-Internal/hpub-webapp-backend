@@ -3330,16 +3330,16 @@ class ProductCheckExistingView(APIView):
             program_name=programme_name,
             product_title__iexact=product_title,
             language_id=language_id,
+            status__in=["live", "draft"],
         ).first()
 
         exists = False
         product_code = None
-        response_status = status.HTTP_404_NOT_FOUND
+        response_status = status.HTTP_200_OK
 
         if existing_product:
             exists = True
             product_code = existing_product.product_code
-            response_status = status.HTTP_200_OK
 
         return Response({
                 "exists": exists,

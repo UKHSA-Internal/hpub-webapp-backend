@@ -3307,6 +3307,7 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                 getattr(product_update, relationship_field).set(refs)
         product_update.save()
 
+
 class ProductCheckExistingView(APIView):
     """
     specif to check if a resource exists
@@ -3318,6 +3319,7 @@ class ProductCheckExistingView(APIView):
     needs: product_title, language_id, programme_name
     returns: exists, product_code
     """
+
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
 
@@ -3341,10 +3343,8 @@ class ProductCheckExistingView(APIView):
             exists = True
             product_code = existing_product.product_code
 
-        return Response({
-                "exists": exists,
-                "product_code": product_code
-            },
+        return Response(
+            {"exists": exists, "product_code": product_code},
             status=response_status,
         )
 

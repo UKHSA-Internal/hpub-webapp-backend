@@ -37,8 +37,11 @@ urlpatterns = [
     path("bulk-delete/", ProductDeleteAll.as_view(), name="product-bulk-delete"),
     path("admin/all/", ProductAdminListView.as_view(), name="list-products-admin"),
     path("users/all/", ProductUsersListView.as_view(), name="list-products-user"),
-
-    path("search/admin/check-existing/", ProductCheckExistingView.as_view(), name="check-existing"),
+    path(
+        "search/admin/check-existing/",
+        ProductCheckExistingView.as_view(),
+        name="check-existing",
+    ),
     path(
         "search/admin/", ProductSearchAdminView.as_view(), name="product-search-admin"
     ),

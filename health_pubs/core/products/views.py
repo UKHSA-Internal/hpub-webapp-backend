@@ -809,12 +809,29 @@ class CustomPagination(PageNumberPagination):
 
         return response
 
-
 class AdminPagination(CustomPagination):
-    # Only the admin list should use this larger/smaller page size
-    page_size = getattr(settings, "ADMIN_PRODUCTS_PAGE_SIZE", 25)  # pick your number
+    page_size = getattr(settings, "ADMIN_PRODUCTS_PAGE_SIZE", 25)
+    page_size_query_param = "page_size"  # optional page_size=50
+    max_page_size = 100
 
+    def get_page_size(self, request):
+        """
+        determine page size dynamically with query param ?page_size=XX
+        or default page size from settings
+        """
+        if self.page_size_query_param:
+            try:
+                page_size = int(request.query_params.get(self.page_size_query_param, 0))
+                if page_size > 0:
+                    if self.max_page_size:
+                        return min(page_size, self.max_page_size)
+                    return page_size
+            except (ValueError, TypeError):
+                pass
 
+        #fallback to default
+        return self.page_size
+    
 class ErrorHandlingMixin:
     """
     Mixin to wrap view dispatch with common error handling.

@@ -3308,6 +3308,47 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         product_update.save()
 
 
+class ProductCheckExistingView(APIView):
+    """
+    specif to check if a resource exists
+    before creating another one
+    (archive confirmation feat)
+
+    path: /products/search/admin/check-existing/
+
+    needs: product_title, language_id, programme_name
+    returns: exists, product_code
+    """
+
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request, *args, **kwargs):
+        product_title = request.query_params.get("product_title", "").strip()
+        language_id = request.query_params.get("language_id")
+        programme_name = request.query_params.get("program_name")
+
+        existing_product = Product.objects.filter(
+            program_name=programme_name,
+            product_title__iexact=product_title,
+            language_id=language_id,
+            status__in=["live", "draft"],
+        ).first()
+
+        exists = False
+        product_code = None
+        response_status = status.HTTP_200_OK
+
+        if existing_product:
+            exists = True
+            product_code = existing_product.product_code
+
+        return Response(
+            {"exists": exists, "product_code": product_code},
+            status=response_status,
+        )
+
+
 class ProductCreateView(ErrorHandlingMixin, APIView):
     """
     Optimized view to handle product creation via POST requests.

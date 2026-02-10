@@ -13,6 +13,7 @@ from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from wagtail.models import Page
 
 from .models import Vaccination
@@ -142,6 +143,8 @@ class VaccinationEditViewSet(viewsets.ModelViewSet):
                 {"error": "Vaccination not found."},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        except DRFValidationError as ve:
+            return Response({"error": ve.detail}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.error(f"Error updating vaccination: {str(e)}")
             return Response(
@@ -165,6 +168,8 @@ class VaccinationEditViewSet(viewsets.ModelViewSet):
                 {"error": "Vaccination not found."},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        except DRFValidationError as ve:
+            return Response({"error": ve.detail}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.error(f"Error partially updating vaccination: {str(e)}")
             return Response(

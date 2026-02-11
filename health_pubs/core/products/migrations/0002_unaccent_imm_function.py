@@ -26,9 +26,7 @@ DROP_FUNC_SQL = "DROP FUNCTION IF EXISTS public.unaccent_imm(text);"
 
 class Migration(migrations.Migration):
     atomic = True  # safe; no CONCURRENTLY here
-    dependencies = [
-        # put your last migration here, e.g. ("products", "00xx_previous")
-    ]
+    dependencies = []
 
     operations = [
         migrations.RunSQL(sql=CREATE_FUNC_SQL, reverse_sql=DROP_FUNC_SQL),

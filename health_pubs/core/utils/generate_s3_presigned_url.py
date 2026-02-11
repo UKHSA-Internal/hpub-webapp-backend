@@ -38,6 +38,7 @@ _FORCE_DOWNLOAD_EXTENSIONS = (
     ".png",
     ".odt",
     ".gif",
+    ".txt",
 )
 
 DEFAULT_PRESIGNED_URL_TTL = getattr(

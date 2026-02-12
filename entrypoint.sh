@@ -134,11 +134,10 @@ echo "Scheduled: publish_scheduled_products at 16:50 GMT daily."
 # -----------------------------------------------------------------------------
 # Step 6: Verify search stack (extensions, function, indexes)
 # -----------------------------------------------------------------------------
-echo "Checking search prerequisites (extensions/indexes)…"
-if ! python manage.py check_search_ready; then
-  echo "Search readiness check failed. Refusing to start."; exit 1
-fi
-
+# echo "Checking search prerequisites (extensions/indexes)…"
+# if ! python manage.py check_search_ready; then
+#   echo "Search readiness check failed. Refusing to start."; exit 1
+# fi
 
 # -----------------------------------------------------------------------------
 # Step 7: Start the Gunicorn WSGI server

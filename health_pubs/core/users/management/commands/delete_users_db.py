@@ -24,9 +24,9 @@ def delete_user_and_dependencies(user_id: str) -> dict:
         with transaction.atomic():
             user_instance = User.objects.get(user_id=user_id)
 
-            # Hard delete the user page tree (Wagtail Page subclass).
-            user_instance.delete(hard=True)
-            logger.info("User with user_id %s hard deleted successfully.", user_id)
+            # Delete user account
+            user_instance.delete()
+            logger.info("User with user_id %s deleted successfully.", user_id)
             return {"success": True}
 
     except ObjectDoesNotExist:

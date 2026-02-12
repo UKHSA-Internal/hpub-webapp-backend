@@ -7,7 +7,6 @@ from core.customer_support.models import CustomerSupport
 from core.event_analytics.models import EventAnalytics
 from core.feedbacks.models import Feedback
 from core.orders.models import Order, OrderItem
-from core.products.models import Product
 from core.users.models import InvalidatedToken, User
 
 logger = logging.getLogger(__name__)

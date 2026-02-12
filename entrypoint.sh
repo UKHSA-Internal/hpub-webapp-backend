@@ -99,18 +99,18 @@ echo "Number of pending migrations: $pending_count"
 # -----------------------------------------------------------------------------
 # Step 4: Apply pending migrations if needed
 # -----------------------------------------------------------------------------
-if [ "$pending_count" -gt 0 ]; then
-  echo "=============================="
-  echo "Applying pending migrations…"
-  migrate_output=$(python manage.py migrate --verbosity=2 2>&1) || {
-    echo "MIGRATE FAILED:"
-    echo "$migrate_output"
-    exit 1
-  }
-  echo "$migrate_output"
-else
-  echo "No pending migrations found. Skipping migrate step."
-fi
+# if [ "$pending_count" -gt 0 ]; then
+#   echo "=============================="
+#   echo "Applying pending migrations…"
+#   migrate_output=$(python manage.py migrate --verbosity=2 2>&1) || {
+#     echo "MIGRATE FAILED:"
+#     echo "$migrate_output"
+#     exit 1
+#   }
+#   echo "$migrate_output"
+# else
+#   echo "No pending migrations found. Skipping migrate step."
+# fi
  
 # -----------------------------------------------------------------------------
 # Step 5: Start the cron service and schedule the cron jobs

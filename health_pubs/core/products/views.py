@@ -2279,7 +2279,6 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
                     status.HTTP_404_NOT_FOUND,
                 ),
             )
-        
         #  Prefetch related order_limits for per-user org limit lookups
         product = (
             Product.objects.filter(product_code=code)

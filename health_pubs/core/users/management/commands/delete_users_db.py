@@ -82,7 +82,7 @@ def delete_user_and_dependencies(user_id: str) -> dict:
 
             # Delete user account
             user_instance.delete()
-            logger.debug("User with user_id %s deleted successfully.", user_id)
+            logger.info("User with user_id %s deleted successfully.", user_id)
             return {"success": True}
 
     except ObjectDoesNotExist:

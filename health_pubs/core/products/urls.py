@@ -9,6 +9,7 @@ from .views import (
     ProductDeleteAll,
     ProductDetailDelete,
     ProductDetailView,
+    ProductDownloadUrlsView,
     ProductPatchView,
     ProductSearchAdminView,
     ProductSearchUserView,
@@ -70,6 +71,11 @@ urlpatterns = [
         "<str:product_code>/",
         ProductDetailView.as_view({"get": "retrieve"}),
         name="product-detail",
+    ),
+    path(
+        "<str:product_code>/download-urls/",
+        ProductDownloadUrlsView.as_view({"get": "retrieve"}),
+        name="product-download-urls",
     ),
     path(
         "put/<str:product_code>/",

@@ -2324,6 +2324,80 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
             resp["Last-Modified"] = http_date(ver_ts)
 
 
+class ProductDownloadUrlsView(ProductDetailView):
+    """
+    Returns only presigned S3 URLs + metadata for product downloads.
+    """
+
+    def retrieve(self, request, product_code=None, *args, **kwargs):
+        # Decode and sanitize product code
+        code = unquote(product_code or "").strip()
+        if not code:
+            return handle_error(
+                ErrorCode.PRODUCT_NOT_FOUND,
+                ErrorMessage.PRODUCT_NOT_FOUND,
+                status.HTTP_404_NOT_FOUND,
+            )
+
+        product = (
+            Product.objects.filter(product_code=code)
+            .select_related("update_ref")
+            .prefetch_related("order_limits")
+            .first()
+        )
+
+        if not product:
+            return handle_error(
+                ErrorCode.PRODUCT_NOT_FOUND,
+                ErrorMessage.PRODUCT_NOT_FOUND,
+                status.HTTP_404_NOT_FOUND,
+            )
+
+        ver_ts = self._get_version_timestamp(product)
+        cache_key, bypass_cache = self._get_cache_key_and_bypass(request, code, ver_ts)
+
+        if not bypass_cache:
+            cached_data = cache.get(cache_key)
+            if cached_data:
+                return self._cached_response(cached_data, code, ver_ts)
+
+        serializer = ProductSerializer(product, context={"request": request})
+        data = serializer.data
+        self._process_presigned_urls(data)
+
+        downloads = self._extract_product_downloads(data)
+
+        ttl = getattr(settings, "CACHE_TTL_DETAIL", 60)
+        if ttl > 0 and not bypass_cache:
+            cache.set(cache_key, downloads, ttl)
+
+        return self._fresh_response(downloads, code, ver_ts)
+
+    def _get_cache_key_and_bypass(
+        self, request, code: str, ver_ts: int
+    ) -> tuple[str, bool]:
+        cache_key = f"product_downloads:v{ver_ts}:{code}"
+        bypass_cache = (request.GET.get("fresh") == "1") or getattr(
+            request.user, "is_staff", False
+        )
+        return cache_key, bypass_cache
+
+    def _extract_product_downloads(self, data: dict) -> dict:
+        """Return only processed product_downloads with a stable shape."""
+        update_ref = data.get("update_ref")
+        if isinstance(update_ref, dict):
+            downloads = update_ref.get("product_downloads")
+            if downloads is not None:
+                return downloads
+        return {
+            "main_download_url": None,
+            "video_url": None,
+            "web_download_url": [],
+            "print_download_url": [],
+            "transcript_url": [],
+        }
+
+
 class ProductDetailDelete(ErrorHandlingMixin, View):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]

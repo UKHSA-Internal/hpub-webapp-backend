@@ -2230,29 +2230,9 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
     permission_classes = [AllowAny]
 
     def retrieve(self, request, product_code=None, *args, **kwargs):
-        # Decode and sanitize product code
-        code = unquote(product_code or "").strip()
-        if not code:
-            return handle_error(
-                ErrorCode.PRODUCT_NOT_FOUND,
-                ErrorMessage.PRODUCT_NOT_FOUND,
-                status.HTTP_404_NOT_FOUND,
-            )
-
-        #  Prefetch related order_limits for per-user org limit lookups
-        product = (
-            Product.objects.filter(product_code=code)
-            .select_related("update_ref")
-            .prefetch_related("order_limits")
-            .first()
-        )
-
-        if not product:
-            return handle_error(
-                ErrorCode.PRODUCT_NOT_FOUND,
-                ErrorMessage.PRODUCT_NOT_FOUND,
-                status.HTTP_404_NOT_FOUND,
-            )
+        product, code, error = self._get_product_or_error(product_code)
+        if error:
+            return error
 
         # Build version timestamp for cache key
         ver_ts = self._get_version_timestamp(product)
@@ -2294,6 +2274,42 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
             timestamps.append(product.update_ref.updated_at)
         return int(max(timestamps).timestamp()) if timestamps else 0
 
+    def _get_product_or_error(
+        self, product_code: Optional[str]
+    ) -> tuple[Optional[Product], str, Optional[JsonResponse]]:
+        """Decode product_code and fetch product or return an error response."""
+        code = unquote(product_code or "").strip()
+        if not code:
+            return (
+                None,
+                code,
+                handle_error(
+                    ErrorCode.PRODUCT_NOT_FOUND,
+                    ErrorMessage.PRODUCT_NOT_FOUND,
+                    status.HTTP_404_NOT_FOUND,
+                ),
+            )
+
+        product = (
+            Product.objects.filter(product_code=code)
+            .select_related("update_ref")
+            .prefetch_related("order_limits")
+            .first()
+        )
+
+        if not product:
+            return (
+                None,
+                code,
+                handle_error(
+                    ErrorCode.PRODUCT_NOT_FOUND,
+                    ErrorMessage.PRODUCT_NOT_FOUND,
+                    status.HTTP_404_NOT_FOUND,
+                ),
+            )
+
+        return product, code, None
+
     def _get_cache_key_and_bypass(
         self, request, code: str, ver_ts: int
     ) -> tuple[str, bool]:
@@ -2330,28 +2346,9 @@ class ProductDownloadUrlsView(ProductDetailView):
     """
 
     def retrieve(self, request, product_code=None, *args, **kwargs):
-        # Decode and sanitize product code
-        code = unquote(product_code or "").strip()
-        if not code:
-            return handle_error(
-                ErrorCode.PRODUCT_NOT_FOUND,
-                ErrorMessage.PRODUCT_NOT_FOUND,
-                status.HTTP_404_NOT_FOUND,
-            )
-
-        product = (
-            Product.objects.filter(product_code=code)
-            .select_related("update_ref")
-            .prefetch_related("order_limits")
-            .first()
-        )
-
-        if not product:
-            return handle_error(
-                ErrorCode.PRODUCT_NOT_FOUND,
-                ErrorMessage.PRODUCT_NOT_FOUND,
-                status.HTTP_404_NOT_FOUND,
-            )
+        product, code, error = self._get_product_or_error(product_code)
+        if error:
+            return error
 
         ver_ts = self._get_version_timestamp(product)
         cache_key, bypass_cache = self._get_cache_key_and_bypass(request, code, ver_ts)

@@ -35,7 +35,7 @@ def delete_user_and_dependencies(user_id: str) -> dict:
                 for obj in items:
                     obj.delete()
                 if items:
-                    logger.info(
+                    logger.debug(
                         "Deleted %s %s for user_id %s.",
                         len(items),
                         label,
@@ -72,7 +72,7 @@ def delete_user_and_dependencies(user_id: str) -> dict:
             for order in orders:
                 order.delete()
             if orders:
-                logger.info("Deleted %s orders for user_id %s.", len(orders), user_id)
+                logger.debug("Deleted %s orders for user_id %s.", len(orders), user_id)
 
             # Invalidated tokens
             _delete_queryset(
@@ -82,7 +82,7 @@ def delete_user_and_dependencies(user_id: str) -> dict:
 
             # Delete user account
             user_instance.delete()
-            logger.info("User with user_id %s deleted successfully.", user_id)
+            logger.debug("User with user_id %s deleted successfully.", user_id)
             return {"success": True}
 
     except ObjectDoesNotExist:

@@ -2230,46 +2230,16 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
     permission_classes = [AllowAny]
 
     def retrieve(self, request, product_code=None, *args, **kwargs):
-        # Decode and sanitize product code
-        code = unquote(product_code or "").strip()
-        if not code:
-            return handle_error(
-                ErrorCode.PRODUCT_NOT_FOUND,
-                ErrorMessage.PRODUCT_NOT_FOUND,
-                status.HTTP_404_NOT_FOUND,
-            )
-
-        #  Prefetch related order_limits for per-user org limit lookups
-        product = (
-            Product.objects.filter(product_code=code)
-            .select_related("update_ref")
-            .prefetch_related("order_limits")
-            .first()
-        )
-
-        if not product:
-            return handle_error(
-                ErrorCode.PRODUCT_NOT_FOUND,
-                ErrorMessage.PRODUCT_NOT_FOUND,
-                status.HTTP_404_NOT_FOUND,
-            )
+        product, code, error = self._get_product_or_error(product_code)
+        if error:
+            return error
 
         # Build version timestamp for cache key
         ver_ts = self._get_version_timestamp(product)
-        cache_key, bypass_cache = self._get_cache_key_and_bypass(request, code, ver_ts)
-
-        # Try returning cached response (skip for staff or ?fresh=1)
-        if not bypass_cache:
-            cached_data = cache.get(cache_key)
-            if cached_data:
-                return self._cached_response(cached_data, code, ver_ts)
-
-        #  Serialize product with full context (for user-aware fields)
-        serializer = ProductSerializer(product, context={"request": request})
-        data = serializer.data
-
-        #  Apply presigned URLs and metadata
-        self._process_presigned_urls(data)
+        # Build data (with cache, serialization, presigned URLs)
+        data, cache_key, bypass_cache = self._build_response_data(
+            request, product, code, ver_ts
+        )
 
         #  Cache the result for faster repeated lookups
         ttl = getattr(settings, "CACHE_TTL_DETAIL", 60)
@@ -2294,6 +2264,42 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
             timestamps.append(product.update_ref.updated_at)
         return int(max(timestamps).timestamp()) if timestamps else 0
 
+    def _get_product_or_error(
+        self, product_code: Optional[str]
+    ) -> tuple[Optional[Product], str, Optional[JsonResponse]]:
+        """Decode product_code and fetch product or return an error response."""
+        code = unquote(product_code or "").strip()
+        if not code:
+            return (
+                None,
+                code,
+                handle_error(
+                    ErrorCode.PRODUCT_NOT_FOUND,
+                    ErrorMessage.PRODUCT_NOT_FOUND,
+                    status.HTTP_404_NOT_FOUND,
+                ),
+            )
+        #  Prefetch related order_limits for per-user org limit lookups
+        product = (
+            Product.objects.filter(product_code=code)
+            .select_related("update_ref")
+            .prefetch_related("order_limits")
+            .first()
+        )
+
+        if not product:
+            return (
+                None,
+                code,
+                handle_error(
+                    ErrorCode.PRODUCT_NOT_FOUND,
+                    ErrorMessage.PRODUCT_NOT_FOUND,
+                    status.HTTP_404_NOT_FOUND,
+                ),
+            )
+
+        return product, code, None
+
     def _get_cache_key_and_bypass(
         self, request, code: str, ver_ts: int
     ) -> tuple[str, bool]:
@@ -2303,6 +2309,25 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
             request.user, "is_staff", False
         )
         return cache_key, bypass_cache
+
+    def _build_response_data(
+        self, request, product: Product, code: str, ver_ts: int
+    ) -> tuple[dict, str, bool]:
+        # Build cache key + bypass flag
+        cache_key, bypass_cache = self._get_cache_key_and_bypass(request, code, ver_ts)
+
+        # Try returning cached response (skip for staff or ?fresh=1)
+        if not bypass_cache:
+            cached_data = cache.get(cache_key)
+            if cached_data:
+                return cached_data, cache_key, bypass_cache
+
+        #  Serialize product with full context (for user-aware fields)
+        serializer = ProductSerializer(product, context={"request": request})
+        data = serializer.data
+        #  Apply presigned URLs and metadata
+        self._process_presigned_urls(data)
+        return data, cache_key, bypass_cache
 
     def _cached_response(self, cached: dict, code: str, ver_ts: int) -> JsonResponse:
         """Return cached JSON response with headers."""
@@ -2322,6 +2347,55 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
         resp["ETag"] = f'W/"{code}-{ver_ts}"'
         if ver_ts:
             resp["Last-Modified"] = http_date(ver_ts)
+
+
+class ProductDownloadUrlsView(ProductDetailView):
+    """
+    Returns only presigned S3 URLs + metadata for product downloads.
+    """
+
+    def retrieve(self, request, product_code=None, *args, **kwargs):
+        product, code, error = self._get_product_or_error(product_code)
+        if error:
+            return error
+
+        # Build version timestamp for cache key
+        ver_ts = self._get_version_timestamp(product)
+        # Build data (with cache, serialization, presigned URLs)
+        data, cache_key, bypass_cache = self._build_response_data(
+            request, product, code, ver_ts
+        )
+        downloads = self._extract_product_downloads(data)
+
+        ttl = getattr(settings, "CACHE_TTL_DETAIL", 60)
+        if ttl > 0 and not bypass_cache:
+            cache.set(cache_key, downloads, ttl)
+
+        return self._fresh_response(downloads, code, ver_ts)
+
+    def _get_cache_key_and_bypass(
+        self, request, code: str, ver_ts: int
+    ) -> tuple[str, bool]:
+        cache_key = f"product_downloads:v{ver_ts}:{code}"
+        bypass_cache = (request.GET.get("fresh") == "1") or getattr(
+            request.user, "is_staff", False
+        )
+        return cache_key, bypass_cache
+
+    def _extract_product_downloads(self, data: dict) -> dict:
+        """Return only processed product_downloads with a stable shape."""
+        update_ref = data.get("update_ref")
+        if isinstance(update_ref, dict):
+            downloads = update_ref.get("product_downloads")
+            if downloads is not None:
+                return downloads
+        return {
+            "main_download_url": None,
+            "video_url": None,
+            "web_download_url": [],
+            "print_download_url": [],
+            "transcript_url": [],
+        }
 
 
 class ProductDetailDelete(ErrorHandlingMixin, View):

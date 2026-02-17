@@ -40,7 +40,6 @@ STATUS_MAPPING = {
 }
 
 
-
 def build_max_order_from_order_limits(product_instance):
     """
     Build maxOrder array from OrderLimitPage objects, skipping any entries

@@ -40,16 +40,6 @@ STATUS_MAPPING = {
 }
 
 
-def skip_if_suppressed(fn):
-    @wraps(fn)
-    def wrapper(sender, instance, **kwargs):
-        if getattr(instance, "suppress_event", False):
-            logger.info("Event suppressed for %s", instance.product_code)
-            return
-        return fn(sender, instance, **kwargs)
-
-    return wrapper
-
 
 def build_max_order_from_order_limits(product_instance):
     """
@@ -174,7 +164,6 @@ def send_product_event(product_instance, event_type, detail_type, required_field
 
 
 @receiver(post_save, sender=Product)
-@skip_if_suppressed
 @check_required_event_fields([f.value for f in required_event_fields_draft])
 def send_product_draft_event(sender, instance, **kwargs):
     instance.refresh_from_db()
@@ -191,7 +180,6 @@ def send_product_draft_event(sender, instance, **kwargs):
 
 
 @receiver(post_save, sender=Product)
-@skip_if_suppressed
 @check_required_event_fields([f.value for f in required_event_fields_live])
 def send_product_live_event(sender, instance, **kwargs):
     instance.refresh_from_db()
@@ -208,7 +196,6 @@ def send_product_live_event(sender, instance, **kwargs):
 
 
 @receiver(post_save, sender=Product)
-@skip_if_suppressed
 @check_required_event_fields([f.value for f in required_event_fields_archived])
 def send_product_archived_event(sender, instance, **kwargs):
     instance.refresh_from_db()
@@ -225,7 +212,6 @@ def send_product_archived_event(sender, instance, **kwargs):
 
 
 @receiver(post_save, sender=Product)
-@skip_if_suppressed
 @check_required_event_fields([f.value for f in required_event_fields_withdrawn])
 def send_product_withdrawn_event(sender, instance, **kwargs):
     instance.refresh_from_db()

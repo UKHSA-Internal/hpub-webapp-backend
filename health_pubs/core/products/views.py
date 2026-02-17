@@ -1503,7 +1503,6 @@ class ProductUtilsMixin:
             created_at=created_at,
             is_latest=True,
             publish_date=publish_date,
-            suppress_event=False,
         )
 
     def assign_m2m_fields(
@@ -2512,13 +2511,6 @@ class ProductStatusUpdateView(APIView):
             if isinstance(validation, JsonResponse):
                 return validation
             new_status = validation
-
-            # if we’re moving from live → draft, set suppress_event so no signals fire
-            if product.status == "live" and new_status == "draft":
-                product.suppress_event = True
-                logger.info(
-                    f"Moving product {product.product_code} live→draft; suppress_event set to True"
-                )
 
             editor = getattr(request, "user", None)
             if isinstance(editor, User):
@@ -3688,7 +3680,6 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
                         program_name=data["program_name"],
                         tag=data["tag"],
                         publish_date=data.get("publish_date"),
-                        suppress_event=False,
                     )
 
                     # add_child allocates path/depth, then saves

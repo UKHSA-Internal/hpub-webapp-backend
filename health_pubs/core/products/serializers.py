@@ -288,7 +288,6 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
 
 class ProductSerializer(serializers.ModelSerializer):
     status = serializers.CharField(max_length=50, default="draft")
-    suppress_event = serializers.BooleanField(default=False, required=False)
     product_key = serializers.CharField(max_length=50)
     program_id = serializers.SlugRelatedField(
         slug_field="program_id", queryset=Program.objects.all()
@@ -310,7 +309,6 @@ class ProductSerializer(serializers.ModelSerializer):
         ],
         required=True,
     )
-    suppress_event = serializers.BooleanField(default=False, required=False)
 
     update_ref = ProductUpdateSerializer(read_only=True)
     product_code_no_dashes = serializers.CharField(read_only=True)
@@ -337,7 +335,6 @@ class ProductSerializer(serializers.ModelSerializer):
             "product_code",
             "product_code_no_dashes",
             "version_number",
-            "suppress_event",
             "update_ref",
             "order_limits",
             "user_order_limit",
@@ -490,5 +487,4 @@ class ProductSearchSerializer(serializers.ModelSerializer):
             "updated_at",
             "publish_date",
             "version_number",
-            "suppress_event",
         )

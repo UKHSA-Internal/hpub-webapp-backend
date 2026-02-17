@@ -26,6 +26,7 @@ urlpatterns = [
     path("users/logout/", LogoutView().as_view(), name="logout"),
     path("users/refresh/", TokenRefresh.as_view(), name="token_refresh"),
     path("users/<uuid:user_id>/", UserDetailView.as_view(), name="user-detail"),
+    path("users/string-id/<str:user_id>/", UserDetailView.as_view(),name="user-detail-by-string-id"),
     path("users/list/", UserListView.as_view(), name="user-list"),
     path("users/migrate-users/", MigrateUsersAPIView.as_view(), name="user-migrate"),
 ]

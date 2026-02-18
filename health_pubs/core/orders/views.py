@@ -431,6 +431,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                     self._create_order_items(items, order, locked, order_user)
                     self._update_product_quantities(items)
 
+                # Build notification from persisted order data only to ensure consistency (e.g. confirmation number from DB, not regenerated here)
                 confirmation = generate_order_confirmation(order)
 
                 # For admin, always override shipping with delivery user + address
@@ -443,15 +444,6 @@ class OrderViewSet(viewsets.ModelViewSet):
                         confirmation["shipping_address"] = self._shipping_dict(
                             address, order.user_ref
                         )
-
-                if (
-                    order.order_confirmation_number
-                    != confirmation["confirmation_number"]
-                ):
-                    order.order_confirmation_number = confirmation[
-                        "confirmation_number"
-                    ]
-                    order.save(update_fields=["order_confirmation_number"])
 
                 self._notify_with_payload(
                     order=order,

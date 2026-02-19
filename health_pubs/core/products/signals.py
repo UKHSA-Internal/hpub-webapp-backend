@@ -114,6 +114,7 @@ def prepare_product_data(product_instance, required_fields_enum, status):
         "publicationId": product_instance.product_code,
         "title": product_instance.product_title,
         "status": normalised,
+        "languageName": product_instance.language_name,
         "maxOrder": max_order,
         "uom": uom,
         "runToZero": getattr(update, "run_to_zero", False),

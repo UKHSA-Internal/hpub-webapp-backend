@@ -154,6 +154,7 @@ INSTALLED_APPS = [
     "core.diseases",
     "core.vaccinations",
     "core.customer_support",
+    "core.notifications",
     "core.where_to_use",
     "core.languages",
     "django_filters",

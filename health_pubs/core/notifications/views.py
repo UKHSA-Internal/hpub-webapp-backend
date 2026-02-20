@@ -1,0 +1,88 @@
+from core.users.permissions import IsAdminUser
+from core.utils.custom_token_authentication import CustomTokenAuthentication
+from django.db.models import Case, IntegerField, Q, When
+from django.utils import timezone
+from rest_framework import status, viewsets
+from rest_framework.authentication import SessionAuthentication
+from rest_framework.decorators import action
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+
+from .models import Notification
+from .serializers import NotificationEnabledSerializer, NotificationSerializer
+
+
+class NotificationViewSet(viewsets.ModelViewSet):
+    queryset = Notification.objects.all()
+    serializer_class = NotificationSerializer
+    authentication_classes = [SessionAuthentication, CustomTokenAuthentication]
+
+    def get_permissions(self):
+        # Only the public active banner endpoint is open; all other notification actions require admin access.
+        if self.action in ["active"]:
+            permission_classes = [AllowAny]
+        else:
+            permission_classes = [IsAuthenticated, IsAdminUser]
+        return [permission() for permission in permission_classes]
+
+    # Public endpoint for frontend banner check: returns latest active notification or DISABLED fallback.
+    @action(detail=False, methods=["get"], url_path="active")
+    def active(self, request):
+        now = timezone.now()
+        notification = (
+            self.get_queryset()
+            .filter(
+                is_enabled=True,
+            )
+            .filter(Q(start_at__isnull=True) | Q(start_at__lte=now))
+            .filter(Q(end_at__isnull=True) | Q(end_at__gte=now))
+            # Priority among currently active banners:
+            # 1) Has end date, does not have start date (emergency notify now).
+            # 2) Has start date and has end date (active within a time window).
+            # 3) Has start date, does not have end date (started long-term).
+            # 4) Does not have start date and does not have end date (always-on fallback).
+            .annotate(
+                display_priority=Case(
+                    When(start_at__isnull=True, end_at__isnull=False, then=0),
+                    When(start_at__isnull=False, end_at__isnull=False, then=1),
+                    When(start_at__isnull=False, end_at__isnull=True, then=2),
+                    default=3,
+                    output_field=IntegerField(),
+                )
+            )
+            .order_by("display_priority", "-start_at", "-updated_at", "-created_at")
+            .first()
+        )
+
+        if not notification:
+            return Response(
+                {
+                    "notification_id": None,
+                    "is_enabled": False,
+                    "state": Notification.State.DISABLED,
+                    "message": "",
+                    "start_at": None,
+                    "end_at": None,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        return Response(
+            NotificationSerializer(notification).data,
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["post"], url_path="enabled")
+    def set_enabled(self, request, pk=None):
+        # POST /notifications/:id/enabled toggles only the is_enabled flag.
+        notification = self.get_object()
+        serializer = NotificationEnabledSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        notification.is_enabled = serializer.validated_data["is_enabled"]
+        notification.save(update_fields=["is_enabled", "updated_at"])
+
+        return Response(
+            NotificationSerializer(notification).data,
+            status=status.HTTP_200_OK,
+        )

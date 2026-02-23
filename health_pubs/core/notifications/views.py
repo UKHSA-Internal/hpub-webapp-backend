@@ -5,6 +5,7 @@ from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
@@ -16,6 +17,36 @@ class NotificationViewSet(viewsets.ModelViewSet):
     queryset = Notification.objects.all()
     serializer_class = NotificationSerializer
     authentication_classes = [SessionAuthentication, CustomTokenAuthentication]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        # Admin list supports filtering by derived state via ?state=ENABLED|SCHEDULED|DISABLED.
+        if getattr(self, "action", None) != "list":
+            return queryset
+
+        state = self.request.query_params.get("state")
+        if not state:
+            return queryset
+
+        state = state.upper()
+        now = timezone.now()
+
+        if state == Notification.State.ENABLED:
+            return (
+                queryset.filter(is_enabled=True)
+                .filter(Q(start_at__isnull=True) | Q(start_at__lte=now))
+                .filter(Q(end_at__isnull=True) | Q(end_at__gte=now))
+            )
+
+        if state == Notification.State.SCHEDULED:
+            return queryset.filter(is_enabled=True, start_at__gt=now)
+
+        if state == Notification.State.DISABLED:
+            return queryset.filter(Q(is_enabled=False) | Q(is_enabled=True, end_at__lt=now))
+
+        allowed = ", ".join(Notification.State.values)
+        raise ValidationError({"state": f"Invalid state. Use one of: {allowed}."})
 
     def get_permissions(self):
         # Only the public active banner endpoint is open; all other notification actions require admin access.
@@ -37,16 +68,14 @@ class NotificationViewSet(viewsets.ModelViewSet):
             .filter(Q(start_at__isnull=True) | Q(start_at__lte=now))
             .filter(Q(end_at__isnull=True) | Q(end_at__gte=now))
             # Priority among currently active banners:
-            # 1) Has end date, does not have start date (emergency notify now).
-            # 2) Has start date and has end date (active within a time window).
-            # 3) Has start date, does not have end date (started long-term).
-            # 4) Does not have start date and does not have end date (always-on fallback).
+            # 1) Does not have start date and does not have end date (unplanned emergency).
+            # 2) Has end date, does not have start date (notify now until end date).
+            # 3) Has start date (with or without end date), newest start date first.
             .annotate(
                 display_priority=Case(
-                    When(start_at__isnull=True, end_at__isnull=False, then=0),
-                    When(start_at__isnull=False, end_at__isnull=False, then=1),
-                    When(start_at__isnull=False, end_at__isnull=True, then=2),
-                    default=3,
+                    When(start_at__isnull=True, end_at__isnull=True, then=0),
+                    When(start_at__isnull=True, end_at__isnull=False, then=1),
+                    default=2,
                     output_field=IntegerField(),
                 )
             )

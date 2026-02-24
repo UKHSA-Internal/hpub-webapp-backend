@@ -8,7 +8,7 @@ router.register(r"notifications", NotificationViewSet, basename="notifications")
 
 urlpatterns = [
     path(
-        "frontend/notifications",
+        "frontend/notifications/",
         NotificationViewSet.as_view({"get": "frontend_notification"}),
         name="frontend-notifications",
     ),

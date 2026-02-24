@@ -12,7 +12,6 @@ class NotificationState(models.TextChoices):
 
 
 class Notification(models.Model):
-
     notification_id = models.CharField(
         primary_key=True,
         default=uuid.uuid4,

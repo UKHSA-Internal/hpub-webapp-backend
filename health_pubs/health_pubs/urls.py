@@ -2,7 +2,6 @@ from django.contrib import admin
 from django.urls import include, path
 
 API_PREFIX = "api/v1/"
-API_V2_PREFIX = "api/v2/"
 
 urlpatterns = [
     path("admin/", admin.site.urls),
@@ -25,5 +24,5 @@ urlpatterns = [
     path(f"{API_PREFIX}", include("core.languages.urls")),
     path(f"{API_PREFIX}", include("core.where_to_use.urls")),
     path(f"{API_PREFIX}", include("core.frontend_s3_presigned_url.urls")),
-    path(f"{API_V2_PREFIX}", include("core.notifications.urls")),
+    path("api/v2/", include("core.notifications.urls")),
 ]

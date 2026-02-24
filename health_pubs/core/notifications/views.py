@@ -4,13 +4,12 @@ from django.db.models import Case, IntegerField, Q, When
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.authentication import SessionAuthentication
-from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
-from .models import Notification
-from .serializers import NotificationEnabledSerializer, NotificationSerializer
+from .models import Notification, NotificationState
+from .serializers import NotificationSerializer
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
@@ -32,33 +31,34 @@ class NotificationViewSet(viewsets.ModelViewSet):
         state = state.upper()
         now = timezone.now()
 
-        if state == Notification.State.ENABLED:
+        if state == NotificationState.ENABLED:
             return (
                 queryset.filter(is_enabled=True)
                 .filter(Q(start_at__isnull=True) | Q(start_at__lte=now))
                 .filter(Q(end_at__isnull=True) | Q(end_at__gte=now))
             )
 
-        if state == Notification.State.SCHEDULED:
+        if state == NotificationState.SCHEDULED:
             return queryset.filter(is_enabled=True, start_at__gt=now)
 
-        if state == Notification.State.DISABLED:
-            return queryset.filter(Q(is_enabled=False) | Q(is_enabled=True, end_at__lt=now))
+        if state == NotificationState.DISABLED:
+            return queryset.filter(
+                Q(is_enabled=False) | Q(is_enabled=True, end_at__lt=now)
+            )
 
-        allowed = ", ".join(Notification.State.values)
+        allowed = ", ".join(NotificationState.values)
         raise ValidationError({"state": f"Invalid state. Use one of: {allowed}."})
 
     def get_permissions(self):
-        # Only the public active banner endpoint is open; all other notification actions require admin access.
-        if self.action in ["active"]:
+        # Only the public frontend notification endpoint is open; all other notification actions require admin access.
+        if self.action in ["frontend_notification"]:
             permission_classes = [AllowAny]
         else:
             permission_classes = [IsAuthenticated, IsAdminUser]
         return [permission() for permission in permission_classes]
 
     # Public endpoint for frontend banner check: returns latest active notification or DISABLED fallback.
-    @action(detail=False, methods=["get"], url_path="active")
-    def active(self, request):
+    def frontend_notification(self, request):
         now = timezone.now()
         notification = (
             self.get_queryset()
@@ -88,28 +88,13 @@ class NotificationViewSet(viewsets.ModelViewSet):
                 {
                     "notification_id": None,
                     "is_enabled": False,
-                    "state": Notification.State.DISABLED,
+                    "state": NotificationState.DISABLED,
                     "message": "",
                     "start_at": None,
                     "end_at": None,
                 },
                 status=status.HTTP_200_OK,
             )
-
-        return Response(
-            NotificationSerializer(notification).data,
-            status=status.HTTP_200_OK,
-        )
-
-    @action(detail=True, methods=["post"], url_path="enabled")
-    def set_enabled(self, request, pk=None):
-        # POST /notifications/:id/enabled toggles only the is_enabled flag.
-        notification = self.get_object()
-        serializer = NotificationEnabledSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        notification.is_enabled = serializer.validated_data["is_enabled"]
-        notification.save(update_fields=["is_enabled", "updated_at"])
 
         return Response(
             NotificationSerializer(notification).data,

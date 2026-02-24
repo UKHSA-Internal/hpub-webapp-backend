@@ -5,11 +5,13 @@ from django.db import models
 from django.utils import timezone
 
 
+class NotificationState(models.TextChoices):
+    ENABLED = "ENABLED"
+    SCHEDULED = "SCHEDULED"
+    DISABLED = "DISABLED"
+
+
 class Notification(models.Model):
-    class State(models.TextChoices):
-        ENABLED = "ENABLED"
-        SCHEDULED = "SCHEDULED"
-        DISABLED = "DISABLED"
 
     notification_id = models.CharField(
         primary_key=True,
@@ -41,12 +43,12 @@ class Notification(models.Model):
         now = timezone.now()
 
         if not self.is_enabled:
-            return self.State.DISABLED
+            return NotificationState.DISABLED
 
         if self.start_at and now < self.start_at:
-            return self.State.SCHEDULED
+            return NotificationState.SCHEDULED
 
         if self.end_at and now > self.end_at:
-            return self.State.DISABLED
+            return NotificationState.DISABLED
 
-        return self.State.ENABLED
+        return NotificationState.ENABLED

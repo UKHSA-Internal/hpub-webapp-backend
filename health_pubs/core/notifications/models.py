@@ -17,7 +17,7 @@ class Notification(models.Model):
         default=uuid.uuid4,
         unique=True,
         editable=False,
-        max_length=225,
+        max_length=36,
     )
     is_enabled = models.BooleanField(default=False)
     message = models.TextField(blank=True)

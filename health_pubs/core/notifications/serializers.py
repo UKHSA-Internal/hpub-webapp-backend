@@ -1,0 +1,43 @@
+from rest_framework import serializers
+
+from .models import Notification
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    # Derived from model logic; not saved in the database.
+    state = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = Notification
+        fields = [
+            "notification_id",
+            "is_enabled",
+            "state",
+            "message",
+            "start_at",
+            "end_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["notification_id", "state", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        # Validate the effective time window for both create and update.
+        start_at = attrs.get("start_at")
+        end_at = attrs.get("end_at")
+
+        if self.instance:
+            if "start_at" not in attrs:
+                start_at = self.instance.start_at
+            if "end_at" not in attrs:
+                end_at = self.instance.end_at
+
+        if start_at and end_at and start_at >= end_at:
+            raise serializers.ValidationError(
+                {"end_at": "end_at must be after start_at."}
+            )
+
+        return attrs
+
+    def get_state(self, obj):
+        return obj.state

@@ -2515,6 +2515,13 @@ class ProductStatusUpdateView(APIView):
             editor = getattr(request, "user", None)
             if isinstance(editor, User):
                 product.user_ref = editor
+
+            # A resource must be explicitly re-scheduled after moving live -> draft.
+            if product.status == "live" and new_status == "draft":
+                product.is_scheduled_publish = False
+            elif new_status != "draft":
+                product.is_scheduled_publish = False
+
             product.status = new_status
 
             # If transitioning to "live" and publish_date is not already set, update it to today's date.
@@ -2832,6 +2839,31 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
 
         data = json.loads(request.body)
         logger.info("Received data for update: %s", data)
+
+        # Scheduling state is separate from publish_date because publish_date may be retained
+        # as historical metadata after a resource is moved back to draft.
+        if "publish_date" in data:
+            scheduled = False
+            publish_date_raw = data.get("publish_date")
+            parsed_publish_date = None
+
+            if publish_date_raw:
+                if isinstance(publish_date_raw, str):
+                    try:
+                        parsed_publish_date = datetime.date.fromisoformat(publish_date_raw)
+                    except ValueError:
+                        parsed_publish_date = None
+                elif isinstance(publish_date_raw, datetime.date):
+                    parsed_publish_date = publish_date_raw
+
+            if product.status == "draft" and parsed_publish_date:
+                scheduled = parsed_publish_date > timezone.localdate()
+
+            data["is_scheduled_publish"] = scheduled
+
+        if data.get("status") and data.get("status") != "draft":
+            data["is_scheduled_publish"] = False
+
         product_type = data.get("product_type")
         product_downloads = data.get("product_downloads", {})
 

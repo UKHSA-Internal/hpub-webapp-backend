@@ -40,19 +40,22 @@ class Command(BaseCommand):
             if missing:
                 errors[p.product_code] = missing
                 p.status = "error"
-                p.save(update_fields=["status"])
+                p.is_scheduled_publish = False
+                p.save(update_fields=["status", "is_scheduled_publish"])
                 continue
 
             try:
                 with transaction.atomic():
                     p.status = "live"
-                    p.save(update_fields=["status"])
+                    p.is_scheduled_publish = False
+                    p.save(update_fields=["status", "is_scheduled_publish"])
                     published.append(p.product_code)
             except Exception as exc:
                 logger.exception(f"Failed to publish {p.product_code}: {exc}")
                 errors[p.product_code] = ["database_error"]
                 p.status = "error"
-                p.save(update_fields=["status"])
+                p.is_scheduled_publish = False
+                p.save(update_fields=["status", "is_scheduled_publish"])
 
         # Clear the Django DB cache
         try:

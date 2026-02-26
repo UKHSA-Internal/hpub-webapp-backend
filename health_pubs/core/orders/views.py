@@ -489,15 +489,15 @@ class OrderViewSet(viewsets.ModelViewSet):
             "last_name": clean(getattr(person, "last_name", "")),
             "name": full_name,
             "telephone": clean(getattr(person, "mobile_number", "")),
-            "address_line_1": clean(getattr(address, "address_line1", ""))
-            if address
-            else "",
-            "address_line_2": clean(getattr(address, "address_line2", ""))
-            if address
-            else "",
-            "address_line_3": clean(getattr(address, "address_line3", ""))
-            if address
-            else "",
+            "address_line_1": (
+                clean(getattr(address, "address_line1", "")) if address else ""
+            ),
+            "address_line_2": (
+                clean(getattr(address, "address_line2", "")) if address else ""
+            ),
+            "address_line_3": (
+                clean(getattr(address, "address_line3", "")) if address else ""
+            ),
             "city": clean(getattr(address, "city", "")) if address else "",
             "county": clean(getattr(address, "county", "")) if address else "",
             "postcode": clean(getattr(address, "postcode", "")) if address else "",

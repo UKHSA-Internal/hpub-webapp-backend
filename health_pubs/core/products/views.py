@@ -1907,9 +1907,9 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
                 {
                     "product_code": p.product_code,
                     "product_title": p.product_title,
-                    "summary_of_guidance": p.update_ref.summary_of_guidance
-                    if p.update_ref
-                    else "",
+                    "summary_of_guidance": (
+                        p.update_ref.summary_of_guidance if p.update_ref else ""
+                    ),
                     "product_type": p.update_ref.product_type if p.update_ref else "",
                 }
                 for p in products

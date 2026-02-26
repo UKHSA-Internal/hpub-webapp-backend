@@ -15,6 +15,8 @@ from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from typing import Any, Dict, Optional, Tuple, List
 import argparse
 
+from core.utils import aws_s3_client
+
 # ---------------------------
 # Logging
 # ---------------------------
@@ -276,7 +278,7 @@ def find_local_filename(directory: str, original: str) -> Optional[str]:
 # ---------------------------
 def ensure_s3_object(local_path: str, s3_key: str):
     try:
-        s3.head_object(Bucket=BUCKET_NAME, Key=s3_key)
+        aws_s3_client.get_head_object(Bucket=BUCKET_NAME, Key=s3_key)
         logger.info("    S3 object exists: %s", s3_key)
     except s3.exceptions.ClientError as e:
         code = e.response.get("Error", {}).get("Code", "")

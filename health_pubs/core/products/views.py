@@ -3701,8 +3701,6 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
 
                     # add_child allocates path/depth, then saves
                     parent_page.add_child(instance=product_instance)
-                    product_instance.save()
-                    product_instance.refresh_from_db()
                     return product_instance
 
             except IntegrityError as exc:

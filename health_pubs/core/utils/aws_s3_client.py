@@ -1,4 +1,3 @@
-# core/utils/s3_safe.py
 import boto3
 from django.conf import settings
 

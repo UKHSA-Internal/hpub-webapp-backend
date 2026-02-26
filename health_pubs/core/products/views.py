@@ -3671,7 +3671,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         Attempts up to 3 times to lock the parent and then add the new Product.
         Retries on path-key collisions.
         """
-        logger.info("ProductCreateView:_is_path_collision")
+        logger.info("ProductCreateView:create_product_instance")
         for attempt in range(3):
             try:
                 with transaction.atomic():

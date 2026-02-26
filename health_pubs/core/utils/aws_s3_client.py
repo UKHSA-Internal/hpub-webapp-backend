@@ -12,3 +12,15 @@ def s3_call(method: str, **kwargs):
     if S3_EXPECTED_OWNER and method not in UNSUPPORTED_METHODS:
         kwargs.setdefault("ExpectedBucketOwner", S3_EXPECTED_OWNER)
     return getattr(s3_client, method)(**kwargs)
+
+
+def get_head_object(**kwargs):
+    return s3_call("head_object", **kwargs)
+
+
+def get_object(**kwargs):
+    return s3_call("get_object", **kwargs)
+
+
+def download_file_object(**kwargs):
+    return s3_call("download_fileobj", **kwargs)

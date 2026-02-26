@@ -32,7 +32,11 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         today = timezone.localdate()
-        drafts = Product.objects.filter(status="draft", publish_date=today)
+        drafts = Product.objects.filter(
+            status="draft",
+            publish_date=today,
+            is_scheduled_publish=True,
+        )
 
         published, errors = [], {}
         for p in drafts:

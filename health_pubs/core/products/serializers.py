@@ -385,9 +385,9 @@ class ProductSerializer(serializers.ModelSerializer):
         # Check if the 'product_id' is provided in the request
         product_id = validated_data.get("product_id", None)
         if not product_id:
-            validated_data["product_id"] = (
-                uuid.uuid4()
-            )  # Generate a UUID if no id is provided
+            validated_data[
+                "product_id"
+            ] = uuid.uuid4()  # Generate a UUID if no id is provided
         return super().create(validated_data)
 
 

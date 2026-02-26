@@ -123,6 +123,7 @@ from django.core.exceptions import ValidationError
 
 from django.db.models import Q
 
+from core.utils import logging_utils
 from core.utils.search import (
     build_search_filters,
     annotate_similarity,
@@ -133,7 +134,7 @@ from core.utils.search import (
 
 config = Config()
 
-logger = logging.getLogger(__name__)
+logger = logging_utils.get_logger(__name__)
 
 PRODUCT_CODE_PATTERN = r"^[A-Za-z0-9_-]+$"
 # Constants for log messages
@@ -3426,7 +3427,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
     def post(self, request, *args, **kwargs):
         logger.info("ProductCreateView POST method called")
         data = json.loads(request.body)
-        logger.info("Data received: %s", data)
+        logger.debug("Data received: %s", data)
 
         required_fields = [
             "product_title",
@@ -3534,6 +3535,9 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return JsonResponse(ProductSerializer(product_instance).data, status=201)
 
     def get_program_and_language(self, program_name, language_id, is_uuid):
+        logger.info(
+            f"ProductCreateView::get_program_and_language({program_name}, {language_id}, {is_uuid})"
+        )
         try:
             program = Program.objects.get(programme_name=program_name)
             language_page = (
@@ -3553,6 +3557,9 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
             return None, None, None
 
     def get_product_key_and_version(self, program, product_title, language_id):
+        logger.info(
+            f"ProductCreateView::get_product_key_and_version({program}, {product_title}, {language_id})"
+        )
         product_title_ = product_title.strip()
         existing_product = Product.objects.filter(
             program_name=program.programme_name, product_title__iexact=product_title_
@@ -3571,6 +3578,9 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return product_key, version_number
 
     def mark_previous_versions_archived(self, existing_product, language_id):
+        logger.info(
+            f"ProductCreateView::mark_previous_versions_archived({existing_product}, {language_id})"
+        )
         if not existing_product:
             logger.info("No existing product found; no versions archived.")
             return
@@ -3599,6 +3609,9 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
     def generate_unique_product_code(
         self, program_id, product_key, iso_language_code, version_number
     ):
+        logger.info(
+            f"ProductCreateView::generate_unique_product_code({program_id}, {product_key}, {iso_language_code}, {version_number})"
+        )
         short_program_id = str(program_id)[:5]
         short_product_key = str(product_key)[:4]
         # remove hyphens (and any other non-alphanumerics) from the ISO code:
@@ -3612,6 +3625,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return product_code
 
     def get_or_create_parent_page(self):
+        logger.info(f"ProductCreateView::get_or_create_parent_page")
         try:
             parent_page = Page.objects.get(slug="products")
             logger.info("Parent page 'products' found.")
@@ -3628,6 +3642,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return parent_page
 
     def get_user_instance(self, user_ref_id):
+        logger.info(f"ProductCreateView::get_user_instance({user_ref_id})")
         if user_ref_id:
             try:
                 return User.objects.get(user_id=user_ref_id)
@@ -3641,6 +3656,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return None
 
     def _is_path_collision(self, exc):
+        logger.debug("ProductCreateView:_is_path_collision")
         cause = getattr(exc, "__cause__", None)
         return (
             isinstance(cause, pg_errors.UniqueViolation)
@@ -3655,6 +3671,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         Attempts up to 3 times to lock the parent and then add the new Product.
         Retries on path-key collisions.
         """
+        logger.info("ProductCreateView:_is_path_collision")
         for attempt in range(3):
             try:
                 with transaction.atomic():

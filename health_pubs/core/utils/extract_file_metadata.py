@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse, unquote
-from .s3_safe import s3_call
+from core.utils import aws_s3_client
 import boto3
 from botocore.exceptions import ClientError
 from django.conf import settings
@@ -147,7 +147,7 @@ def _s3_head(url: str) -> Optional[dict]:
     if not b or not k:
         return None
     try:
-        h = s3_call("head_object", Bucket=b, Key=k)
+        h = aws_s3_client.s3_call("head_object", Bucket=b, Key=k)
         return {
             "size": int(h.get("ContentLength", 0)),
             "content_type": h.get("ContentType") or DEFAULT_MIME,
@@ -201,7 +201,7 @@ def _download_s3_to_temp(bucket: str, key: str) -> Optional[Path]:
         fd, path = tempfile.mkstemp(suffix=Path(key).suffix or ".bin")
         os.close(fd)
         with open(path, "wb") as f:
-            s3_call("download_fileobj", Bucket=bucket, Key=key, Fileobj=f)
+            aws_s3_client.s3_call("download_fileobj", Bucket=bucket, Key=key, Fileobj=f)
         return Path(path)
     except Exception as e:
         logger.debug("Download failed s3://%s/%s: %s", bucket, key, e)
@@ -418,7 +418,7 @@ def _image_dimensions_from_s3(
     while start < max_bytes:
         end = min(start + chunk - 1, max_bytes - 1)
         try:
-            obj = s3_call(
+            obj = aws_s3_client.s3_call(
                 "get_object", Bucket=bucket, Key=key, Range=f"bytes={start}-{end}"
             )
             data = obj["Body"].read()
@@ -435,9 +435,9 @@ def _image_dimensions_from_s3(
 
     # small objects: single full fetch if tiny
     try:
-        head = s3_call("head_object", Bucket=bucket, Key=key)
+        head = aws_s3_client.s3_call("head_object", Bucket=bucket, Key=key)
         if int(head.get("ContentLength", 0)) <= 128 * 1024:
-            obj = s3_call("get_object", Bucket=bucket, Key=key)
+            obj = aws_s3_client.s3_call("get_object", Bucket=bucket, Key=key)
             data = obj["Body"].read()
             parser = ImageFile.Parser()
             parser.feed(data)

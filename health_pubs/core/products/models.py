@@ -228,6 +228,10 @@ class Product(Page):
         default=False,
         help_text="When true, suppress all EventBridge events on status changes.",
     )
+    is_scheduled_publish = models.BooleanField(
+        default=False,
+        help_text="Tracks whether a draft is actively scheduled to publish.",
+    )
 
     created_at = models.DateTimeField(
         default=timezone.now,

@@ -327,6 +327,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "status",
             "tag",
             "publish_date",
+            "is_scheduled_publish",
             "is_latest",
             "language_name",
             "user_ref",
@@ -487,4 +488,5 @@ class ProductSearchSerializer(serializers.ModelSerializer):
             "updated_at",
             "publish_date",
             "version_number",
+            "is_scheduled_publish",
         )

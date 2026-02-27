@@ -2507,8 +2507,16 @@ class ProductStatusUpdateView(APIView):
                     status_code=HTTP_404_NOT_FOUND,
                 )
 
+            request_data = self.get_request_data(request)
+            if isinstance(request_data, JsonResponse):
+                return request_data
+
+            action = request_data.get("action")
+            if action == "confirm_schedule_publish":
+                return self._confirm_schedule_publish(product, request)
+
             # Validate and obtain the new status using a helper method.
-            validation = self._validate_status_update(product, request)
+            validation = self._validate_status_update(product, request_data)
             if isinstance(validation, JsonResponse):
                 return validation
             new_status = validation
@@ -2516,6 +2524,13 @@ class ProductStatusUpdateView(APIView):
             editor = getattr(request, "user", None)
             if isinstance(editor, User):
                 product.user_ref = editor
+
+            # A resource must be explicitly re-scheduled after moving back to draft.
+            if product.status != "draft" and new_status == "draft":
+                product.is_scheduled_publish = False
+            elif new_status != "draft":
+                product.is_scheduled_publish = False
+
             product.status = new_status
 
             # If transitioning to "live" and publish_date is not already set, update it to today's date.
@@ -2581,16 +2596,59 @@ class ProductStatusUpdateView(APIView):
         except Product.DoesNotExist:
             return None
 
-    def get_status_from_request(self, request) -> Optional[str]:
-        """Extract the new status from the request body with logging."""
+    def get_request_data(self, request) -> Union[dict, JsonResponse]:
+        """Parse and return request JSON body once for this endpoint."""
         try:
             raw_data = request.body.decode("utf-8")
             logger.info(f"Received request body: {raw_data}")
-            data = json.loads(raw_data)
-            return data.get("status")
+            return json.loads(raw_data)
         except json.JSONDecodeError as e:
             logger.error(f"JSON decode error: {str(e)}")
-            return None
+            return handle_error(
+                ErrorCode.INVALID_DATA,
+                ErrorMessage.INVALID_DATA,
+                status_code=HTTP_400_BAD_REQUEST,
+            )
+
+    def get_status_from_request(self, request_data: dict) -> Optional[str]:
+        """Extract the new status from parsed request data."""
+        return request_data.get("status")
+
+    def _confirm_schedule_publish(self, product: Product, request) -> JsonResponse:
+        """Confirm if resource is in draft state for scheduled publish"""
+        if product.status != "draft":
+            return handle_error(
+                ErrorCode.INVALID_STATUS_TRANSITION,
+                "Only draft resources can be scheduled.",
+                status_code=HTTP_400_BAD_REQUEST,
+            )
+
+        if not product.publish_date or product.publish_date <= timezone.localdate():
+            return handle_error(
+                ErrorCode.INVALID_DATA,
+                "A future publish date is required to schedule publish.",
+                status_code=HTTP_400_BAD_REQUEST,
+            )
+
+        missing_fields = self.check_required_fields(product)
+        if missing_fields:
+            return handle_error(
+                ErrorCode.MISSING_REQUIRED_FIELDS,
+                f"Missing required fields: {', '.join(missing_fields)}",
+                status_code=HTTP_400_BAD_REQUEST,
+            )
+
+        editor = getattr(request, "user", None)
+        if isinstance(editor, User):
+            product.user_ref = editor
+
+        product.is_scheduled_publish = True
+        product.save()
+        invalidate_product_caches(product.product_code)
+        return JsonResponse(
+            {"message": "Resource scheduled for publish successfully."},
+            status=HTTP_200_OK,
+        )
 
     def is_valid_status(self, status: str) -> bool:
         """Check if the provided status is valid."""
@@ -2639,7 +2697,7 @@ class ProductStatusUpdateView(APIView):
         return missing_fields
 
     def _validate_status_update(
-        self, product: Product, request
+        self, product: Product, request_data: dict
     ) -> Union[str, JsonResponse]:
         """
         Validates the status update request. It ensures that:
@@ -2653,7 +2711,7 @@ class ProductStatusUpdateView(APIView):
             new_status (str): If the update is valid.
             JsonResponse: In case of any validation error.
         """
-        new_status = self.get_status_from_request(request)
+        new_status = self.get_status_from_request(request_data)
         if not new_status:
             logger.warning("Missing or invalid status in request body.")
             return handle_error(
@@ -2833,6 +2891,32 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
 
         data = json.loads(request.body)
         logger.info("Received data for update: %s", data)
+
+        # Scheduling confirmation is explicit (confirm-scheduled-publish action).
+        # PATCH should clear stale scheduling state when publish_date becomes invalid/non-future.
+        if "publish_date" in data:
+            publish_date_raw = data.get("publish_date")
+            parsed_publish_date = None
+
+            if publish_date_raw:
+                if isinstance(publish_date_raw, str):
+                    try:
+                        parsed_publish_date = datetime.date.fromisoformat(publish_date_raw)
+                    except ValueError:
+                        parsed_publish_date = None
+                elif isinstance(publish_date_raw, datetime.date):
+                    parsed_publish_date = publish_date_raw
+
+            if (
+                not parsed_publish_date
+                or parsed_publish_date <= timezone.localdate()
+                or product.status != "draft"
+            ):
+                data["is_scheduled_publish"] = False
+
+        if data.get("status") and data.get("status") != "draft":
+            data["is_scheduled_publish"] = False
+
         product_type = data.get("product_type")
         product_downloads = data.get("product_downloads", {})
 
@@ -2906,6 +2990,20 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                     ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
                 )
             serializer.save()
+
+            # Move scheduling state to false if later edits make the draft unpublishable.
+            if (
+                product.status == "draft"
+                and product.is_scheduled_publish
+                and (
+                    not product.publish_date
+                    or product.publish_date <= timezone.localdate()
+                    or ProductStatusUpdateView().check_required_fields(product)
+                )
+            ):
+                product.is_scheduled_publish = False
+                product.save(update_fields=["is_scheduled_publish"])
+
             logger.info(
                 "Product patched successfully for product_code=%s", decoded_product_code
             )

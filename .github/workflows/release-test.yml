@@ -1,0 +1,66 @@
+name: "Create Release Tag and Retag Images (TEST)"
+
+on:
+  workflow_run:
+    workflows: ["Build and Test"]
+    types:
+      - completed
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  APP_NAME: ${{ vars.APP_NAME }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_NAMESPACE: ${{ vars.ECR_NAMESPACE }}
+
+jobs:
+  release:
+    name: Tag and release container image
+    runs-on: ubuntu-latest
+
+    # Run only when build succeeded AND branch = production-ramon
+    if: |
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'production-ramon')
+
+    outputs:
+      release_tag: ${{ steps.tag_bump.outputs.new_tag }
+
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+
+      - uses: ukhsa-collaboration/devops-github-actions/.github/actions/github-bump-tag@ea0aa2a80fccfb2a19e1c71443a0a60b85f618a8 # v0.11.0
+        id: tag_bump
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WITH_V: true
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
+          role-session-name: retag-image-${{ github.sha }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr-release
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2
+
+      # docker pull + tag + push
+      - name: Pull, retag, and push Application image for release (with env name)
+        id: push
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr-release.outputs.registry }}
+          COMMIT_HASH: ${{ github.sha }}
+        run: |
+          docker pull $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$COMMIT_HASH
+
+          # Tag and push environment-specific tags
+          ENVIRONMENTS="uat preprod prod"
+          for env in $ENVIRONMENTS; do
+            docker tag $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$COMMIT_HASH $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${env}-${{ steps.tag_bump.outputs.new_tag }}
+            docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${env}-${{ steps.tag_bump.outputs.new_tag }}
+          done

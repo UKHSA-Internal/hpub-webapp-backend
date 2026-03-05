@@ -93,13 +93,15 @@ def prepare_product_data(product_instance, required_fields_enum, status):
 
     getattr(update, "product_type", "") or ""
     uom = getattr(update, "unit_of_measure", None)
+    environment = config.get_environment()
 
     # DRAFT PAYLOAD
     if status == "draft":
         return {
             "publicationId": product_instance.product_code,
-            "title": product_instance.product_title,
+            "title": f"{product_instance.language_name}-{product_instance.product_title}",
             "status": normalised,
+            "environment": environment,
             "maxOrder": [],
             "uom": uom,
             "runToZero": getattr(update, "run_to_zero", False),
@@ -117,9 +119,9 @@ def prepare_product_data(product_instance, required_fields_enum, status):
     # LIVE PAYLOAD
     full = {
         "publicationId": product_instance.product_code,
-        "title": product_instance.product_title,
+        "title": f"{product_instance.language_name}-{product_instance.product_title}",
         "status": normalised,
-        "languageName": product_instance.language_name,
+        "environment": environment,
         "maxOrder": max_order,
         "uom": uom,
         "runToZero": getattr(update, "run_to_zero", False),

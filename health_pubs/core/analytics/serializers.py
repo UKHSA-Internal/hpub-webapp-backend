@@ -8,9 +8,12 @@ class AnalyticsKPISerializer(serializers.ModelSerializer):
         model = AnalyticsKPI
         fields = [
             "kpi_id",
-            "period",
-            "website_visits_sum",
-            "feedback_form_submissions",
+            "year",
+            "month",
+            "user_satisfaction_score",
+            "digital_take_up_percentage",
+            "cost_per_transaction",
+            "order_completion_rate_percentage",
             "created_at",
             "updated_at",
         ]

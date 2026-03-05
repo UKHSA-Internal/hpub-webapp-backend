@@ -18,34 +18,39 @@ from .serializers import AnalyticsKPISerializer
 
 class AnalyticsDatasetView(APIView):
     """Provides dataset summary and discoverable links to CSV and metadata endpoints."""
+
     permission_classes = [AllowAny]
 
     def get(self, request, *args, **kwargs):
         summary = AnalyticsKPI.objects.aggregate(
             row_count=Count("kpi_id"),
-            latest_period=Max("period"),
+            latest_year=Max("year"),
         )
 
-        latest_period = summary["latest_period"]
+        latest_year = summary["latest_year"]
+        latest_month = None
+        if latest_year is not None:
+            latest_month = (
+                AnalyticsKPI.objects.filter(year=latest_year).aggregate(latest=Max("month"))["latest"]
+            )
+
         return JsonResponse(
             {
-                "name": "Find Public Health Resources KPI Dataset",
-                "description": "Monthly KPI dataset for data.gov.uk harvesting.",
-                "csv_url": request.build_absolute_uri(
-                    reverse("analytics_data_csv")
-                ),
-                "metadata_url": request.build_absolute_uri(
-                    reverse("analytics_metadata")
-                ),
+                "name": "HPUB KPI dataset",
+                "description": "Dataset presenting monthly performance metrics for the Find Public Health Resources service. The KPIs track user satisfaction, order completion rate, digital take up and cost per transaction. Data is sourced from service analytics platforms including Power BI and Google Analytics.",
+                "csv_url": request.build_absolute_uri(reverse("analytics_data_csv")),
+                "metadata_url": request.build_absolute_uri(reverse("analytics_metadata")),
                 "row_count": summary["row_count"],
-                "latest_period": latest_period.isoformat() if latest_period else None,
+                "latest_year": latest_year,
+                "latest_month": latest_month,
             },
             status=status.HTTP_200_OK,
         )
 
 
 class AnalyticsCsvView(APIView):
-    """Serves public KPI CSV on GET and allows admin update/insert KPI rows on POST."""
+    """Serves public KPI CSV on GET and allows admin upsert KPI rows on POST."""
+
     authentication_classes = [SessionAuthentication, CustomTokenAuthentication]
 
     def get_permissions(self):
@@ -57,44 +62,96 @@ class AnalyticsCsvView(APIView):
 
     def get(self, request, *args, **kwargs):
         response = HttpResponse(content_type="text/csv; charset=utf-8")
-        response["Content-Disposition"] = 'inline; filename="analytics_kpi_data.csv"'
+        response["Content-Disposition"] = 'inline; filename="HPUB_analytics_kpi_data.csv"'
 
         writer = csv.writer(response)
         writer.writerow(
             [
-                "period",
-                "website_visits_sum",
-                "feedback_form_submissions",
+                "Year",
+                "Month",
+                "User Satisfaction Score",
+                "Digital Take-up",
+                "Cost per Transaction",
+                "Order Completion Rate",
             ]
         )
 
-        for item in AnalyticsKPI.objects.all().order_by("period"):
+        for item in AnalyticsKPI.objects.all().order_by("year", "month"):
             writer.writerow(
                 [
-                    item.period.isoformat(),
-                    item.website_visits_sum,
-                    item.feedback_form_submissions,
+                    item.year,
+                    item.month,
+                    item.user_satisfaction_score,
+                    item.digital_take_up_percentage,
+                    item.cost_per_transaction,
+                    item.order_completion_rate_percentage,
                 ]
             )
 
         return response
 
     def post(self, request, *args, **kwargs):
-        period = request.data.get("period")
-        if not period:
+        payload = request.data.copy()
+
+        year = payload.get("year")
+        month = payload.get("month")
+
+        try:
+            year = int(year)
+            month = int(month)
+        except (TypeError, ValueError):
             return JsonResponse(
-                {"error": "period is required (YYYY-MM-DD)."},
+                {
+                    "error": "year and month are required and must be integers (for example year=2026, month=2)."
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        existing = AnalyticsKPI.objects.filter(period=period).first()
-        serializer = AnalyticsKPISerializer(instance=existing, data=request.data)
+        if month < 1 or month > 12:
+            return JsonResponse(
+                {"error": "month must be between 1 and 12."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        required_metric_fields = [
+            "user_satisfaction_score",
+            "digital_take_up_percentage",
+            "cost_per_transaction",
+            "order_completion_rate_percentage",
+        ]
+
+        submitted_metrics = {}
+        missing_fields = []
+        for field_name in required_metric_fields:
+            value = payload.get(field_name)
+            if value is None or str(value).strip() == "":
+                missing_fields.append(field_name)
+            else:
+                submitted_metrics[field_name] = str(value).strip()
+
+        if missing_fields:
+            return JsonResponse(
+                {
+                    "error": "Missing required metric fields.",
+                    "missing_fields": missing_fields,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Use POST as an upsert by business key (year+month), so admins do not need to look up kpi_id for updates.
+        existing = AnalyticsKPI.objects.filter(year=year, month=month).first()
+        serializer = AnalyticsKPISerializer(
+            instance=existing,
+            data={
+                "year": year,
+                "month": month,
+                **submitted_metrics,
+            },
+        )
         serializer.is_valid(raise_exception=True)
         kpi = serializer.save()
 
-        status_code = (
-            status.HTTP_200_OK if existing else status.HTTP_201_CREATED
-        )
+        status_code = status.HTTP_200_OK if existing else status.HTTP_201_CREATED
         return JsonResponse(
             AnalyticsKPISerializer(kpi).data,
             status=status_code,
@@ -103,6 +160,7 @@ class AnalyticsCsvView(APIView):
 
 class AnalyticsMetadataView(APIView):
     """Returns DCAT-style metadata used by external harvester data.gov.uk."""
+
     permission_classes = [AllowAny]
 
     def get(self, request, *args, **kwargs):
@@ -128,7 +186,18 @@ class AnalyticsMetadataView(APIView):
             "issued": issued_date,
             "@type": "dcat:Dataset",
             "modified": modified_date,
-            "keyword": ["kpi", "website", "feedback"],
+            "keyword": [
+                "health",
+                "resources",
+                "vaccinations",
+                "diseases",
+                "pandemic",
+                "videos",
+                "posters",
+                "stickers",
+                "public health",
+                "health care",
+            ],
             "contactPoint": {
                 "@type": "vcard:Contact",
                 "fn": "Find Public Health Resources",
@@ -139,10 +208,7 @@ class AnalyticsMetadataView(APIView):
                 "name": "UK Health Security Agency",
             },
             "identifier": request.build_absolute_uri(reverse("analytics_metadata")),
-            "description": (
-                "Monthly KPI data for HPUB service performance, including website "
-                "visits and submitted feedback forms."
-            ),
+            "description": "Dataset presenting monthly performance metrics for the Find Public Health Resources service. The KPIs track user satisfaction, order completion rate, digital take up and cost per transaction. Data is sourced from service analytics platforms including Power BI and Google Analytics.",
             "title": "Find Public Health Resources",
             "distribution": [
                 {

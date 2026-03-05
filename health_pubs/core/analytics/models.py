@@ -11,11 +11,20 @@ class AnalyticsKPI(models.Model):
         editable=False,
         max_length=36,
     )
-    period = models.DateField(unique=True)
-    website_visits_sum = models.PositiveIntegerField(default=0)
-    feedback_form_submissions = models.PositiveIntegerField(default=0)
+    year = models.PositiveSmallIntegerField()
+    month = models.PositiveSmallIntegerField()
+    user_satisfaction_score = models.CharField(max_length=50)
+    digital_take_up_percentage = models.CharField(max_length=50)
+    cost_per_transaction = models.CharField(max_length=50)
+    order_completion_rate_percentage = models.CharField(max_length=50)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["period"]
+        ordering = ["year", "month"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["year", "month"],
+                name="unique_analytics_kpi_year_month",
+            )
+        ]

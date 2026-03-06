@@ -2901,7 +2901,9 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
             if publish_date_raw:
                 if isinstance(publish_date_raw, str):
                     try:
-                        parsed_publish_date = datetime.date.fromisoformat(publish_date_raw)
+                        parsed_publish_date = datetime.date.fromisoformat(
+                            publish_date_raw
+                        )
                     except ValueError:
                         parsed_publish_date = None
                 elif isinstance(publish_date_raw, datetime.date):

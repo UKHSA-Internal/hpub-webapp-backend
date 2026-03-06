@@ -25,7 +25,7 @@ class ProgramSerializer(serializers.ModelSerializer):
         # Check if the 'program_id' is provided in the request
         program_id = validated_data.get("program_id", None)
         if not program_id:
-            validated_data[
-                "program_id"
-            ] = uuid.uuid4()  # Generate a UUID if no id is provided
+            validated_data["program_id"] = (
+                uuid.uuid4()
+            )  # Generate a UUID if no id is provided
         return super().create(validated_data)

@@ -7,7 +7,9 @@ from core.products.models import Product
 from core.products.serializers import ProductUpdateSerializer
 from core.utils.cron_lock import singleton_cron
 
-logger = logging.getLogger(__name__)
+from core.utils import logging_utils
+
+logger = logging_utils.get_logger(__name__)
 
 
 @singleton_cron(lock_id=20240415)
@@ -31,6 +33,7 @@ class Command(BaseCommand):
     help = "Publish all draft products whose publish_date is today at 00:00"
 
     def handle(self, *args, **options):
+        logger.info("publish_scheduled_products::handle")
         today = timezone.localdate()
         drafts = Product.objects.filter(
             status="draft",

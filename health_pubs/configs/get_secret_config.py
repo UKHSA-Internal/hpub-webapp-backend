@@ -194,6 +194,11 @@ class Config:
         return Config.get_value(key, is_secret=False)
 
     @staticmethod
+    def get_environment():
+        """Fetch current environment name."""
+        return Config.get_value("ENVIRONMENT", is_secret=False)
+
+    @staticmethod
     def get_gov_uk_notify_email_template_id():
         return Config.get_value("GOV_UK_NOTIFY_EMAIL_TEMPLATE_ID", is_secret=False)
 

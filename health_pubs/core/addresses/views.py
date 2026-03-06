@@ -244,7 +244,7 @@ class AddressViewSet(viewsets.ModelViewSet):
         if not matches:
             return Response(
                 {"error": "No addresses found in England with that postcode."},
-                status=status.HTTP_404_NOT_FOUND,
+                status=status.HTTP_400_BAD_REQUEST,
             )
         return Response({"matchedAddresses": matches}, status=status.HTTP_200_OK)
 

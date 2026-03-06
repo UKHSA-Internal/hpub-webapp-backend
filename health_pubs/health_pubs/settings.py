@@ -188,7 +188,7 @@ REST_FRAMEWORK = {
 # ================= Cron =================
 CRONJOBS = [
     ("0 7 * * *", "core.products.cron.CheckDraftProductsCronJob.do"),
-    ("0 0 * * *", "core.products.cron.PublishScheduledProductsCronJob.do"),
+    ("0 8 * * *", "core.products.cron.PublishScheduledProductsCronJob.do"),
 ]
 
 # ================= URLs & WSGI =================

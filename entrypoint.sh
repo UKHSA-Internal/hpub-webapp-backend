@@ -147,5 +147,5 @@ echo "Starting Gunicorn…"
 GUNICORN_WORKERS=3
 GUNICORN_THREADS=4
 GUNICORN_BACKLOG=2048
-GUNICORN_TIMEOUT=600
+GUNICORN_TIMEOUT=100 # ALB timeout is currently 2 minutes (120s)
 exec gunicorn health_pubs.wsgi:application --bind 0.0.0.0:8000 --workers "${GUNICORN_WORKERS}" --threads "${GUNICORN_THREADS}" --backlog "${GUNICORN_BACKLOG}" --timeout "${GUNICORN_TIMEOUT}" --graceful-timeout 30 --keep-alive 5

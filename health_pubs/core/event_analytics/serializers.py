@@ -20,7 +20,7 @@ class AnalyticsEventSerializer(serializers.ModelSerializer):
         # Check if the 'event_analytics_id' is provided in the request
         event_analytics_id = validated_data.get("event_analytics_id", None)
         if not event_analytics_id:
-            validated_data["event_analytics_id"] = (
-                uuid.uuid4()
-            )  # Generate a UUID if no id is provided
+            validated_data[
+                "event_analytics_id"
+            ] = uuid.uuid4()  # Generate a UUID if no id is provided
         return super().create(validated_data)

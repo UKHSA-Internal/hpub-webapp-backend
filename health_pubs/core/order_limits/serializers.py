@@ -37,7 +37,7 @@ class OrderLimitPageSerializer(serializers.ModelSerializer):
         # Check if the 'order_limit_id' is provided in the request
         order_limit_id = validated_data.get("order_limit_id", None)
         if not order_limit_id:
-            validated_data["order_limit_id"] = (
-                uuid.uuid4()
-            )  # Generate a UUID if no id is provided
+            validated_data[
+                "order_limit_id"
+            ] = uuid.uuid4()  # Generate a UUID if no id is provided
         return super().create(validated_data)

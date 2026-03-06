@@ -33,7 +33,7 @@ class Command(BaseCommand):
     help = "Publish all draft products whose publish_date is today at 00:00"
 
     def handle(self, *args, **options):
-        logger.info('publish_scheduled_products::handle')
+        logger.info("publish_scheduled_products::handle")
         today = timezone.localdate()
         drafts = Product.objects.filter(
             status="draft",

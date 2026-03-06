@@ -144,4 +144,7 @@ echo "Scheduled: publish_scheduled_products at 16:50 GMT daily."
 # -----------------------------------------------------------------------------
 echo "=============================="
 echo "Starting Gunicorn…"
-exec gunicorn health_pubs.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 600 --graceful-timeout 30 --keep-alive 5
+GUNICORN_WORKERS=3
+GUNICORN_THREADS=4
+GUNICORN_BACKLOG=2048
+exec gunicorn health_pubs.wsgi:application --bind 0.0.0.0:8000 --workers "${GUNICORN_WORKERS}" --threads "${GUNICORN_THREADS}" --backlog "${GUNICORN_BACKLOG}" --timeout 600 --graceful-timeout 30 --keep-alive 5

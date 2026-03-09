@@ -1,4 +1,5 @@
 from collections import defaultdict
+from hmac import compare_digest
 import datetime
 import hashlib
 import json
@@ -55,6 +56,9 @@ from core.users.permissions import (
 from core.establishments.models import Establishment
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from core.utils.extract_file_metadata import get_file_metadata
+from core.products.management.commands.publish_scheduled_products import (
+    run_scheduled_publish,
+)
 from core.utils.generate_s3_presigned_url import (
     generate_inline_presigned_urls,
     generate_presigned_urls,
@@ -4930,4 +4934,46 @@ class IncompleteProductsView(APIView):
         return JsonResponse(incomplete, safe=False)
 
 
-#
+# Admin-only endpoint for manually triggering scheduled publish.
+class ScheduledPublishAdminView(APIView):
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request, *args, **kwargs):
+        published, errors = run_scheduled_publish()
+        return Response(
+            {
+                "published": published,
+                "errors": errors,
+                "published_count": len(published),
+                "error_count": len(errors),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+# Internal endpoint used by the scheduled Lambda trigger.
+class ScheduledPublishTriggerView(APIView):
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        api_key = request.headers.get("Api-Key", "")
+        expected_api_key = settings.APS_API_KEY
+
+        if not expected_api_key or not compare_digest(api_key, expected_api_key):
+            return Response(
+                {"message": "Unauthorized."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        published, errors = run_scheduled_publish()
+        return Response(
+            {
+                "published": published,
+                "errors": errors,
+                "published_count": len(published),
+                "error_count": len(errors),
+            },
+            status=status.HTTP_200_OK,
+        )

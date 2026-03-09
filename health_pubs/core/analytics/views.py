@@ -16,6 +16,25 @@ from .models import AnalyticsKPI
 from .serializers import AnalyticsKPISerializer
 
 
+def get_frontend_url():
+    return getattr(settings, "HPUB_FRONT_END_URL", "")
+
+
+def get_analytics_description():
+    frontend_url = get_frontend_url()
+    service_link = (
+        f'<a href="{frontend_url}">Discover the health resource library</a>'
+        if frontend_url
+        else "Discover the health resource library"
+    )
+    return (
+        "Dataset presenting monthly performance metrics for the "
+        f"Find Public Health Resources service - {service_link}<br><br>"
+        "The KPIs track user satisfaction, order completion rate, digital take up and cost per transaction.<br><br>"
+        "Data is sourced from service analytics platforms including Power BI and Google Analytics."
+    )
+
+
 class AnalyticsDatasetView(APIView):
     """Provides dataset summary and discoverable links to CSV and metadata endpoints."""
 
@@ -37,7 +56,7 @@ class AnalyticsDatasetView(APIView):
         return JsonResponse(
             {
                 "name": "HPUB KPI dataset",
-                "description": "Dataset presenting monthly performance metrics for the Find Public Health Resources service. The KPIs track user satisfaction, order completion rate, digital take up and cost per transaction. Data is sourced from service analytics platforms including Power BI and Google Analytics.",
+                "description": get_analytics_description(),
                 "csv_url": request.build_absolute_uri(reverse("analytics_data_csv")),
                 "metadata_url": request.build_absolute_uri(reverse("analytics_metadata")),
                 "row_count": summary["row_count"],
@@ -182,7 +201,7 @@ class AnalyticsMetadataView(APIView):
 
         metadata = {
             "accessLevel": "public",
-            "landingPage": getattr(settings, "HPUB_FRONT_END_URL", ""),
+            "landingPage": get_frontend_url(),
             "issued": issued_date,
             "@type": "dcat:Dataset",
             "modified": modified_date,
@@ -208,7 +227,7 @@ class AnalyticsMetadataView(APIView):
                 "name": "UK Health Security Agency",
             },
             "identifier": request.build_absolute_uri(reverse("analytics_metadata")),
-            "description": "Dataset presenting monthly performance metrics for the Find Public Health Resources service. The KPIs track user satisfaction, order completion rate, digital take up and cost per transaction. Data is sourced from service analytics platforms including Power BI and Google Analytics.",
+            "description": get_analytics_description(),
             "title": "Find Public Health Resources",
             "distribution": [
                 {

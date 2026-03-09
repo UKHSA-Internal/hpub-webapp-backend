@@ -4934,6 +4934,7 @@ class IncompleteProductsView(APIView):
         return JsonResponse(incomplete, safe=False)
 
 
+# Admin-only endpoint for manually triggering scheduled publish.
 class ScheduledPublishAdminView(APIView):
     authentication_classes = [CustomTokenAuthentication]
     permission_classes = [IsAuthenticated, IsAdminUser]
@@ -4951,6 +4952,7 @@ class ScheduledPublishAdminView(APIView):
         )
 
 
+# Internal endpoint used by the scheduled Lambda trigger.
 class ScheduledPublishTriggerView(APIView):
     authentication_classes: list = []
     permission_classes = [AllowAny]

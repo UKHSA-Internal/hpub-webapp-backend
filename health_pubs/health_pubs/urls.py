@@ -25,4 +25,5 @@ urlpatterns = [
     path(f"{API_PREFIX}", include("core.where_to_use.urls")),
     path(f"{API_PREFIX}", include("core.frontend_s3_presigned_url.urls")),
     path("api/v2/", include("core.notifications.urls")),
+    path("api/v2/", include("core.analytics.urls")),
 ]

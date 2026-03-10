@@ -22,6 +22,8 @@ from .views import (
     ProductViewSet,
     ProductAutocompleteView,
     ProductCheckExistingView,
+    ScheduledPublishAdminView,
+    ScheduledPublishTriggerView,
 )
 
 router = DefaultRouter()
@@ -51,6 +53,16 @@ urlpatterns = [
         "search/autocomplete/",
         ProductAutocompleteView.as_view(),
         name="product-autocomplete",
+    ),
+    path(
+        "scheduled-publish/admin/",
+        ScheduledPublishAdminView.as_view(),
+        name="publish-scheduled-admin",
+    ),
+    path(
+        "scheduled-publish/",
+        ScheduledPublishTriggerView.as_view(),
+        name="publish-scheduled-trigger",
     ),
     path("user_filter/", ProductUsersFilterView.as_view(), name="user-product-filter"),
     path(

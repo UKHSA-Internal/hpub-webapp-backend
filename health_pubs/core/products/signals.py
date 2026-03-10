@@ -111,7 +111,7 @@ def prepare_product_data(product_instance, required_fields_enum, status):
             "invoicingClient": invoicing_client.invoice_client.value,
             "productGroup": product_group.product_group_name.value,
             "minimumStockLevel": 0,
-            "relatedArticle": "",
+            "relatedArticle": product_instance.file_url,
             "stockOwner": [getattr(update, "stock_owner_email_address", "")],
             "stockReferral": [getattr(update, "order_referral_email_address", "")],
         }

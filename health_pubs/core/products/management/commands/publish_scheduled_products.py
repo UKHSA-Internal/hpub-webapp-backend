@@ -1,8 +1,12 @@
 import logging
+from datetime import date
+from typing import Dict, List, Optional, Tuple
+
 from django.core.management.base import BaseCommand
-from django.utils import timezone
 from django.core.cache import caches
 from django.db import transaction
+from django.utils import timezone
+
 from core.products.models import Product
 from core.products.serializers import ProductUpdateSerializer
 from core.utils.cron_lock import singleton_cron
@@ -29,47 +33,60 @@ def _find_missing_fields(product):
     return missing
 
 
+def run_scheduled_publish(
+    today: Optional[date] = None,
+) -> Tuple[List[str], Dict[str, List[str]]]:
+    logger.info("publish_scheduled_products::handle")
+    target_date = today or timezone.localdate()
+    drafts = Product.objects.filter(
+        status="draft",
+        publish_date=target_date,
+        is_scheduled_publish=True,
+    )
+
+    published: List[str] = []
+    errors: Dict[str, List[str]] = {}
+    for product in drafts:
+        missing = _find_missing_fields(product)
+        if missing:
+            errors[product.product_code] = missing
+            product.status = "error"
+            product.is_scheduled_publish = False
+            product.save(update_fields=["status", "is_scheduled_publish"])
+            continue
+
+        try:
+            with transaction.atomic():
+                product.status = "live"
+                product.is_scheduled_publish = False
+                product.save(update_fields=["status", "is_scheduled_publish"])
+                published.append(product.product_code)
+        except Exception as exc:
+            logger.exception(f"Failed to publish {product.product_code}: {exc}")
+            errors[product.product_code] = ["database_error"]
+            product.status = "error"
+            product.is_scheduled_publish = False
+            product.save(update_fields=["status", "is_scheduled_publish"])
+
+    try:
+        caches["default"].clear()
+    except Exception:
+        logger.exception("Failed to clear cache after publish job")
+
+    logger.info(f"Published: {published}")
+    if errors:
+        logger.warning(f"Errors: {errors}")
+
+    return published, errors
+
+
 class Command(BaseCommand):
-    help = "Publish all draft products whose publish_date is today at 00:00"
+    help = "Publish all draft products whose publish_date is today at 01:00"
 
     def handle(self, *args, **options):
-        logger.info("publish_scheduled_products::handle")
-        today = timezone.localdate()
-        drafts = Product.objects.filter(
-            status="draft",
-            publish_date=today,
-            is_scheduled_publish=True,
+        published, errors = run_scheduled_publish()
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"Published {len(published)} products; {len(errors)} products failed validation."
+            )
         )
-
-        published, errors = [], {}
-        for p in drafts:
-            missing = _find_missing_fields(p)
-            if missing:
-                errors[p.product_code] = missing
-                p.status = "error"
-                p.is_scheduled_publish = False
-                p.save(update_fields=["status", "is_scheduled_publish"])
-                continue
-
-            try:
-                with transaction.atomic():
-                    p.status = "live"
-                    p.is_scheduled_publish = False
-                    p.save(update_fields=["status", "is_scheduled_publish"])
-                    published.append(p.product_code)
-            except Exception as exc:
-                logger.exception(f"Failed to publish {p.product_code}: {exc}")
-                errors[p.product_code] = ["database_error"]
-                p.status = "error"
-                p.is_scheduled_publish = False
-                p.save(update_fields=["status", "is_scheduled_publish"])
-
-        # Clear the Django DB cache
-        try:
-            caches["default"].clear()
-        except Exception:
-            logger.exception("Failed to clear cache after publish job")
-
-        logger.info(f"Published: {published}")
-        if errors:
-            logger.warning(f"Errors: {errors}")

@@ -6,11 +6,13 @@ from .views import (
     DeleteAllLanguagesViewSet,
     LanguageCreateViewSet,
     LanguageListViewSet,
+    LanguageFilteredListViewSet,
 )
 
 router = DefaultRouter()
 router.register(r"languages/create", LanguageCreateViewSet, basename="language-create")
 router.register(r"languages/list", LanguageListViewSet, basename="language-list")
+router.register(r"languages/filtered-list", LanguageFilteredListViewSet, basename="language-filted-list")
 router.register(
     r"languages/bulk-upload", BulkLanguageUploadViewSet, basename="language-bulk-upload"
 )

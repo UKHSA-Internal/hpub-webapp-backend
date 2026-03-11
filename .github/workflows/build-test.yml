@@ -44,7 +44,6 @@ jobs:
     name: Build & push image to ECR
     runs-on: ubuntu-latest
     needs: test
-    if: github.event_name == 'push' && (github.ref_name == 'main-ramon' || github.ref_name == 'production-ramon')
     steps:
       - uses: actions/checkout@v4
 

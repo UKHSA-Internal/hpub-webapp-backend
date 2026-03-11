@@ -2,7 +2,7 @@ name: "Create Release Tag and Retag Images (TEST)"
 
 on:
   workflow_run:
-    workflows: ["Build and Test"]
+    workflows: ["WIP Build & Test"]
     types:
       - completed
   workflow_dispatch: {}

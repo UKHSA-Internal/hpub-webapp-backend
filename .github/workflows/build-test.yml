@@ -64,7 +64,7 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         with:
           context: .
-          # FIXED: Pushes on any 'push' event so that subsequent Release/Hotfix jobs can pull the image
+          # TODO-- Is this right? run on any push so that hotfix can run
           push: ${{ github.event_name == 'push' }}
           tags: |
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ github.sha }}
@@ -75,7 +75,7 @@ jobs:
   release:
     name: Tag and release container image
     runs-on: ubuntu-latest
-    # FIXED: Added 'main' to triggers at the top to make this job reachable
+    # TODO: Added 'main' to triggers at the top to make this job reachable
     if: github.ref == 'refs/heads/main-ramon' && github.event_name == 'push'
     environment: dev
     permissions:
@@ -127,8 +127,6 @@ jobs:
       id-token: write
       actions: read
     needs: build
-    outputs:
-      hotfix_tag: ${{ env.HOTFIX_TAG }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -193,7 +191,7 @@ jobs:
       max-parallel: 1
       matrix:
         environment: ["dev", "test"]
-    # FIXED: Logic to run if either standard release OR hotfix succeeds
+    # TODO: Logic to run if either standard release OR hotfix succeeds
     if: |
       always() &&
       (needs.release.result == 'success' || needs.release-hotfix.result == 'success') &&

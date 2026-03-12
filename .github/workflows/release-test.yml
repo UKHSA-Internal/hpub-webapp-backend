@@ -1,8 +1,8 @@
-name: "Create Release Tag and Retag Images (TEST)"
+name: "WIP: Create image tag"
 
 on:
   workflow_run:
-    workflows: ["WIP Build & Test"]   # MUST MATCH EXACTLY
+    workflows: ["WIP Build & Test"]
     types:
       - completed
   workflow_dispatch: {}

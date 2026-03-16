@@ -227,7 +227,7 @@ jobs:
     needs:
       - build
       - release
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.release.result == 'success'
+    if: github.ref == 'refs/heads/main-ramon' && github.event_name == 'push' && needs.release.result == 'success'
     permissions:
       contents: write
       id-token: write

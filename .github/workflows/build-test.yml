@@ -122,8 +122,8 @@ jobs:
             docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${env}-${{ steps.tag_bump.outputs.new_tag }}
           done
 
-   deploy_to_nonprod:
-    name: Deploy build to env: ${{ matrix.environment }}
+  deploy_to_nonprod:
+    name: Deploy build to ${{ matrix.environment }}
     runs-on: ubuntu-latest
     environment: ${{ matrix.environment }}
     strategy:

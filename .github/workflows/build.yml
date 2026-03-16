@@ -267,21 +267,29 @@ jobs:
         env:
           environment: ${{ matrix.environment }}
         run: |
-          if [ "$environment" == "dev" ]; then
-            prefix=hpub-dev
-          elif [ "$environment" == "test" ]; then
-            prefix=hpub-test
-          elif [ "$environment" == "uat" ]; then
-            prefix=hpub-uat
-          elif [ "$environment" == "preprod" ]; then
-            prefix=hpub-preprod
-          elif [ "$environment" == "prd" ]; then
-            prefix=prod
-          else
-            echo "Unknown environment. Unable to run tests."
-            exit 1
-          fi
-          echo prefix=$prefix >> $GITHUB_OUTPUT
+          case "$environment" in
+            prd|prod)
+              prefix="hpub"
+              ;;
+            preprod)
+              prefix="hpubpp"
+              ;;
+            uat)
+              prefix="hpub-uat"
+              ;;
+            test)
+              prefix="hpub-test"
+              ;;
+            dev)
+              prefix="hpub-dev"
+              ;;
+            *)
+              echo "Unknown environment: $environment. Unable to run tests."
+              exit 1
+              ;;
+          esac
+
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
 
       - name: End-to-end tests
         if: ${{ matrix.environment != 'prod' }}
@@ -383,10 +391,12 @@ jobs:
               prefix="hpub-dev"
               ;;
             *)
-              echo "Unknown environment: $environment"
+              echo "Unknown environment: $environment. Unable to run tests."
               exit 1
               ;;
           esac
+
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
 
       - name: End-to-end tests
         if: ${{ matrix.environment != 'prod' && matrix.environment != 'preprod' }}

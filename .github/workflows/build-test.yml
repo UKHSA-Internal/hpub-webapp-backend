@@ -125,7 +125,7 @@ jobs:
  deploy_to_nonprod:
   name: Deploy build to ${{ matrix.environment }}
   runs-on: ubuntu-latest
-  if: github.ref == 'refs/heads/develop-remond' && github.event_name == 'push'
+  if: github.ref == 'refs/heads/develop-remon' && github.event_name == 'push'
   needs: [build]
   environment: ${{ matrix.environment }}
   concurrency:

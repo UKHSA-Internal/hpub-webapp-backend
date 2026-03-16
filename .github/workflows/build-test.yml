@@ -122,171 +122,98 @@ jobs:
             docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${env}-${{ steps.tag_bump.outputs.new_tag }}
           done
 
- deploy_to_nonprod:
-  name: Deploy build to ${{ matrix.environment }}
-  runs-on: ubuntu-latest
-  if: github.ref == 'refs/heads/develop-remon' && github.event_name == 'push'
-  needs: [build]
-  environment: ${{ matrix.environment }}
-  concurrency:
-    group: deploy-nonprod-${{ github.ref }}-${{ matrix.environment }}
-    cancel-in-progress: true
-  strategy:
-    max-parallel: 1
-    matrix:
-      environment: [dev, test]
-  permissions:
-    contents: write
-    id-token: write
-    actions: read
-  env:
-    AWS_REGION: ${{ env.AWS_REGION }}
-    ECR_NAMESPACE: ${{ env.ECR_NAMESPACE }}
-    APP_NAME: ${{ env.APP_NAME }}
-    AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-    AWS_ACCOUNT_ID_ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}
-    AWS_DEPLOY_ROLE: ${{ secrets.AWS_DEPLOY_ROLE }}
-    COMMIT_HASH: ${{ github.sha }}
-    ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+   deploy_to_nonprod:
+    name: Deploy build to ${{ matrix.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ matrix.environment }}
+    strategy:
+      max-parallel: 1
+      matrix:
+        environment: ["dev", "test"]
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    permissions:
+      contents: write
+      id-token: write
+      actions: read
+    needs:
+      - build
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
+          role-session-name: deploy-${{ github.sha }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Update Parameter Store with new value
+        env:
+          COMMIT_HASH: ${{ github.sha }}
+        run: |
+          aws ssm put-parameter --name "/hpub/$APP_NAME/image_tag" --type "String" --value "$COMMIT_HASH" --overwrite
 
-  steps:
-    - name: Configure AWS credentials (OIDC)
-      uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5
-      with:
-        role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.AWS_DEPLOY_ROLE }}
-        role-session-name: deploy-${{ github.sha }}
-        aws-region: ${{ env.AWS_REGION }}
+      - name: Download task definition
+        run: |
+          aws ecs describe-task-definition --task-definition aw-hpub-euw2-${{ matrix.environment }}-ecssvc-$APP_NAME --query taskDefinition > task-definition.json
 
-    - name: Validate required inputs
-      shell: bash
-      run: |
-        set -euo pipefail
-        required=(AWS_REGION ECR_NAMESPACE APP_NAME AWS_ACCOUNT_ID AWS_ACCOUNT_ID_ECR_REGISTRY ECR_REGISTRY COMMIT_HASH)
-        for v in "${required[@]}"; do
-          if [[ -z "${!v:-}" ]]; then
-            echo "Missing required env var: $v" >&2
+      - name: Modify Amazon ECS task definition with updated image URI
+        id: render-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@06472d439cb66af6210a6709bfc842c26b053706 # v1
+        env:
+          ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+          COMMIT_HASH: ${{ github.sha }}
+        with:
+          task-definition: task-definition.json
+          container-name: app
+          image: ${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ env.COMMIT_HASH }}
+
+      - name: Deploy to Amazon ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@c6e19c08506099e50400581201a3a767fd8e3ff4 # v2
+        with:
+          task-definition: ${{ steps.render-task-def.outputs.task-definition }}
+          service: aw-hpub-euw2-${{ matrix.environment }}-ecssvc-${{ env.APP_NAME }}
+          cluster: aw-hpub-euw2-${{ matrix.environment }}-ecscluster
+          wait-for-service-stability: true
+
+      - name: Determine Base URL
+        id: url
+        env:
+          environment: ${{ matrix.environment }}
+        run: |
+          if [ "$environment" == "dev" ]; then
+            prefix=hpub-dev
+          elif [ "$environment" == "test" ]; then
+            prefix=hpub-test
+          elif [ "$environment" == "uat" ]; then
+            prefix=hpub-uat
+          elif [ "$environment" == "preprod" ]; then
+            prefix=hpub-preprod
+          elif [ "$environment" == "prd" ]; then
+            prefix=prod
+          else
+            echo "Unknown environment. Unable to run tests."
             exit 1
           fi
-        done
-        echo "Inputs OK ✅"
+          echo prefix=$prefix >> $GITHUB_OUTPUT
 
-    - name: Compute names and URLs
-      id: vars
-      shell: bash
-      run: |
-        set -euo pipefail
-        env_name='${{ matrix.environment }}'
+      - name: End-to-end tests
+        if: ${{ matrix.environment != 'prod' }}
+        env:
+          BASE_URL: "https://${{ steps.url.outputs.prefix }}.test-and-trace.nhs.uk"
+        run: |
+          # No end-to-end testing in place yet
+          echo npx playwright test
 
-        case "$env_name" in
-          dev)    prefix="hpub-dev" ;;
-          test)   prefix="hpub-test" ;;
-          uat)    prefix="hpub-uat" ;;
-          preprod)prefix="hpub-preprod" ;;
-          prod|prd) prefix="prod" ;;
-          *) echo "Unknown environment: $env_name" >&2; exit 1 ;;
-        esac
-
-        task_family="aw-hpub-euw2-${env_name}-ecssvc-${APP_NAME}"
-        service_name="aw-hpub-euw2-${env_name}-ecssvc-${APP_NAME}"
-        cluster_name="aw-hpub-euw2-${env_name}-ecscluster"
-        image_uri="${ECR_REGISTRY}/${ECR_NAMESPACE}/${APP_NAME}:${COMMIT_HASH}"
-        base_url="https://${prefix}.test-and-trace.nhs.uk"
-
-        {
-          echo "task_family=$task_family"
-          echo "service_name=$service_name"
-          echo "cluster_name=$cluster_name"
-          echo "image_uri=$image_uri"
-          echo "base_url=$base_url"
-        } >> "$GITHUB_OUTPUT"
-
-    - name: Ensure image exists in ECR (fail early)
-      shell: bash
-      run: |
-        set -euo pipefail
-        aws ecr describe-images \
-          --repository-name "${ECR_NAMESPACE}/${APP_NAME}" \
-          --image-ids imageTag="${COMMIT_HASH}" >/dev/null
-        echo "Found image ${ECR_NAMESPACE}/${APP_NAME}:${COMMIT_HASH} in ${ECR_REGISTRY}"
-
-    - name: Update SSM Parameter Store (current image tag)
-      shell: bash
-      run: |
-        set -euo pipefail
-        # Keeping your original key. If you later want env-specific keys, consider: "/hpub/${APP_NAME}/${{ matrix.environment }}/image_tag"
-        aws ssm put-parameter \
-          --name "/hpub/${APP_NAME}/image_tag" \
-          --type "String" \
-          --value "${COMMIT_HASH}" \
-          --overwrite \
-          --tags "Key=Application,Value=${APP_NAME}" "Key=Environment,Value=${{ matrix.environment }}" "Key=Commit,Value=${COMMIT_HASH}"
-        echo "Parameter updated: /hpub/${APP_NAME}/image_tag=${COMMIT_HASH}"
-
-    - name: Download current task definition
-      shell: bash
-      run: |
-        set -euo pipefail
-        aws ecs describe-task-definition \
-          --task-definition "${{ steps.vars.outputs.task_family }}" \
-          --query taskDefinition \
-          --output json > task-definition.json
-
-    - name: Render task definition with new image
-      id: render-task-def
-      uses: aws-actions/amazon-ecs-render-task-definition@06472d439cb66af6210a6709bfc842c26b053706 # v1
-      with:
-        task-definition: task-definition.json
-        container-name: app
-        image: ${{ steps.vars.outputs.image_uri }}
-
-    - name: Deploy to Amazon ECS (wait for stability)
-      uses: aws-actions/amazon-ecs-deploy-task-definition@c6e19c08506099e50400581201a3a767fd8e3ff4 # v2
-      with:
-        task-definition: ${{ steps.render-task-def.outputs.task-definition }}
-        service: ${{ steps.vars.outputs.service_name }}
-        cluster: ${{ steps.vars.outputs.cluster_name }}
-        wait-for-service-stability: true
-
-    - name: Post-deployment health check (retry)
-      env:
-        BASE_URL: ${{ steps.vars.outputs.base_url }}
-        EXPECTED_STATUS: "200"
-        MAX_ATTEMPTS: "15"
-        SLEEP_SECONDS: "10"
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "Health-checking $BASE_URL ..."
-        attempt=1
-        while (( attempt <= MAX_ATTEMPTS )); do
-          code=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" \
-                    -s -o /dev/null -w "%{http_code}" \
-                    "${BASE_URL}/")
-          echo "Attempt $attempt/$MAX_ATTEMPTS -> HTTP $code"
-          if [[ "$code" == "$EXPECTED_STATUS" ]]; then
-            echo "Healthy ✅"
-            exit 0
+      - name: Post-Deployment Smoke Test
+        if: ${{ matrix.environment != 'prod' }}
+        env:
+          environment_prefix: ${{ steps.url.outputs.prefix }}
+        shell: bash
+        run: |
+          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" https://$environment_prefix.test-and-trace.nhs.uk/)
+          if [ "$response" -ne 200 ]; then
+            echo "Post-Deployment tests failed!"
+            exit 1
           fi
-          sleep "$SLEEP_SECONDS"
-          ((attempt++))
-        done
-        echo "Service failed health check at ${BASE_URL} after ${MAX_ATTEMPTS} attempts."
-        exit 1
-
-    - name: Deployment summary
-      if: always()
-      shell: bash
-      run: |
-        {
-          echo "### Deployment summary"
-          echo ""
-          echo "- Environment: \`${{ matrix.environment }}\`"
-          echo "- Service: \`${{ steps.vars.outputs.service_name }}\`"
-          echo "- Cluster: \`${{ steps.vars.outputs.cluster_name }}\`"
-          echo "- Image: \`${{ steps.vars.outputs.image_uri }}\`"
-          echo "- URL: \`${{ steps.vars.outputs.base_url }}\`"
-        } >> "$GITHUB_STEP_SUMMARY"
-
 
   deploy_uat_preprod:
     name: Deploy build to ${{ matrix.environment }}

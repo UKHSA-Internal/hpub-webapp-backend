@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - "main-ramon"
+      - "develop-ramon"
       - "production-ramon"
       - RITM0194581-image-prefix
 

@@ -1,0 +1,66 @@
+name: "WIP: Create image tag"
+
+on:
+  workflow_run:
+    workflows: ["WIP Build & Test"]
+    types:
+      - completed
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  APP_NAME: ${{ vars.APP_NAME }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_NAMESPACE: ${{ vars.ECR_NAMESPACE }}
+
+jobs:
+  release:
+    name: Tag and release container image
+    runs-on: ubuntu-latest
+
+    # Run only if Build & Test succeeded AND branch is main-ramon
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main-ramon'
+
+    outputs:
+      release_tag: ${{ steps.tag_bump.outputs.new_tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ukhsa-collaboration/devops-github-actions/.github/actions/github-bump-tag@v0.8.0
+        id: tag_bump
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WITH_V: true
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
+          role-session-name: retag-image-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr-release
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Pull, retag, and push Application image for release
+        id: push
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr-release.outputs.registry }}
+          COMMIT_HASH: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          docker pull $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$COMMIT_HASH
+
+          ENVIRONMENTS="uat preprod prod"
+          for env in $ENVIRONMENTS; do
+            docker tag $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$COMMIT_HASH \
+                       $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${env}-${{ steps.tag_bump.outputs.new_tag }}
+
+            docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${env}-${{ steps.tag_bump.outputs.new_tag }}
+          done

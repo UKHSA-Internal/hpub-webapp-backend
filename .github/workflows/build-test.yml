@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - "main-ramon"
+      - "develop-ramon"
       - "production-ramon"
       - RITM0194581-image-prefix
 
@@ -64,210 +65,247 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         with:
           context: .
-          # FIXED: Pushes on any 'push' event so that subsequent Release/Hotfix jobs can pull the image
+          # TODO-- Is this right? run on any push so that hotfix can run
           push: ${{ github.event_name == 'push' }}
           tags: |
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ github.sha }}
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:latest
           cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:latest
           cache-to: type=inline
-
+  
   release:
     name: Tag and release container image
     runs-on: ubuntu-latest
-    # FIXED: Added 'main' to triggers at the top to make this job reachable
-    if: github.ref == 'refs/heads/main-ramon' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment: dev
     permissions:
       contents: write
       id-token: write
       actions: read
-    needs: build
+    needs:
+      - build
     outputs:
       release_tag: ${{ steps.tag_bump.outputs.new_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
 
-      - uses: ukhsa-collaboration/devops-github-actions/.github/actions/github-bump-tag@v0.8.0
+      # git release
+      - uses: ukhsa-collaboration/devops-github-actions/.github/actions/github-bump-tag@ea0aa2a80fccfb2a19e1c71443a0a60b85f618a8 # v0.11.0
         id: tag_bump
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WITH_V: true
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
           role-session-name: retag-image-${{ github.sha }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        id: login-ecr-release
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2
 
-      - name: Pull, retag, and push Application image for release
+      # docker pull + tag + push
+      - name: Pull, retag, and push Application image for release (with env name)
+        id: push
         env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
-          NEW_TAG: ${{ steps.tag_bump.outputs.new_tag }}
+          ECR_REGISTRY: ${{ steps.login-ecr-release.outputs.registry }}
+          COMMIT_HASH: ${{ github.sha }}
         run: |
-          docker pull $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$IMAGE_TAG
-          docker tag $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$IMAGE_TAG $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$NEW_TAG
-          docker tag $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$IMAGE_TAG $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:latest
-          docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$NEW_TAG
-          docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:latest
-  
-  release-hotfix:
-    name: Hotfix Tag and release container image 
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/production-ramon' && contains(github.event.head_commit.message, 'hotfix/HPUB')
-    environment: dev
-    permissions:
-      contents: write
-      id-token: write
-      actions: read
-    needs: build
-    outputs:
-      hotfix_tag: ${{ env.HOTFIX_TAG }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 
-      
-      - name: Get latest GitHub release and calculate hotfix tag
-        id: latest_release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          LATEST_RELEASE_TAG=$(curl -s -H "Authorization: token $GH_TOKEN" \
-            https://api.github.com/repos/$REPO/releases/latest \
-            | jq -r '.tag_name')
+          docker pull $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$COMMIT_HASH
 
-          VERSION_NUMBER=${LATEST_RELEASE_TAG#v}
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_NUMBER"
-          
-          git fetch --tags > /dev/null 2>&1
-          LATEST_PATCH=$(git tag -l "v${MAJOR}.${MINOR}.*" | sed "s/v${MAJOR}.${MINOR}.//" | sort -n | tail -1)
-          LATEST_PATCH=${LATEST_PATCH:-0}
-          PATCH=$((LATEST_PATCH + 1))
-
-          NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
-          echo "HOTFIX_TAG=$NEW_TAG" >> $GITHUB_ENV
-          echo "HOTFIX_TAG=$NEW_TAG" >> $GITHUB_OUTPUT
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
-          role-session-name: retag-image-${{ github.sha }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-      
-      - name: Setup Git & Push Tag
-        run: |
-          git config user.name "${GITHUB_ACTOR}"
-          git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
-          git tag -a $HOTFIX_TAG -m "Hotfix: $HOTFIX_TAG"
-          git push origin $HOTFIX_TAG
-
-      - name: Pull, retag, and push Application image for hotfix
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          docker pull $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$IMAGE_TAG
-          docker tag $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$IMAGE_TAG $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$HOTFIX_TAG
-          docker tag $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$IMAGE_TAG $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:latest
-          docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$HOTFIX_TAG
-          docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:latest
+          # Tag and push environment-specific tags
+          ENVIRONMENTS="uat preprod prod"
+          for env in $ENVIRONMENTS; do
+            docker tag $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$COMMIT_HASH $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${env}-${{ steps.tag_bump.outputs.new_tag }}
+            docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:${env}-${{ steps.tag_bump.outputs.new_tag }}
+          done
 
   deploy_to_nonprod:
-    name: Deploy build to ${{ matrix.environment }}
+    name: Deploy build to non-prod 
     runs-on: ubuntu-latest
     environment: ${{ matrix.environment }}
     strategy:
       max-parallel: 1
       matrix:
         environment: ["dev", "test"]
-    # FIXED: Logic to run if either standard release OR hotfix succeeds
-    if: |
-      always() &&
-      (needs.release.result == 'success' || needs.release-hotfix.result == 'success') &&
-      github.event_name == 'push'
+    if: github.ref == 'refs/heads/develop-ramon' && github.event_name == 'push'
     permissions:
       contents: write
       id-token: write
       actions: read
     needs:
-      - release
-      - release-hotfix
+      - build
     steps:
-      - name: Determine Deployment Tag
-        id: deploy_vars
-        run: |
-          if [ "${{ needs.release.result }}" == "success" ]; then
-            echo "tag=${{ needs.release.outputs.release_tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "tag=${{ needs.release-hotfix.outputs.hotfix_tag }}" >> $GITHUB_OUTPUT
-          fi
-
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
           role-session-name: deploy-${{ github.sha }}
           aws-region: ${{ env.AWS_REGION }}
-
+      
       - name: Update Parameter Store with new value
+        env:
+          COMMIT_HASH: ${{ github.sha }}
         run: |
-          aws ssm put-parameter --name "/hpub/$APP_NAME/image_tag" --type "String" --value "${{ steps.deploy_vars.outputs.tag }}" --overwrite
+          aws ssm put-parameter --name "/hpub/$APP_NAME/image_tag" --type "String" --value "$COMMIT_HASH" --overwrite
 
       - name: Download task definition
         run: |
           aws ecs describe-task-definition --task-definition aw-hpub-euw2-${{ matrix.environment }}-ecssvc-$APP_NAME --query taskDefinition > task-definition.json
 
-      - name: Modify Amazon ECS task definition
+      - name: Modify Amazon ECS task definition with updated image URI
         id: render-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        uses: aws-actions/amazon-ecs-render-task-definition@06472d439cb66af6210a6709bfc842c26b053706 # v1
+        env:
+          ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+          COMMIT_HASH: ${{ github.sha }}
         with:
           task-definition: task-definition.json
           container-name: app
-          image: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ steps.deploy_vars.outputs.tag }}
+          image: ${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ env.COMMIT_HASH }}
 
       - name: Deploy to Amazon ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        uses: aws-actions/amazon-ecs-deploy-task-definition@c6e19c08506099e50400581201a3a767fd8e3ff4 # v2
         with:
           task-definition: ${{ steps.render-task-def.outputs.task-definition }}
           service: aw-hpub-euw2-${{ matrix.environment }}-ecssvc-${{ env.APP_NAME }}
           cluster: aw-hpub-euw2-${{ matrix.environment }}-ecscluster
           wait-for-service-stability: true
 
-      - name: Determine Base URL Prefix
+      - name: Determine Base URL
         id: url
+        env:
+          environment: ${{ matrix.environment }}
         run: |
-          case "${{ matrix.environment }}" in
-            prd|prod) prefix="hpub" ;;
-            uat)      prefix="hpub-uat" ;;
-            preprod)  prefix="hpubpp" ;;
-            test)     prefix="hpub-test" ;;
-            dev)      prefix="hpub-dev" ;;
-            *)        echo "Unknown env"; exit 1 ;;
-          esac
-          echo "prefix=$prefix" >> $GITHUB_OUTPUT
+          if [ "$environment" == "dev" ]; then
+            prefix=hpub-dev
+          elif [ "$environment" == "test" ]; then
+            prefix=hpub-test
+          elif [ "$environment" == "uat" ]; then
+            prefix=hpub-uat
+          elif [ "$environment" == "preprod" ]; then
+            prefix=hpub-preprod
+          elif [ "$environment" == "prd" ]; then
+            prefix=prod
+          else
+            echo "Unknown environment. Unable to run tests."
+            exit 1
+          fi
+          echo prefix=$prefix >> $GITHUB_OUTPUT
 
       - name: End-to-end tests
-        if: ${{ matrix.environment != 'prod' && matrix.environment != 'preprod' }}
-        run: echo "npx playwright test --url https://${{ steps.url.outputs.prefix }}.test-and-trace.nhs.uk"
+        if: ${{ matrix.environment != 'prod' }}
+        env:
+          BASE_URL: "https://${{ steps.url.outputs.prefix }}.test-and-trace.nhs.uk"
+        run: |
+          # No end-to-end testing in place yet
+          echo npx playwright test
 
       - name: Post-Deployment Smoke Test
-        if: ${{ matrix.environment != 'prod' && matrix.environment != 'preprod' }}
+        if: ${{ matrix.environment != 'prod' }}
+        env:
+          environment_prefix: ${{ steps.url.outputs.prefix }}
+        shell: bash
         run: |
-          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" https://${{ steps.url.outputs.prefix }}.test-and-trace.nhs.uk/)
+          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" https://$environment_prefix.test-and-trace.nhs.uk/)
           if [ "$response" -ne 200 ]; then
-            echo "Post-Deployment tests failed with status $response"
+            echo "Post-Deployment tests failed!"
+            exit 1
+          fi
+
+  deploy_uat_preprod:
+    name: Deploy build to ${{ matrix.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ matrix.environment }}
+    strategy:
+      max-parallel: 1
+      matrix:
+        environment: ["preprod", "uat"]
+    needs:
+      - build
+      - release
+    if: github.ref == 'refs/heads/main-ramon' && github.event_name == 'push' && needs.release.result == 'success'
+    permissions:
+      contents: write
+      id-token: write
+      actions: read
+    steps:
+      - name: Get release tag
+        id: get_tag
+        run: |
+          TAG="${{ needs.release.outputs.release_tag }}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
+          role-session-name: deploy-${{ github.sha }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Update Parameter Store with new value
+        env:
+          NEW_TAG: ${{ matrix.environment }}-${{ steps.get_tag.outputs.tag }}
+        run: |
+          aws ssm put-parameter --name "/hpub/$APP_NAME/image_tag" --type "String" --value "$NEW_TAG" --overwrite
+
+      - name: Download task definition
+        run: |
+          aws ecs describe-task-definition --task-definition aw-hpub-euw2-${{ matrix.environment }}-ecssvc-$APP_NAME --query taskDefinition > task-definition.json
+
+      - name: Modify Amazon ECS task definition with updated image URI
+        id: render-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@06472d439cb66af6210a6709bfc842c26b053706 # v1
+        env:
+          ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+          NEW_TAG: ${{ matrix.environment }}-${{ steps.get_tag.outputs.tag }}
+        with:
+          task-definition: task-definition.json
+          container-name: app
+          image: ${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ env.NEW_TAG }}
+
+      - name: Deploy to Amazon ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@c6e19c08506099e50400581201a3a767fd8e3ff4 # v2
+        with:
+          task-definition: ${{ steps.render-task-def.outputs.task-definition }}
+          service: aw-hpub-euw2-${{ matrix.environment }}-ecssvc-${{ env.APP_NAME }}
+          cluster: aw-hpub-euw2-${{ matrix.environment }}-ecscluster
+          wait-for-service-stability: true
+
+      - name: Determine Base URL
+        id: url
+        env:
+          environment: ${{ matrix.environment }}
+        run: |
+          if [ "$environment" == "uat" ]; then
+            prefix=hpub-uat
+          elif [ "$environment" == "preprod" ]; then
+            prefix=hpub-preprod
+          else
+            echo "Unknown environment. Unable to run tests."
+            exit 1
+          fi
+          echo prefix=$prefix >> $GITHUB_OUTPUT
+
+      - name: End-to-end tests
+        if: ${{ matrix.environment == 'uat' }}
+        env:
+          BASE_URL: "https://${{ steps.url.outputs.prefix }}.test-and-trace.nhs.uk"
+        run: |
+          # No end-to-end testing in place yet
+          echo npx playwright test
+
+      - name: Post-Deployment Smoke Test
+        if: ${{ matrix.environment == 'uat' }}
+        env:
+          environment_prefix: ${{ steps.url.outputs.prefix }}
+        shell: bash
+        run: |
+          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" https://$environment_prefix.test-and-trace.nhs.uk/)
+          if [ "$response" -ne 200 ]; then
+            echo "Post-Deployment tests failed!"
             exit 1
           fi

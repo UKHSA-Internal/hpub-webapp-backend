@@ -1,4 +1,4 @@
-name: "Deploy and Release to Preprod and Prod"
+name: "Deploy and Release to PreProd and Prod"
 
 on:
   release:
@@ -11,15 +11,14 @@ env:
   RUN_UNIT_TESTS: ${{ vars.RUN_UNIT_TESTS }}
 
 jobs:
-  deploy_preprod_prod:
+  deploy_to_prod:
     name: Deploy build to ${{ matrix.environment }}
     runs-on: ubuntu-latest
     environment: ${{ matrix.environment }}
     strategy:
       max-parallel: 1
       matrix:
-        environment: ["uat", "preprod", "prod"]
-    if: github.event_name == 'release' && github.event.action == 'published'
+        environment: ["prod"]
     permissions:
       contents: write
       id-token: write
@@ -37,7 +36,7 @@ jobs:
 
       - name: Update Parameter Store with new value
         env:
-          NEW_TAG: ${{ github.event.release.tag_name }}
+          NEW_TAG: ${{ matrix.environment }}-${{ github.event.release.tag_name }}
         run: |
           aws ssm put-parameter --name "/hpub/$APP_NAME/image_tag" --type "String" --value "$NEW_TAG" --overwrite
 
@@ -51,8 +50,7 @@ jobs:
         with:
           task-definition: task-definition.json
           container-name: app
-          # We have to construct this as Github Actions will refuse to pass the full URL from 'release' step as it contains an AWS account ID
-          image: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ github.event.release.tag_name }}
+          image: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ matrix.environment }}-${{ github.event.release.tag_name }}
 
       - name: Deploy to Amazon ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@c6e19c08506099e50400581201a3a767fd8e3ff4 # v2
@@ -61,6 +59,26 @@ jobs:
           service: aw-hpub-euw2-${{ matrix.environment }}-ecssvc-${{ env.APP_NAME }}
           cluster: aw-hpub-euw2-${{ matrix.environment }}-ecscluster
           wait-for-service-stability: true
+
+      # Post-deployment steps for Prod environment to tag deployed image as latest
+      - name: Login to Amazon ECR
+        if: matrix.environment == 'prod'
+        id: login-ecr-prod
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2
+
+      - name: Tag and push latest for Prod
+        if: matrix.environment == 'prod'
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr-prod.outputs.registry }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          # Pull the deployed prod image
+          docker pull $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:prod-$RELEASE_TAG
+          
+          # Tag as latest and push
+          docker tag $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:prod-$RELEASE_TAG $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:latest
+          docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:latest
+
 
       - name: Determine Base URL
         id: url
@@ -84,15 +102,15 @@ jobs:
               prefix="hpub-dev"
               ;;
             *)
-              echo "Unknown environment: $environment"
+              echo "Unknown environment: $environment. Unable to run tests."
               exit 1
               ;;
           esac
-                  
+
           echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
 
       - name: End-to-end tests
-        if: ${{ matrix.environment != 'prod' && matrix.environment != 'preprod' }}
+        if: ${{ matrix.environment != 'prod' }}
         env:
           BASE_URL: "https://${{ steps.url.outputs.prefix }}.test-and-trace.nhs.uk"
         run: |
@@ -100,14 +118,13 @@ jobs:
           echo npx playwright test
 
       - name: Post-Deployment Smoke Test
-        if: ${{ matrix.environment != 'prod' && matrix.environment != 'preprod' }}
+        if: ${{ matrix.environment != 'prod' }}
         env:
           environment_prefix: ${{ steps.url.outputs.prefix }}
         shell: bash
         run: |
-          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" https://$environment_prefix.test-and-trace.nhs.uk/api/v1/health/)
+          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" https://$environment_prefix.test-and-trace.nhs.uk/)
           if [ "$response" -ne 200 ]; then
             echo "Post-Deployment tests failed!"
             exit 1
           fi
-

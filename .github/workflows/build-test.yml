@@ -123,7 +123,7 @@ jobs:
           done
 
    deploy_to_nonprod:
-    name: Deploy build to ${{ matrix.environment }}
+    name: Deploy build to env: ${{ matrix.environment }}
     runs-on: ubuntu-latest
     environment: ${{ matrix.environment }}
     strategy:

@@ -101,7 +101,6 @@ jobs:
           echo "healthUrl=$healthUrl" >> "$GITHUB_OUTPUT"
 
       - name: Post-Deployment Smoke Test
-        # if: ${{ matrix.environment != 'prod' && matrix.environment != 'preprod' }}
         env:
           healthcheck_url: ${{ steps.url.outputs.prefix }}
         shell: bash

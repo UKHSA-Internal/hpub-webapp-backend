@@ -18,7 +18,7 @@ jobs:
     strategy:
       max-parallel: 1
       matrix:
-        environment: ["prod"]
+        environment: ["preprod", "prod"]
     permissions:
       contents: write
       id-token: write
@@ -71,59 +71,42 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.login-ecr-prod.outputs.registry }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
+          ENVIROMENT: ${{ matrix.environment }}
         run: |
           # Pull the deployed prod image
-          docker pull $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:prod-$RELEASE_TAG
+          docker pull $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:-$RELEASE_TAG
           
           # Tag as latest and push
-          docker tag $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:prod-$RELEASE_TAG $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:latest
+          docker tag $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:$ENVIROMENT-$RELEASE_TAG $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:latest
           docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:latest
 
 
-      - name: Determine Base URL
+      - name: Determine Health URL
         id: url
         env:
           environment: ${{ matrix.environment }}
         run: |
           case "$environment" in
-            prd|prod)
-              prefix="hpub"
+            prod)
+              healthUrl="https://find-public-health-resources.service.gov.uk/api/v1/health/"
               ;;
             preprod)
-              prefix="hpubpp"
-              ;;
-            uat)
-              prefix="hpub-uat"
-              ;;
-            test)
-              prefix="hpub-test"
-              ;;
-            dev)
-              prefix="hpub-dev"
-              ;;
+              healthUrl="https://hpub-preprod.test-and-trace.nhs.uk/api/v1/health/"
             *)
               echo "Unknown environment: $environment. Unable to run tests."
               exit 1
               ;;
           esac
 
-          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
-
-      - name: End-to-end tests
-        if: ${{ matrix.environment != 'prod' }}
-        env:
-          BASE_URL: "https://${{ steps.url.outputs.prefix }}.test-and-trace.nhs.uk"
-        run: |
-          # No end-to-end testing in place yet
-          echo npx playwright test
+          echo "healthUrl=$healthUrl" >> "$GITHUB_OUTPUT"
 
       - name: Post-Deployment Smoke Test
-        if: ${{ matrix.environment != 'prod' }}
+        # if: ${{ matrix.environment != 'prod' && matrix.environment != 'preprod' }}
         env:
-          environment_prefix: ${{ steps.url.outputs.prefix }}
+          healthcheck_url: ${{ steps.url.outputs.prefix }}
         shell: bash
         run: |
-          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" https://$environment_prefix.test-and-trace.nhs.uk/)
+          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" healthcheck_url)
           if [ "$response" -ne 200 ]; then
             echo "Post-Deployment tests failed!"
             exit 1

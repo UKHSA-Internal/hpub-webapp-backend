@@ -147,7 +147,7 @@ def _s3_head(url: str) -> Optional[dict]:
     if not b or not k:
         return None
     try:
-        h = aws_s3_client.s3_call("head_object", Bucket=b, Key=k)
+        h = aws_s3_client.get_head_object(Bucket=b, Key=k)
         return {
             "size": int(h.get("ContentLength", 0)),
             "content_type": h.get("ContentType") or DEFAULT_MIME,
@@ -201,7 +201,7 @@ def _download_s3_to_temp(bucket: str, key: str) -> Optional[Path]:
         fd, path = tempfile.mkstemp(suffix=Path(key).suffix or ".bin")
         os.close(fd)
         with open(path, "wb") as f:
-            aws_s3_client.s3_call("download_fileobj", Bucket=bucket, Key=key, Fileobj=f)
+            aws_s3_client.download_file_object(Bucket=bucket, Key=key, Fileobj=f)
         return Path(path)
     except Exception as e:
         logger.debug("Download failed s3://%s/%s: %s", bucket, key, e)
@@ -418,8 +418,8 @@ def _image_dimensions_from_s3(
     while start < max_bytes:
         end = min(start + chunk - 1, max_bytes - 1)
         try:
-            obj = aws_s3_client.s3_call(
-                "get_object", Bucket=bucket, Key=key, Range=f"bytes={start}-{end}"
+            obj = aws_s3_client.get_object(
+                Bucket=bucket, Key=key, Range=f"bytes={start}-{end}"
             )
             data = obj["Body"].read()
             if not data:
@@ -435,9 +435,9 @@ def _image_dimensions_from_s3(
 
     # small objects: single full fetch if tiny
     try:
-        head = aws_s3_client.s3_call("head_object", Bucket=bucket, Key=key)
+        head = aws_s3_client.get_head_object(Bucket=bucket, Key=key)
         if int(head.get("ContentLength", 0)) <= 128 * 1024:
-            obj = aws_s3_client.s3_call("get_object", Bucket=bucket, Key=key)
+            obj = aws_s3_client.get_object(Bucket=bucket, Key=key)
             data = obj["Body"].read()
             parser = ImageFile.Parser()
             parser.feed(data)

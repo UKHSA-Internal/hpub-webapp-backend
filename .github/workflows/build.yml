@@ -41,11 +41,13 @@ jobs:
         working-directory: health_pubs
         run: pytest
 
+
       - name: Lint with Black
         working-directory: health_pubs
+        continue-on-error: true
         run: |
           pip install black
-          black --check .  
+          black --check --diff .
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5

@@ -43,11 +43,11 @@ ENV XDG_CONFIG_HOME=/app/.lo_tmp/.config
 
 
 # Copy and install Python dependencies
-COPY health_pubs/requirements.txt /app/requirements.txt
+COPY ./src/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt --verbose
 
 # Copy application code
-COPY health_pubs /app/
+COPY ./src /app/
 
 # Change ownership (optional)
 RUN chown -R appuser:appuser /app

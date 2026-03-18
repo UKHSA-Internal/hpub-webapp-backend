@@ -33,5 +33,5 @@ jobs:
           black_args: "--check"
           reporter: ${{ env.REPORTER }}
           filter_mode: 'nofilter'
-          workdir: 'health_pubs'
+          workdir: 'src'
           github_token: ${{ secrets.GITHUB_TOKEN }}

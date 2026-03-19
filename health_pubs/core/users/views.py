@@ -1205,5 +1205,71 @@ class MigrateUsersAPIView(APIView):
             logger.warning("Role %s not found", rid)
             return None
 
+ 
+class DeleteAccountView(APIView):
+
+    authentication_classes = [CustomTokenAuthentication]
+
+    permission_classes = [IsAuthenticated]
+ 
+    def delete(self, request):
+
+        try:
+
+            user = request.user
+ 
+            if not user or not user.is_authenticated:
+
+                return Response(
+
+                    {"error": "User not authenticated"},
+
+                    status=status.HTTP_401_UNAUTHORIZED,
+
+                )
+ 
+            user_id = str(user.user_id)
+ 
+            # Use existing delete logic
+
+            result = delete_user_and_dependencies(user_id)
+ 
+            if result.get("success"):
+
+                response = Response(
+
+                    {"message": "Account deleted successfully"},
+
+                    status=status.HTTP_204_NO_CONTENT,
+
+                )
+ 
+                # Clear auth cookie
+
+                response.delete_cookie("long_term_token")
+
+                return response
+ 
+            return Response(
+
+                {"error": result.get("error", "Failed to delete account")},
+
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+
+            )
+ 
+        except Exception as e:
+
+            logger.error(f"Error deleting account: {str(e)}")
+
+            return Response(
+
+                {"error": "Something went wrong"},
+
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+
+            )
+ 
+
 
 #

@@ -1,6 +1,6 @@
-## Link to original ticket
+## Link to original ticket/issue
 
-[#TICKET_ID](https://jira.collab.test-and-trace.nhs.uk/browse/HPUB-503)
+[#TICKET_ID](Add link to ticket/issue)
 
 ## Summary of changes
 

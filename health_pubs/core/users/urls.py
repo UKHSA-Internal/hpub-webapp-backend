@@ -11,6 +11,7 @@ from .views import (
     UserLoginView,
     UserSignUpView,
     PreRegistrationView,
+    DeleteAccountView,
 )
 
 urlpatterns = [
@@ -25,6 +26,7 @@ urlpatterns = [
     path("users/auth/status/", AuthStatusView.as_view(), name="auth-status"),
     path("users/logout/", LogoutView().as_view(), name="logout"),
     path("users/refresh/", TokenRefresh.as_view(), name="token_refresh"),
+    path("users/delete-account/", DeleteAccountView.as_view(), name="user-delete-account"),
     path("users/<str:user_id>/", UserDetailView.as_view(), name="user-detail"),
     path("users/list/", UserListView.as_view(), name="user-list"),
     path("users/migrate-users/", MigrateUsersAPIView.as_view(), name="user-migrate"),

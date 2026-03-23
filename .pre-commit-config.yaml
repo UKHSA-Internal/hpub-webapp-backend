@@ -16,3 +16,8 @@ repos:
     hooks:
     - id: autoflake
       args: [--remove-all-unused-imports, --in-place, --ignore-init-module-imports, --remove-unused-variables]
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.1
+    hooks:
+      - id: gitleaks

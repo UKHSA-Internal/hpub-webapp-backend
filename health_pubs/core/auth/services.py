@@ -4,7 +4,11 @@ import browser_cookie3
 
 from django.conf import settings
 
-from ..utils import logging_utils
+from core.utils import logging_utils
+from core.utils import custom_token_authentication
+from core.utils import token_generation_validation
+from core.users.views import validate_azure_b2c_token
+
 
 LOGGER = logging_utils.get_logger(__name__)
 
@@ -43,3 +47,33 @@ def get_access_token_from_browser():
             access_token = cookies['long_term_token']
             return access_token
     return None
+
+
+def decode_access_token(request):
+    auth_header = request.headers.get("Authorization")
+    jwt_token = auth_header.split(' ')[1]
+    return token_generation_validation.validate_token(jwt_token)
+
+
+def get_user_from_access_token():
+    pass
+
+
+def create_access_token(request):
+    user_id = request.data.get('user_id')
+    email = request.data.get('email')
+    role_name = request.data.get('role_name')
+    token = token_generation_validation.generate_long_term_token(user_id, email, role_name)
+    response = {
+        'access_token': token,
+        'token_type': 'Bearer',
+    }
+    return response
+
+
+def refresh_access_token():
+    pass
+
+
+def revoke_access_token():
+    pass

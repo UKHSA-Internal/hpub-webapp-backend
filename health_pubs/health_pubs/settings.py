@@ -140,6 +140,7 @@ INSTALLED_APPS = [
     "wagtail.documents",
     "wagtail.images",
     "wagtail.api.v2",
+    "core.auth",
     "core.products",
     "core.roles",
     "core.orders",

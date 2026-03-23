@@ -45,9 +45,9 @@ from wagtail.models import Page
 from django.db import transaction, DatabaseError, IntegrityError
 from django_filters.rest_framework import DjangoFilterBackend
 
-from .models import InvalidatedToken, User
-from .serializers import UserSerializer
-from .management.commands.delete_users_db import delete_user_and_dependencies
+from core.users.models import InvalidatedToken, User
+from core.users.serializers import UserSerializer
+from core.users.management.commands.delete_users_db import delete_user_and_dependencies
 import health_pubs.settings as settings
 
 sys.path.append(

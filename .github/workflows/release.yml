@@ -49,11 +49,11 @@ jobs:
           # Pull the PREPROD image (the last promoted artefact)
           docker pull $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:preprod-${{ github.event.release.tag_name }}
 
-
           # Retag it for PROD
           docker tag \
             $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:preprod-${{ github.event.release.tag_name }} \
-            $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:prod-${{ github.event.release.tag_name }}
+            $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:prod-${{ github.event.release.tag_name }} \
+            $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:latest
 
           # Push the PROD image to ECR
           docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:prod-${{ github.event.release.tag_name }}

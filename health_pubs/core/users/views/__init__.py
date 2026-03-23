@@ -1,4 +1,4 @@
-from .views import (
+from .v1 import (
     AuthStatusView,
     LogoutView,
     MigrateUsersAPIView,
@@ -11,4 +11,4 @@ from .views import (
     PreRegistrationView,
     DeleteAccountView
 )
-from .users import UsersV2
+from .v2 import UsersV2

@@ -97,13 +97,18 @@ jobs:
           cluster: aw-hpub-euw2-${{ matrix.environment }}-ecscluster
           wait-for-service-stability: true
 
+      - name: End-to-end tests
+        if: ${{ matrix.environment != 'prod' && matrix.environment != 'preprod' }}
+        env:
+          BASE_URL: "${{ vars.FPHR_BASE_URL }}"
+        run: |
+          # No end-to-end testing in place yet
+          echo npx playwright test
+
       - name: Post-Deployment Smoke Test
         if: ${{ matrix.environment == 'prod' }}
-        env:
-          HEALTHCHECK_URL: https://find-public-health-resources.service.gov.uk/api/v1/health/
         run: |
-          echo "Checking $HEALTHCHECK_URL"
-          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" $HEALTHCHECK_URL)
+          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" ${{ vars.FPHR_BASE_URL }}/api/v1/health/)
           if [ "$response" -ne 200 ]; then
             echo "Post-deployment smoke test FAILED!"
             exit 1

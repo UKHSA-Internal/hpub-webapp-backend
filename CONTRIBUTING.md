@@ -412,7 +412,7 @@ We do not accept PRs that reduce test coverage.
 ### Security and Data Handling
 - Do not commit secrets, tokens, or environment files.
 - Use environment variable placeholders instead of real values.
-- Report security concerns privately via security@ukhsa.gov.uk.
+- Report security concerns privately via level2b@ukhsa.gov.uk or level3b@ukhsa.gov.uk.
 
 #### Thank you for contributing to improving engineering standards, guidelines and best practices across the UKHSA!
 

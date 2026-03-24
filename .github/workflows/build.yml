@@ -317,7 +317,7 @@ jobs:
       - name: End-to-end tests
         if: ${{ matrix.environment != 'prod' && matrix.environment != 'preprod' }}
         env:
-          BASE_URL: "https://${{ steps.url.outputs.prefix }}.test-and-trace.nhs.uk"
+          BASE_URL: "${{ vars.FPHR_BASE_URL }}"
         run: |
           # No end-to-end testing in place yet
           echo npx playwright test
@@ -328,7 +328,7 @@ jobs:
           environment_prefix: ${{ steps.url.outputs.prefix }}
         shell: bash
         run: |
-          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" https://$environment_prefix.test-and-trace.nhs.uk/api/v1/health)
+          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" ${{ vars.FPHR_BASE_URL }}/api/v1/health/)
           if [ "$response" -ne 200 ]; then
             echo "Post-Deployment tests failed!"
             exit 1

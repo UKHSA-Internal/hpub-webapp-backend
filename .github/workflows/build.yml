@@ -136,7 +136,7 @@ jobs:
               prefix="hpub"
               ;;
             preprod)
-              prefix="hpubpp"
+              prefix="hpub-preprod"
               ;;
             uat)
               prefix="hpub-uat"

@@ -14,11 +14,10 @@ jobs:
   deploy_to_prod:
     name: Deploy build to Prod
     runs-on: ubuntu-latest
-    environment: prod
     strategy:
       max-parallel: 1
       matrix:
-        environment: ["prod"]
+        environment: ["dev","prod"]
 
     permissions:
       contents: write
@@ -26,7 +25,7 @@ jobs:
       actions: read
     steps:
   
-      - name: Configure AWS credentials
+      - name: Configure AWS credential
         uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
@@ -38,10 +37,12 @@ jobs:
 
       # docker pull + tag + push
       - name: Login to Amazon ECR
+        if: ${{ matrix.environment == 'dev' }}
         id: login-ecr-release
         uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2
 
       - name: Pull, retag, and push Application image for prod
+        if: ${{ matrix.environment == 'dev' }}
         id: ecr-tag-prod
         env:
           ECR_REGISTRY: ${{ steps.login-ecr-release.outputs.registry }}
@@ -60,6 +61,7 @@ jobs:
 
         
       - name: Update Parameter Store with new value
+        if: ${{ matrix.environment == 'prod' }}
         env:
           NEW_TAG: ${{ matrix.environment }}-${{ github.event.release.tag_name }}
         run: |
@@ -70,6 +72,7 @@ jobs:
             --overwrite
 
       - name: Download ECS Task Definition
+        if: ${{ matrix.environment == 'prod' }}
         run: |
           aws ecs describe-task-definition \
             --task-definition aw-hpub-euw2-${{ matrix.environment }}-ecssvc-$APP_NAME \
@@ -77,6 +80,7 @@ jobs:
             > task-definition.json
 
       - name: Modify ECS Task Definition Image
+        if: ${{ matrix.environment == 'prod' }}
         id: render-task-def
         uses: aws-actions/amazon-ecs-render-task-definition@06472d439cb66af6210a6709bfc842c26b053706 # v1
         with:
@@ -85,6 +89,7 @@ jobs:
           image: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ matrix.environment }}-${{ github.event.release.tag_name }}
 
       - name: Deploy to Amazon ECS
+        if: ${{ matrix.environment == 'prod' }}
         uses: aws-actions/amazon-ecs-deploy-task-definition@c6e19c08506099e50400581201a3a767fd8e3ff4 # v2
         with:
           task-definition: ${{ steps.render-task-def.outputs.task-definition }}
@@ -93,6 +98,7 @@ jobs:
           wait-for-service-stability: true
 
       - name: Post-Deployment Smoke Test
+        if: ${{ matrix.environment == 'prod' }}
         env:
           HEALTHCHECK_URL: https://find-public-health-resources.service.gov.uk/api/v1/health/
         run: |

@@ -9,6 +9,7 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   ECR_NAMESPACE: ${{ vars.ECR_NAMESPACE }}
   RUN_UNIT_TESTS: ${{ vars.RUN_UNIT_TESTS }}
+  BASE_URL: ${{ vars.FPHR_BASE_URL }}
 
 jobs:
   deploy_to_prod:
@@ -100,7 +101,7 @@ jobs:
       - name: End-to-end tests
         if: ${{ matrix.environment != 'prod' && matrix.environment != 'preprod' }}
         env:
-          BASE_URL: "${{ vars.FPHR_BASE_URL }}"
+          BASE_URL: ${{env.BASE_URL}}
         run: |
           # No end-to-end testing in place yet
           echo npx playwright test
@@ -108,7 +109,7 @@ jobs:
       - name: Post-Deployment Smoke Test
         if: ${{ matrix.environment == 'prod' }}
         run: |
-          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" ${{ vars.FPHR_BASE_URL }}/api/v1/health/)
+          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" ${{env.BASE_URL}}/api/v1/health/)
           if [ "$response" -ne 200 ]; then
             echo "Post-deployment smoke test FAILED!"
             exit 1

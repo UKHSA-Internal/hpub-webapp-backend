@@ -126,50 +126,17 @@ jobs:
           cluster: aw-hpub-euw2-${{ matrix.environment }}-ecscluster
           wait-for-service-stability: true
 
-      - name: Determine Base URL
-        id: url
-        env:
-          environment: ${{ matrix.environment }}
-        run: |
-          case "$environment" in
-            prd|prod)
-              prefix="hpub"
-              ;;
-            preprod)
-              prefix="hpub-preprod"
-              ;;
-            uat)
-              prefix="hpub-uat"
-              ;;
-            test)
-              prefix="hpub-test"
-              ;;
-            dev)
-              prefix="hpub-dev"
-              ;;
-            *)
-              echo "Unknown environment: $environment. Unable to run tests."
-              exit 1
-              ;;
-          esac
-
-          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
-
       - name: End-to-end tests
-        if: ${{ matrix.environment != 'prod' }}
         env:
-          BASE_URL: "https://${{ steps.url.outputs.prefix }}.test-and-trace.nhs.uk"
+          BASE_URL: "${{ vars.FPHR_BASE_URL }}"
         run: |
           # No end-to-end testing in place yet
           echo npx playwright test
 
       - name: Post-Deployment Smoke Test
-        if: ${{ matrix.environment != 'prod' }}
-        env:
-          environment_prefix: ${{ steps.url.outputs.prefix }}
         shell: bash
         run: |
-          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" https://$environment_prefix.test-and-trace.nhs.uk/)
+          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" ${{ vars.FPHR_BASE_URL }}/api/v1/health/)
           if [ "$response" -ne 200 ]; then
             echo "Post-Deployment tests failed!"
             exit 1
@@ -285,35 +252,6 @@ jobs:
           cluster: aw-hpub-euw2-${{ matrix.environment }}-ecscluster
           wait-for-service-stability: true
 
-      - name: Determine Base URL
-        id: url
-        env:
-          environment: ${{ matrix.environment }}
-        run: |
-          case "$environment" in
-            prd|prod)
-              prefix="hpub"
-              ;;
-            preprod)
-              prefix="hpub-preprod"
-              ;;
-            uat)
-              prefix="hpub-uat"
-              ;;
-            test)
-              prefix="hpub-test"
-              ;;
-            dev)
-              prefix="hpub-dev"
-              ;;
-            *)
-              echo "Unknown environment: $environment. Unable to run tests."
-              exit 1
-              ;;
-          esac
-
-          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
-
       - name: End-to-end tests
         if: ${{ matrix.environment != 'prod' && matrix.environment != 'preprod' }}
         env:
@@ -324,8 +262,6 @@ jobs:
 
       - name: Post-Deployment Smoke Test
         if: ${{ matrix.environment != 'prod' && matrix.environment != 'preprod' }}
-        env:
-          environment_prefix: ${{ steps.url.outputs.prefix }}
         shell: bash
         run: |
           response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" ${{ vars.FPHR_BASE_URL }}/api/v1/health/)

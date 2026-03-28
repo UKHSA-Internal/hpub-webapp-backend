@@ -17,8 +17,8 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from wagtail.models import Page
 
-from .models import Organization
-from .serializers import OrganizationSerializer
+from core.organizations.models import Organization
+from core.organizations.serializers import OrganizationSerializer
 
 logger = logging.getLogger(__name__)
 

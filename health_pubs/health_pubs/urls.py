@@ -5,7 +5,7 @@ API_PREFIX = "api/v1/"
 
 urlpatterns = [
     path("admin/", admin.site.urls),
-    path(f"{API_PREFIX}", include("core.urls")),
+    path("", include("core.self.urls")),
     path(f"{API_PREFIX}", include("core.event_analytics.urls")),
     path(f"{API_PREFIX}", include("core.users.urls")),
     path(f"{API_PREFIX}products/", include("core.products.urls")),
@@ -24,4 +24,6 @@ urlpatterns = [
     path(f"{API_PREFIX}", include("core.languages.urls")),
     path(f"{API_PREFIX}", include("core.where_to_use.urls")),
     path(f"{API_PREFIX}", include("core.frontend_s3_presigned_url.urls")),
+    path("api/v2/", include("core.notifications.urls")),
+    path("api/v2/", include("core.analytics.urls")),
 ]

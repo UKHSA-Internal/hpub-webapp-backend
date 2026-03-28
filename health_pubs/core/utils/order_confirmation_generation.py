@@ -1,4 +1,3 @@
-from .confirmation_generator import generate_confirmation_number
 from core.orders.models import OrderItem
 
 
@@ -10,14 +9,18 @@ def title_case(s):
 
 def generate_order_confirmation(order_instance):
     """
-    Generate a unique order confirmation number and format the order details.
+    Format the order details from persisted order data.
     Args:
         order_instance (Order): The order instance for which to generate the confirmation.
     Returns:
         dict: A dictionary containing the formatted order details.
     """
-    # Generate unique confirmation number
-    confirmation_number = generate_confirmation_number()
+    # Confirmation number is generated during order creation and then reused here.
+    confirmation_number = order_instance.order_confirmation_number
+    if not confirmation_number:
+        raise ValueError(
+            "Order confirmation number is missing; expected it to be set at order creation."
+        )
 
     items = OrderItem.objects.filter(order_ref=order_instance)
 

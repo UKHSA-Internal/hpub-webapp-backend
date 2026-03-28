@@ -1,11 +1,13 @@
-import sys
 import logging
-from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.core.exceptions import ObjectDoesNotExist
 
-from core.users.models import User
-from wagtail.models import Page  # Explicitly import Page from wagtail.models
+from core.addresses.models import Address
+from core.customer_support.models import CustomerSupport
+from core.event_analytics.models import EventAnalytics
+from core.feedbacks.models import Feedback
+from core.orders.models import Order, OrderItem
+from core.users.models import InvalidatedToken, User
 
 logger = logging.getLogger(__name__)
 
@@ -27,19 +29,58 @@ def delete_user_and_dependencies(user_id: str) -> dict:
         with transaction.atomic():
             user_instance = User.objects.get(user_id=user_id)
 
-            # Explicitly retrieve the associated Page using the Page model.
-            if hasattr(user_instance, "page") and user_instance.page:
-                page_id = user_instance.page.id
-                page = Page.objects.get(id=page_id)
-                # Hard delete the page tree.
-                page.delete(hard=True)
-                logger.info(
-                    "Hard deleted Wagtail page tree (Page id: %s) for user_id %s.",
-                    page_id,
-                    user_id,
-                )
+            # Delete all related data for this user
+            def _delete_queryset(qs, label: str) -> None:
+                items = list(qs)
+                for obj in items:
+                    obj.delete()
+                if items:
+                    logger.debug(
+                        "Deleted %s %s for user_id %s.",
+                        len(items),
+                        label,
+                        user_id,
+                    )
 
-            # Delete the User record.
+            # Addresses
+            _delete_queryset(Address.objects.filter(user_ref_id=user_id), "addresses")
+            # Customer support records
+            _delete_queryset(
+                CustomerSupport.objects.filter(user_ref_id=user_id),
+                "customer_support records",
+            )
+            # Event analytics records
+            _delete_queryset(
+                EventAnalytics.objects.filter(user_ref_id=user_id),
+                "event_analytics records",
+            )
+            # Feedback
+            _delete_queryset(
+                Feedback.objects.filter(user_ref_id=user_id), "feedback records"
+            )
+
+            # Orders + order items
+            orders = list(Order.objects.filter(user_ref_id=user_id))
+            order_ids = [o.order_id for o in orders]
+            if order_ids:
+                # Order items for those orders
+                _delete_queryset(
+                    OrderItem.objects.filter(order_ref_id__in=order_ids),
+                    "order items",
+                )
+            # Orders
+            for order in orders:
+                order.delete()
+            if orders:
+                logger.debug("Deleted %s orders for user_id %s.", len(orders), user_id)
+
+            # Invalidated tokens
+            _delete_queryset(
+                InvalidatedToken.objects.filter(users_id=user_id),
+                "invalidated tokens",
+            )
+
+            # Delete user account
             user_instance.delete()
             logger.info("User with user_id %s deleted successfully.", user_id)
             return {"success": True}
@@ -50,31 +91,3 @@ def delete_user_and_dependencies(user_id: str) -> dict:
     except Exception as e:
         logger.error("Error deleting user with user_id %s: %s", user_id, str(e))
         return {"error": str(e)}
-
-
-class Command(BaseCommand):
-    help = (
-        "Hard delete a user along with all associated Wagtail pages and dependencies."
-    )
-
-    def add_arguments(self, parser):
-        parser.add_argument(
-            "user_id", type=str, help="The unique user_id of the user to delete."
-        )
-
-    def handle(self, *args, **options):
-        user_id = options["user_id"]
-        result = delete_user_and_dependencies(user_id)
-
-        if result.get("success"):
-            self.stdout.write(
-                self.style.SUCCESS(
-                    f"User {user_id} and all related Wagtail dependencies were hard deleted successfully."
-                )
-            )
-        else:
-            error_message = result.get("error", "Unknown error")
-            self.stdout.write(
-                self.style.ERROR(f"Error deleting user {user_id}: {error_message}")
-            )
-            sys.exit(1)

@@ -232,6 +232,15 @@ class LanguageListViewSet(ReadOnlyModelViewSet):
     serializer_class = LanguageSerializer
 
 
+class LanguageFilteredListViewSet(ReadOnlyModelViewSet):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+    serializer_class = LanguageSerializer
+
+    def get_queryset(self):
+        return LanguagePage.objects.filter(products__isnull=False).distinct()
+
+
 class DeleteAllLanguagesViewSet(ViewSet):
     authentication_classes = [SessionAuthentication]
     permission_classes = [AllowAny]

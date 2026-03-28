@@ -1,4 +1,5 @@
 from collections import defaultdict
+from hmac import compare_digest
 import datetime
 import hashlib
 import json
@@ -55,6 +56,9 @@ from core.users.permissions import (
 from core.establishments.models import Establishment
 from core.utils.custom_token_authentication import CustomTokenAuthentication
 from core.utils.extract_file_metadata import get_file_metadata
+from core.products.management.commands.publish_scheduled_products import (
+    run_scheduled_publish,
+)
 from core.utils.generate_s3_presigned_url import (
     generate_inline_presigned_urls,
     generate_presigned_urls,
@@ -121,9 +125,20 @@ from django.core.serializers.json import DjangoJSONEncoder
 from configs.get_secret_config import Config
 from django.core.exceptions import ValidationError
 
+from django.db.models import Q
+
+from core.utils import logging_utils
+from core.utils.search import (
+    build_search_filters,
+    annotate_similarity,
+    fuzzy_threshold_filter,
+    normalize_code,
+    normalize_text,
+)
+
 config = Config()
 
-logger = logging.getLogger(__name__)
+logger = logging_utils.get_logger(__name__)
 
 PRODUCT_CODE_PATTERN = r"^[A-Za-z0-9_-]+$"
 # Constants for log messages
@@ -1493,7 +1508,6 @@ class ProductUtilsMixin:
             created_at=created_at,
             is_latest=True,
             publish_date=publish_date,
-            suppress_event=False,
         )
 
     def assign_m2m_fields(
@@ -1898,9 +1912,9 @@ class ProductViewSet(ProductUtilsMixin, viewsets.ViewSet):
                 {
                     "product_code": p.product_code,
                     "product_title": p.product_title,
-                    "summary_of_guidance": p.update_ref.summary_of_guidance
-                    if p.update_ref
-                    else "",
+                    "summary_of_guidance": (
+                        p.update_ref.summary_of_guidance if p.update_ref else ""
+                    ),
                     "product_type": p.update_ref.product_type if p.update_ref else "",
                 }
                 for p in products
@@ -2220,46 +2234,16 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
     permission_classes = [AllowAny]
 
     def retrieve(self, request, product_code=None, *args, **kwargs):
-        # Decode and sanitize product code
-        code = unquote(product_code or "").strip()
-        if not code:
-            return handle_error(
-                ErrorCode.PRODUCT_NOT_FOUND,
-                ErrorMessage.PRODUCT_NOT_FOUND,
-                status.HTTP_404_NOT_FOUND,
-            )
-
-        #  Prefetch related order_limits for per-user org limit lookups
-        product = (
-            Product.objects.filter(product_code=code)
-            .select_related("update_ref")
-            .prefetch_related("order_limits")
-            .first()
-        )
-
-        if not product:
-            return handle_error(
-                ErrorCode.PRODUCT_NOT_FOUND,
-                ErrorMessage.PRODUCT_NOT_FOUND,
-                status.HTTP_404_NOT_FOUND,
-            )
+        product, code, error = self._get_product_or_error(product_code)
+        if error:
+            return error
 
         # Build version timestamp for cache key
         ver_ts = self._get_version_timestamp(product)
-        cache_key, bypass_cache = self._get_cache_key_and_bypass(request, code, ver_ts)
-
-        # Try returning cached response (skip for staff or ?fresh=1)
-        if not bypass_cache:
-            cached_data = cache.get(cache_key)
-            if cached_data:
-                return self._cached_response(cached_data, code, ver_ts)
-
-        #  Serialize product with full context (for user-aware fields)
-        serializer = ProductSerializer(product, context={"request": request})
-        data = serializer.data
-
-        #  Apply presigned URLs and metadata
-        self._process_presigned_urls(data)
+        # Build data (with cache, serialization, presigned URLs)
+        data, cache_key, bypass_cache = self._build_response_data(
+            request, product, code, ver_ts
+        )
 
         #  Cache the result for faster repeated lookups
         ttl = getattr(settings, "CACHE_TTL_DETAIL", 60)
@@ -2284,6 +2268,42 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
             timestamps.append(product.update_ref.updated_at)
         return int(max(timestamps).timestamp()) if timestamps else 0
 
+    def _get_product_or_error(
+        self, product_code: Optional[str]
+    ) -> tuple[Optional[Product], str, Optional[JsonResponse]]:
+        """Decode product_code and fetch product or return an error response."""
+        code = unquote(product_code or "").strip()
+        if not code:
+            return (
+                None,
+                code,
+                handle_error(
+                    ErrorCode.PRODUCT_NOT_FOUND,
+                    ErrorMessage.PRODUCT_NOT_FOUND,
+                    status.HTTP_404_NOT_FOUND,
+                ),
+            )
+        #  Prefetch related order_limits for per-user org limit lookups
+        product = (
+            Product.objects.filter(product_code=code)
+            .select_related("update_ref")
+            .prefetch_related("order_limits")
+            .first()
+        )
+
+        if not product:
+            return (
+                None,
+                code,
+                handle_error(
+                    ErrorCode.PRODUCT_NOT_FOUND,
+                    ErrorMessage.PRODUCT_NOT_FOUND,
+                    status.HTTP_404_NOT_FOUND,
+                ),
+            )
+
+        return product, code, None
+
     def _get_cache_key_and_bypass(
         self, request, code: str, ver_ts: int
     ) -> tuple[str, bool]:
@@ -2293,6 +2313,25 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
             request.user, "is_staff", False
         )
         return cache_key, bypass_cache
+
+    def _build_response_data(
+        self, request, product: Product, code: str, ver_ts: int
+    ) -> tuple[dict, str, bool]:
+        # Build cache key + bypass flag
+        cache_key, bypass_cache = self._get_cache_key_and_bypass(request, code, ver_ts)
+
+        # Try returning cached response (skip for staff or ?fresh=1)
+        if not bypass_cache:
+            cached_data = cache.get(cache_key)
+            if cached_data:
+                return cached_data, cache_key, bypass_cache
+
+        #  Serialize product with full context (for user-aware fields)
+        serializer = ProductSerializer(product, context={"request": request})
+        data = serializer.data
+        #  Apply presigned URLs and metadata
+        self._process_presigned_urls(data)
+        return data, cache_key, bypass_cache
 
     def _cached_response(self, cached: dict, code: str, ver_ts: int) -> JsonResponse:
         """Return cached JSON response with headers."""
@@ -2312,6 +2351,55 @@ class ProductDetailView(PresignedUrlMixin, viewsets.ViewSet):
         resp["ETag"] = f'W/"{code}-{ver_ts}"'
         if ver_ts:
             resp["Last-Modified"] = http_date(ver_ts)
+
+
+class ProductDownloadUrlsView(ProductDetailView):
+    """
+    Returns only presigned S3 URLs + metadata for product downloads.
+    """
+
+    def retrieve(self, request, product_code=None, *args, **kwargs):
+        product, code, error = self._get_product_or_error(product_code)
+        if error:
+            return error
+
+        # Build version timestamp for cache key
+        ver_ts = self._get_version_timestamp(product)
+        # Build data (with cache, serialization, presigned URLs)
+        data, cache_key, bypass_cache = self._build_response_data(
+            request, product, code, ver_ts
+        )
+        downloads = self._extract_product_downloads(data)
+
+        ttl = getattr(settings, "CACHE_TTL_DETAIL", 60)
+        if ttl > 0 and not bypass_cache:
+            cache.set(cache_key, downloads, ttl)
+
+        return self._fresh_response(downloads, code, ver_ts)
+
+    def _get_cache_key_and_bypass(
+        self, request, code: str, ver_ts: int
+    ) -> tuple[str, bool]:
+        cache_key = f"product_downloads:v{ver_ts}:{code}"
+        bypass_cache = (request.GET.get("fresh") == "1") or getattr(
+            request.user, "is_staff", False
+        )
+        return cache_key, bypass_cache
+
+    def _extract_product_downloads(self, data: dict) -> dict:
+        """Return only processed product_downloads with a stable shape."""
+        update_ref = data.get("update_ref")
+        if isinstance(update_ref, dict):
+            downloads = update_ref.get("product_downloads")
+            if downloads is not None:
+                return downloads
+        return {
+            "main_download_url": None,
+            "video_url": None,
+            "web_download_url": [],
+            "print_download_url": [],
+            "transcript_url": [],
+        }
 
 
 class ProductDetailDelete(ErrorHandlingMixin, View):
@@ -2423,22 +2511,30 @@ class ProductStatusUpdateView(APIView):
                     status_code=HTTP_404_NOT_FOUND,
                 )
 
+            request_data = self.get_request_data(request)
+            if isinstance(request_data, JsonResponse):
+                return request_data
+
+            action = request_data.get("action")
+            if action == "confirm_schedule_publish":
+                return self._confirm_schedule_publish(product, request)
+
             # Validate and obtain the new status using a helper method.
-            validation = self._validate_status_update(product, request)
+            validation = self._validate_status_update(product, request_data)
             if isinstance(validation, JsonResponse):
                 return validation
             new_status = validation
 
-            # if we’re moving from live → draft, set suppress_event so no signals fire
-            if product.status == "live" and new_status == "draft":
-                product.suppress_event = True
-                logger.info(
-                    f"Moving product {product.product_code} live→draft; suppress_event set to True"
-                )
-
             editor = getattr(request, "user", None)
             if isinstance(editor, User):
                 product.user_ref = editor
+
+            # A resource must be explicitly re-scheduled after moving back to draft.
+            if product.status != "draft" and new_status == "draft":
+                product.is_scheduled_publish = False
+            elif new_status != "draft":
+                product.is_scheduled_publish = False
+
             product.status = new_status
 
             # If transitioning to "live" and publish_date is not already set, update it to today's date.
@@ -2504,16 +2600,59 @@ class ProductStatusUpdateView(APIView):
         except Product.DoesNotExist:
             return None
 
-    def get_status_from_request(self, request) -> Optional[str]:
-        """Extract the new status from the request body with logging."""
+    def get_request_data(self, request) -> Union[dict, JsonResponse]:
+        """Parse and return request JSON body once for this endpoint."""
         try:
             raw_data = request.body.decode("utf-8")
             logger.info(f"Received request body: {raw_data}")
-            data = json.loads(raw_data)
-            return data.get("status")
+            return json.loads(raw_data)
         except json.JSONDecodeError as e:
             logger.error(f"JSON decode error: {str(e)}")
-            return None
+            return handle_error(
+                ErrorCode.INVALID_DATA,
+                ErrorMessage.INVALID_DATA,
+                status_code=HTTP_400_BAD_REQUEST,
+            )
+
+    def get_status_from_request(self, request_data: dict) -> Optional[str]:
+        """Extract the new status from parsed request data."""
+        return request_data.get("status")
+
+    def _confirm_schedule_publish(self, product: Product, request) -> JsonResponse:
+        """Confirm if resource is in draft state for scheduled publish"""
+        if product.status != "draft":
+            return handle_error(
+                ErrorCode.INVALID_STATUS_TRANSITION,
+                "Only draft resources can be scheduled.",
+                status_code=HTTP_400_BAD_REQUEST,
+            )
+
+        if not product.publish_date or product.publish_date <= timezone.localdate():
+            return handle_error(
+                ErrorCode.INVALID_DATA,
+                "A future publish date is required to schedule publish.",
+                status_code=HTTP_400_BAD_REQUEST,
+            )
+
+        missing_fields = self.check_required_fields(product)
+        if missing_fields:
+            return handle_error(
+                ErrorCode.MISSING_REQUIRED_FIELDS,
+                f"Missing required fields: {', '.join(missing_fields)}",
+                status_code=HTTP_400_BAD_REQUEST,
+            )
+
+        editor = getattr(request, "user", None)
+        if isinstance(editor, User):
+            product.user_ref = editor
+
+        product.is_scheduled_publish = True
+        product.save()
+        invalidate_product_caches(product.product_code)
+        return JsonResponse(
+            {"message": "Resource scheduled for publish successfully."},
+            status=HTTP_200_OK,
+        )
 
     def is_valid_status(self, status: str) -> bool:
         """Check if the provided status is valid."""
@@ -2562,7 +2701,7 @@ class ProductStatusUpdateView(APIView):
         return missing_fields
 
     def _validate_status_update(
-        self, product: Product, request
+        self, product: Product, request_data: dict
     ) -> Union[str, JsonResponse]:
         """
         Validates the status update request. It ensures that:
@@ -2576,7 +2715,7 @@ class ProductStatusUpdateView(APIView):
             new_status (str): If the update is valid.
             JsonResponse: In case of any validation error.
         """
-        new_status = self.get_status_from_request(request)
+        new_status = self.get_status_from_request(request_data)
         if not new_status:
             logger.warning("Missing or invalid status in request body.")
             return handle_error(
@@ -2756,6 +2895,34 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
 
         data = json.loads(request.body)
         logger.info("Received data for update: %s", data)
+
+        # Scheduling confirmation is explicit (confirm-scheduled-publish action).
+        # PATCH should clear stale scheduling state when publish_date becomes invalid/non-future.
+        if "publish_date" in data:
+            publish_date_raw = data.get("publish_date")
+            parsed_publish_date = None
+
+            if publish_date_raw:
+                if isinstance(publish_date_raw, str):
+                    try:
+                        parsed_publish_date = datetime.date.fromisoformat(
+                            publish_date_raw
+                        )
+                    except ValueError:
+                        parsed_publish_date = None
+                elif isinstance(publish_date_raw, datetime.date):
+                    parsed_publish_date = publish_date_raw
+
+            if (
+                not parsed_publish_date
+                or parsed_publish_date <= timezone.localdate()
+                or product.status != "draft"
+            ):
+                data["is_scheduled_publish"] = False
+
+        if data.get("status") and data.get("status") != "draft":
+            data["is_scheduled_publish"] = False
+
         product_type = data.get("product_type")
         product_downloads = data.get("product_downloads", {})
 
@@ -2829,6 +2996,20 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
                     ErrorCode.INVALID_DATA, ErrorMessage.INVALID_DATA, status_code=400
                 )
             serializer.save()
+
+            # Move scheduling state to false if later edits make the draft unpublishable.
+            if (
+                product.status == "draft"
+                and product.is_scheduled_publish
+                and (
+                    not product.publish_date
+                    or product.publish_date <= timezone.localdate()
+                    or ProductStatusUpdateView().check_required_fields(product)
+                )
+            ):
+                product.is_scheduled_publish = False
+                product.save(update_fields=["is_scheduled_publish"])
+
             logger.info(
                 "Product patched successfully for product_code=%s", decoded_product_code
             )
@@ -3298,6 +3479,47 @@ class ProductPatchView(ErrorHandlingMixin, APIView):
         product_update.save()
 
 
+class ProductCheckExistingView(APIView):
+    """
+    specif to check if a resource exists
+    before creating another one
+    (archive confirmation feat)
+
+    path: /products/search/admin/check-existing/
+
+    needs: product_title, language_id, programme_name
+    returns: exists, product_code
+    """
+
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request, *args, **kwargs):
+        product_title = request.query_params.get("product_title", "").strip()
+        language_id = request.query_params.get("language_id")
+        programme_name = request.query_params.get("program_name")
+
+        existing_product = Product.objects.filter(
+            program_name=programme_name,
+            product_title__iexact=product_title,
+            language_id=language_id,
+            status__in=["live", "draft"],
+        ).first()
+
+        exists = False
+        product_code = None
+        response_status = status.HTTP_200_OK
+
+        if existing_product:
+            exists = True
+            product_code = existing_product.product_code
+
+        return Response(
+            {"exists": exists, "product_code": product_code},
+            status=response_status,
+        )
+
+
 class ProductCreateView(ErrorHandlingMixin, APIView):
     """
     Optimized view to handle product creation via POST requests.
@@ -3309,7 +3531,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
     def post(self, request, *args, **kwargs):
         logger.info("ProductCreateView POST method called")
         data = json.loads(request.body)
-        logger.info("Data received: %s", data)
+        logger.debug("Data received: %s", data)
 
         required_fields = [
             "product_title",
@@ -3417,6 +3639,9 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return JsonResponse(ProductSerializer(product_instance).data, status=201)
 
     def get_program_and_language(self, program_name, language_id, is_uuid):
+        logger.info(
+            f"ProductCreateView::get_program_and_language({program_name}, {language_id}, {is_uuid})"
+        )
         try:
             program = Program.objects.get(programme_name=program_name)
             language_page = (
@@ -3436,6 +3661,9 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
             return None, None, None
 
     def get_product_key_and_version(self, program, product_title, language_id):
+        logger.info(
+            f"ProductCreateView::get_product_key_and_version({program}, {product_title}, {language_id})"
+        )
         product_title_ = product_title.strip()
         existing_product = Product.objects.filter(
             program_name=program.programme_name, product_title__iexact=product_title_
@@ -3454,6 +3682,9 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return product_key, version_number
 
     def mark_previous_versions_archived(self, existing_product, language_id):
+        logger.info(
+            f"ProductCreateView::mark_previous_versions_archived({existing_product}, {language_id})"
+        )
         if not existing_product:
             logger.info("No existing product found; no versions archived.")
             return
@@ -3482,6 +3713,9 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
     def generate_unique_product_code(
         self, program_id, product_key, iso_language_code, version_number
     ):
+        logger.info(
+            f"ProductCreateView::generate_unique_product_code({program_id}, {product_key}, {iso_language_code}, {version_number})"
+        )
         short_program_id = str(program_id)[:5]
         short_product_key = str(product_key)[:4]
         # remove hyphens (and any other non-alphanumerics) from the ISO code:
@@ -3495,6 +3729,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return product_code
 
     def get_or_create_parent_page(self):
+        logger.info(f"ProductCreateView::get_or_create_parent_page")
         try:
             parent_page = Page.objects.get(slug="products")
             logger.info("Parent page 'products' found.")
@@ -3511,6 +3746,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return parent_page
 
     def get_user_instance(self, user_ref_id):
+        logger.info(f"ProductCreateView::get_user_instance({user_ref_id})")
         if user_ref_id:
             try:
                 return User.objects.get(user_id=user_ref_id)
@@ -3524,6 +3760,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         return None
 
     def _is_path_collision(self, exc):
+        logger.debug("ProductCreateView:_is_path_collision")
         cause = getattr(exc, "__cause__", None)
         return (
             isinstance(cause, pg_errors.UniqueViolation)
@@ -3538,6 +3775,7 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
         Attempts up to 3 times to lock the parent and then add the new Product.
         Retries on path-key collisions.
         """
+        logger.info("ProductCreateView:create_product_instance")
         for attempt in range(3):
             try:
                 with transaction.atomic():
@@ -3563,13 +3801,10 @@ class ProductCreateView(ErrorHandlingMixin, APIView):
                         program_name=data["program_name"],
                         tag=data["tag"],
                         publish_date=data.get("publish_date"),
-                        suppress_event=False,
                     )
 
                     # add_child allocates path/depth, then saves
                     parent_page.add_child(instance=product_instance)
-                    product_instance.save()
-                    product_instance.refresh_from_db()
                     return product_instance
 
             except IntegrityError as exc:
@@ -4110,6 +4345,79 @@ class ProductSearchUserView(BaseProductSearchView):
     # tuneable cap for the pre-ranked set (before dedupe/rank)
     PRE_RANK_LIMIT = int(getattr(settings, "SEARCH_PRE_RANK_LIMIT", 2000))
 
+    def _build_queryset(self, request):
+        """
+        Unified search:
+          - q: single text query (code or title)
+          - legacy: product_code / product_title still supported
+        """
+        q_param = request.GET.get("q")
+        product_code = request.GET.get("product_code")
+        product_title = request.GET.get("product_title")
+
+        # Validate legacy params lightly
+        if product_code and not re.match(PRODUCT_CODE_PATTERN, product_code):
+            raise ValidationError("Invalid product_code format")
+        if product_title and not isinstance(product_title, str):
+            raise ValidationError("Invalid product_title")
+
+        base = Product.objects.filter(self.get_default_query()).distinct()
+
+        # CASE A: unified q param (recommended)
+        if q_param:
+            filters, q_norm, q_code_norm = build_search_filters(q_param)
+            qs = base.filter(filters)
+
+            # Add similarity annotations and rank
+            qs = annotate_similarity(qs, q_norm, q_code_norm).order_by(
+                "-rank", "product_title"
+            )
+
+            # If prefix route returns too few, widen with fuzzy tolerance
+            if qs.count() < 10:
+                widened = annotate_similarity(base, q_norm, q_code_norm)
+                widened = fuzzy_threshold_filter(
+                    widened, q_norm, q_code_norm, min_sim=0.15
+                )
+                qs = (qs | widened).distinct().order_by("-rank", "product_title")
+
+            return qs, q_param, q_norm, q_code_norm
+
+        # CASE B: legacy params
+        query = self.get_default_query()
+        if product_code:
+            normalized = normalize_code(product_code)
+            query &= Q(product_code_no_dashes__icontains=normalized)
+        if product_title:
+            query &= Q(product_title__icontains=normalize_text(product_title))
+
+        qs = Product.objects.filter(query).distinct()
+        return (
+            qs,
+            (product_title or product_code),
+            normalize_text(product_title or ""),
+            normalize_code(product_code or ""),
+        )
+
+    def _did_you_mean(self, base_qs, q_norm, q_code_norm, limit=5):
+        """
+        Suggest close alternatives if zero results.
+        """
+        suggestions = annotate_similarity(base_qs, q_norm, q_code_norm)
+        suggestions = fuzzy_threshold_filter(
+            suggestions, q_norm, q_code_norm, min_sim=0.12
+        )
+        suggestions = suggestions.order_by("-rank").values(
+            "product_title", "product_code_no_dashes"
+        )[:limit]
+        return list(suggestions)
+
+    def get_default_query(self) -> Q:
+        """
+        return only live, latest products for public search
+        """
+        return Q(is_latest=True, status="live")
+
     def get(self, request, *args, **kwargs) -> Response:
         try:
             q = (request.GET.get("q") or "").strip()
@@ -4157,6 +4465,20 @@ class ProductSearchUserView(BaseProductSearchView):
             # Now dedupe is safe
             deduped = self._dedupe_by_norm_code_fast(restricted_qs)
 
+            # if no results
+            if not deduped:
+                _, _, q_norm, q_code_norm = self._build_queryset(request)
+
+                # soft 'did you mean'
+                base = Product.objects.filter(self.get_default_query())
+                return Response(
+                    {
+                        "detail": "No products found.",
+                        "did_you_mean": self._did_you_mean(base, q_norm, q_code_norm),
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
             ranked = self._annotate_rank_signals(deduped, q, q_norm, looks_like_code)
 
             sort_by = self._normalize_sort_param(request.GET.get("sort_by"))
@@ -4199,6 +4521,105 @@ class ProductSearchAdminView(BaseProductSearchView):
 
     def get_default_query(self) -> Q:
         return Q()
+
+    def postprocess_response_data(self, response_data: dict, products) -> dict:
+        response_data["recommended_products"] = get_recommended_products(products)
+        return response_data
+
+
+class ProductAutocompleteView(APIView):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        q = (request.GET.get("q") or "").strip()
+        if not q:
+            return Response(
+                {"suggestions": [], "has_more": False}, status=status.HTTP_200_OK
+            )
+
+        # limit handling: default 10, clamp 1..50
+        try:
+            limit = int(request.GET.get("limit", 10))
+        except ValueError:
+            limit = 10
+        limit = max(1, min(limit, 50))
+        fetch_cap = limit + 5  # grab a few extra for dedupe
+
+        base = Product.objects.filter(is_latest=True, status="live")
+        filters, q_norm, q_code_norm = build_search_filters(q)
+
+        # 1) prefix first (fast)
+        prefix_qs = base.filter(filters).values("product_title", "product_code")[
+            :fetch_cap
+        ]
+        prefix = list(prefix_qs)
+
+        # 2) fuzzy tail if we still need more
+        fuzzy = []
+        if len(prefix) < limit:
+            widened = annotate_similarity(base, q_norm, q_code_norm)
+            widened = fuzzy_threshold_filter(widened, q_norm, q_code_norm, 0.15)
+            widened = (
+                widened.exclude(
+                    Q(product_title__istartswith=q_norm)
+                    | Q(product_code__istartswith=q_code_norm)
+                )
+                .order_by("-rank")
+                .values("product_title", "product_code")[:fetch_cap]
+            )
+            fuzzy = list(widened)
+
+        # 3) merge + dedupe (prefer keeping earlier/prefix items)
+        seen = set()
+        merged = []
+        more_flag = False
+
+        def add_items(items):
+            nonlocal merged, seen
+            for it in items:
+                key = it.get("product_code") or (it.get("product_title"), None)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(it)
+                if len(merged) >= limit:
+                    return True
+            return False
+
+        filled = add_items(prefix)
+        if not filled:
+            add_items(fuzzy)
+
+        # If we still have more candidates beyond the limit, set has_more
+        has_more = (
+            len(prefix) > fetch_cap
+            or len(fuzzy) > fetch_cap
+            or (len(merged) >= limit and (len(prefix) + len(fuzzy)) > limit)
+        )
+
+        return Response(
+            {"suggestions": merged[:limit], "has_more": has_more},
+            status=status.HTTP_200_OK,
+        )
+
+
+class ProductUsersSearchFilterAPIView(generics.ListAPIView):
+    """
+    GET /api/v1/products/user/search/filter/
+    """
+
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [AllowAny]
+    serializer_class = ProductSearchSerializer
+    pagination_class = CustomPagination
+    queryset = Product.objects.filter(status="live", is_latest=True)
+
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_class = ProductFilter
+    search_fields = ["product_title", "product_code_no_dashes"]
+    ordering_fields = VALID_SORT_FIELDS
+    ordering = ["product_title", "-updated_at"]
 
 
 # --------------------------------------------------------------------------- #
@@ -4513,4 +4934,46 @@ class IncompleteProductsView(APIView):
         return JsonResponse(incomplete, safe=False)
 
 
-#
+# Admin-only endpoint for manually triggering scheduled publish.
+class ScheduledPublishAdminView(APIView):
+    authentication_classes = [CustomTokenAuthentication]
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request, *args, **kwargs):
+        published, errors = run_scheduled_publish()
+        return Response(
+            {
+                "published": published,
+                "errors": errors,
+                "published_count": len(published),
+                "error_count": len(errors),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+# Internal endpoint used by the scheduled Lambda trigger.
+class ScheduledPublishTriggerView(APIView):
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        api_key = request.headers.get("Api-Key", "")
+        expected_api_key = settings.APS_API_KEY
+
+        if not expected_api_key or not compare_digest(api_key, expected_api_key):
+            return Response(
+                {"message": "Unauthorized."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        published, errors = run_scheduled_publish()
+        return Response(
+            {
+                "published": published,
+                "errors": errors,
+                "published_count": len(published),
+                "error_count": len(errors),
+            },
+            status=status.HTTP_200_OK,
+        )

@@ -21,6 +21,7 @@ AZURE_B2C_CLIENT_ID = config.get_azure_b2c_client_id()
 AZURE_B2C_SECRET_ID = config.get_azure_b2c_secret_id()
 AZURE_B2C_TENANT_ID = config.get_azure_b2c_tenant_id()
 DJANGO_SECRET = config.get_django_secret_key()
+APS_API_KEY = config.get_aps_api_key()
 public_key = config.get_rsa_public_key()
 private_key = config.get_rsa_private_key()
 HPUB_FRONT_END_URL = config.get_hpub_base_api_url()
@@ -154,6 +155,8 @@ INSTALLED_APPS = [
     "core.diseases",
     "core.vaccinations",
     "core.customer_support",
+    "core.notifications",
+    "core.analytics",
     "core.where_to_use",
     "core.languages",
     "django_filters",

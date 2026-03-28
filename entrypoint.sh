@@ -99,19 +99,19 @@ echo "Number of pending migrations: $pending_count"
 # -----------------------------------------------------------------------------
 # Step 4: Apply pending migrations if needed
 # -----------------------------------------------------------------------------
-if [ "$pending_count" -gt 0 ]; then
-  echo "=============================="
-  echo "Applying pending migrations…"
-  migrate_output=$(python manage.py migrate --verbosity=2 2>&1) || {
-    echo "MIGRATE FAILED:"
-    echo "$migrate_output"
-    exit 1
-  }
-  echo "$migrate_output"
-else
-  echo "No pending migrations found. Skipping migrate step."
-fi
-
+# if [ "$pending_count" -gt 0 ]; then
+#   echo "=============================="
+#   echo "Applying pending migrations…"
+#   migrate_output=$(python manage.py migrate --verbosity=2 2>&1) || {
+#     echo "MIGRATE FAILED:"
+#     echo "$migrate_output"
+#     exit 1
+#   }
+#   echo "$migrate_output"
+# else
+#   echo "No pending migrations found. Skipping migrate step."
+# fi
+ 
 # -----------------------------------------------------------------------------
 # Step 5: Start the cron service and schedule the cron jobs
 # -----------------------------------------------------------------------------
@@ -132,8 +132,20 @@ chmod 0644 /etc/cron.d/publish_scheduled_products
 echo "Scheduled: publish_scheduled_products at 16:50 GMT daily."
 
 # -----------------------------------------------------------------------------
-# Step 6: Start the Gunicorn WSGI server
+# Step 6: Verify search stack (extensions, function, indexes)
+# -----------------------------------------------------------------------------
+# echo "Checking search prerequisites (extensions/indexes)…"
+# if ! python manage.py check_search_ready; then
+#   echo "Search readiness check failed. Refusing to start."; exit 1
+# fi
+
+# -----------------------------------------------------------------------------
+# Step 7: Start the Gunicorn WSGI server
 # -----------------------------------------------------------------------------
 echo "=============================="
 echo "Starting Gunicorn…"
-exec gunicorn health_pubs.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 600
+GUNICORN_WORKERS=3
+GUNICORN_THREADS=2
+GUNICORN_BACKLOG=2048
+GUNICORN_TIMEOUT=100 # ALB timeout is currently 2 minutes (120s)
+exec gunicorn health_pubs.wsgi:application --bind 0.0.0.0:8000 --workers "${GUNICORN_WORKERS}" --threads "${GUNICORN_THREADS}" --backlog "${GUNICORN_BACKLOG}" --timeout "${GUNICORN_TIMEOUT}" --graceful-timeout 30 --keep-alive 5

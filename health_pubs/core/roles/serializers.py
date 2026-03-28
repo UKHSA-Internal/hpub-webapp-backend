@@ -14,7 +14,7 @@ class RoleSerializer(serializers.ModelSerializer):
         # Check if the 'role_id' is provided in the request
         role_id = validated_data.get("role_id", None)
         if not role_id:
-            validated_data[
-                "role_id"
-            ] = uuid.uuid4()  # Generate a UUID if no id is provided
+            validated_data["role_id"] = (
+                uuid.uuid4()
+            )  # Generate a UUID if no id is provided
         return super().create(validated_data)

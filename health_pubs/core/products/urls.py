@@ -9,6 +9,7 @@ from .views import (
     ProductDeleteAll,
     ProductDetailDelete,
     ProductDetailView,
+    ProductDownloadUrlsView,
     ProductPatchView,
     ProductSearchAdminView,
     ProductSearchUserView,
@@ -19,6 +20,10 @@ from .views import (
     ProductUsersFilterView,
     ProgramProductsView,
     ProductViewSet,
+    ProductAutocompleteView,
+    ProductCheckExistingView,
+    ScheduledPublishAdminView,
+    ScheduledPublishTriggerView,
 )
 
 router = DefaultRouter()
@@ -36,9 +41,29 @@ urlpatterns = [
     path("admin/all/", ProductAdminListView.as_view(), name="list-products-admin"),
     path("users/all/", ProductUsersListView.as_view(), name="list-products-user"),
     path(
+        "search/admin/check-existing/",
+        ProductCheckExistingView.as_view(),
+        name="check-existing",
+    ),
+    path(
         "search/admin/", ProductSearchAdminView.as_view(), name="product-search-admin"
     ),
     path("search/user/", ProductSearchUserView.as_view(), name="product-search-user"),
+    path(
+        "search/autocomplete/",
+        ProductAutocompleteView.as_view(),
+        name="product-autocomplete",
+    ),
+    path(
+        "scheduled-publish/admin/",
+        ScheduledPublishAdminView.as_view(),
+        name="publish-scheduled-admin",
+    ),
+    path(
+        "scheduled-publish/",
+        ScheduledPublishTriggerView.as_view(),
+        name="publish-scheduled-trigger",
+    ),
     path("user_filter/", ProductUsersFilterView.as_view(), name="user-product-filter"),
     path(
         "admin_filter/", ProductAdminFilterView.as_view(), name="admin-product-filter"
@@ -58,6 +83,11 @@ urlpatterns = [
         "<str:product_code>/",
         ProductDetailView.as_view({"get": "retrieve"}),
         name="product-detail",
+    ),
+    path(
+        "<str:product_code>/download-urls/",
+        ProductDownloadUrlsView.as_view({"get": "retrieve"}),
+        name="product-download-urls",
     ),
     path(
         "put/<str:product_code>/",

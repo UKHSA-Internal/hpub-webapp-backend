@@ -6,6 +6,7 @@ from functools import wraps
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
+from core.utils import logging_utils
 from core.utils.check_product_required_fields_aps_decorator import (
     check_required_event_fields,
 )
@@ -39,16 +40,7 @@ STATUS_MAPPING = {
     "draft": "Draft",
 }
 
-
-def skip_if_suppressed(fn):
-    @wraps(fn)
-    def wrapper(sender, instance, **kwargs):
-        if getattr(instance, "suppress_event", False):
-            logger.info("Event suppressed for %s", instance.product_code)
-            return
-        return fn(sender, instance, **kwargs)
-
-    return wrapper
+logger = logging_utils.get_logger(__name__)
 
 
 def build_max_order_from_order_limits(product_instance):
@@ -58,6 +50,7 @@ def build_max_order_from_order_limits(product_instance):
 
     Also deduplicates on (companyKeys, quantity) to avoid repeated rows.
     """
+    logger.info("build_max_order_from_order_limits")
     max_order = []
     seen = set()
 
@@ -86,6 +79,7 @@ def build_max_order_from_order_limits(product_instance):
 
 
 def prepare_product_data(product_instance, required_fields_enum, status):
+    logger.info("prepare_product_data")
     update = getattr(product_instance, "update_ref", None)
     normalised = STATUS_MAPPING.get(status, status)
     max_order = build_max_order_from_order_limits(product_instance)
@@ -99,13 +93,15 @@ def prepare_product_data(product_instance, required_fields_enum, status):
 
     getattr(update, "product_type", "") or ""
     uom = getattr(update, "unit_of_measure", None)
+    environment = config.get_environment()
 
     # DRAFT PAYLOAD
     if status == "draft":
         return {
             "publicationId": product_instance.product_code,
-            "title": product_instance.product_title,
+            "title": f"{product_instance.language_name}-{product_instance.product_title}",
             "status": normalised,
+            "environment": environment,
             "maxOrder": [],
             "uom": uom,
             "runToZero": getattr(update, "run_to_zero", False),
@@ -115,7 +111,7 @@ def prepare_product_data(product_instance, required_fields_enum, status):
             "invoicingClient": invoicing_client.invoice_client.value,
             "productGroup": product_group.product_group_name.value,
             "minimumStockLevel": 0,
-            "relatedArticle": "",
+            "relatedArticle": product_instance.file_url,
             "stockOwner": [getattr(update, "stock_owner_email_address", "")],
             "stockReferral": [getattr(update, "order_referral_email_address", "")],
         }
@@ -123,8 +119,9 @@ def prepare_product_data(product_instance, required_fields_enum, status):
     # LIVE PAYLOAD
     full = {
         "publicationId": product_instance.product_code,
-        "title": product_instance.product_title,
+        "title": f"{product_instance.language_name}-{product_instance.product_title}",
         "status": normalised,
+        "environment": environment,
         "maxOrder": max_order,
         "uom": uom,
         "runToZero": getattr(update, "run_to_zero", False),
@@ -143,6 +140,7 @@ def prepare_product_data(product_instance, required_fields_enum, status):
 
 
 def send_product_event(product_instance, event_type, detail_type, required_fields_enum):
+    logger.info("send_product_event")
     payload = prepare_product_data(product_instance, required_fields_enum, event_type)
     logger.info("Prepared %s payload: %s", event_type, payload)
 
@@ -174,9 +172,9 @@ def send_product_event(product_instance, event_type, detail_type, required_field
 
 
 @receiver(post_save, sender=Product)
-@skip_if_suppressed
 @check_required_event_fields([f.value for f in required_event_fields_draft])
 def send_product_draft_event(sender, instance, **kwargs):
+    logger.info("send_product_draft_event")
     instance.refresh_from_db()
     if instance.update_ref:
         instance.update_ref.refresh_from_db()
@@ -191,9 +189,9 @@ def send_product_draft_event(sender, instance, **kwargs):
 
 
 @receiver(post_save, sender=Product)
-@skip_if_suppressed
 @check_required_event_fields([f.value for f in required_event_fields_live])
 def send_product_live_event(sender, instance, **kwargs):
+    logger.info("send_product_live_event")
     instance.refresh_from_db()
     if instance.update_ref:
         instance.update_ref.refresh_from_db()
@@ -208,9 +206,9 @@ def send_product_live_event(sender, instance, **kwargs):
 
 
 @receiver(post_save, sender=Product)
-@skip_if_suppressed
 @check_required_event_fields([f.value for f in required_event_fields_archived])
 def send_product_archived_event(sender, instance, **kwargs):
+    logger.info("send_product_archived_event")
     instance.refresh_from_db()
     if instance.update_ref:
         instance.update_ref.refresh_from_db()
@@ -225,9 +223,9 @@ def send_product_archived_event(sender, instance, **kwargs):
 
 
 @receiver(post_save, sender=Product)
-@skip_if_suppressed
 @check_required_event_fields([f.value for f in required_event_fields_withdrawn])
 def send_product_withdrawn_event(sender, instance, **kwargs):
+    logger.info("send_product_withdrawn_event")
     instance.refresh_from_db()
     if instance.update_ref:
         instance.update_ref.refresh_from_db()

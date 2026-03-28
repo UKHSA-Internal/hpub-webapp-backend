@@ -288,7 +288,6 @@ class ProductUpdateSerializer(serializers.ModelSerializer):
 
 class ProductSerializer(serializers.ModelSerializer):
     status = serializers.CharField(max_length=50, default="draft")
-    suppress_event = serializers.BooleanField(default=False, required=False)
     product_key = serializers.CharField(max_length=50)
     program_id = serializers.SlugRelatedField(
         slug_field="program_id", queryset=Program.objects.all()
@@ -310,7 +309,6 @@ class ProductSerializer(serializers.ModelSerializer):
         ],
         required=True,
     )
-    suppress_event = serializers.BooleanField(default=False, required=False)
 
     update_ref = ProductUpdateSerializer(read_only=True)
     product_code_no_dashes = serializers.CharField(read_only=True)
@@ -329,6 +327,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "status",
             "tag",
             "publish_date",
+            "is_scheduled_publish",
             "is_latest",
             "language_name",
             "user_ref",
@@ -337,7 +336,6 @@ class ProductSerializer(serializers.ModelSerializer):
             "product_code",
             "product_code_no_dashes",
             "version_number",
-            "suppress_event",
             "update_ref",
             "order_limits",
             "user_order_limit",
@@ -388,9 +386,9 @@ class ProductSerializer(serializers.ModelSerializer):
         # Check if the 'product_id' is provided in the request
         product_id = validated_data.get("product_id", None)
         if not product_id:
-            validated_data[
-                "product_id"
-            ] = uuid.uuid4()  # Generate a UUID if no id is provided
+            validated_data["product_id"] = (
+                uuid.uuid4()
+            )  # Generate a UUID if no id is provided
         return super().create(validated_data)
 
 
@@ -490,5 +488,5 @@ class ProductSearchSerializer(serializers.ModelSerializer):
             "updated_at",
             "publish_date",
             "version_number",
-            "suppress_event",
+            "is_scheduled_publish",
         )

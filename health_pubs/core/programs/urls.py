@@ -1,49 +1,41 @@
-# your_app/urls.py
-
 from django.urls import path
 from rest_framework.routers import DefaultRouter
 
-from .views import (
-    ProgramListViewSet,
-    ProgramCreateViewSet,
-    ProgramUpdateViewSet,
-    ProgramDestroyViewSet,
-    ProgramNameCheckViewSet,
-    BulkProgramDeleteViewSet,
-    BulkProgramUploadViewSet,
-)
+from core.programs.views import v1
 
-featured_programs = ProgramListViewSet.as_view({"get": "featured_programs"})
-filtered_programs = ProgramListViewSet.as_view({"get": "programs_with_related"})
 
 router = DefaultRouter()
-router.register(r"programs", ProgramListViewSet, basename="program")
+router.register(r"api/v1/programs", v1.ProgramListViewSet, basename="program")
 router.register(
-    r"programs/name", ProgramNameCheckViewSet, basename="program-name-check"
+    r"api/v1/programs/name", v1.ProgramNameCheckViewSet, basename="program-name-check"
 )
-router.register(r"programs/update", ProgramUpdateViewSet, basename="program-update")
-router.register(r"programs/destroy", ProgramDestroyViewSet, basename="program-destroy")
+router.register(r"api/v1/programs/update", v1.ProgramUpdateViewSet, basename="program-update")
+router.register(r"api/v1/programs/destroy", v1.ProgramDestroyViewSet, basename="program-destroy")
 router.register(
-    r"programs/bulk-delete", BulkProgramDeleteViewSet, basename="bulk-delete"
+    r"api/v1/programs/bulk-delete", v1.BulkProgramDeleteViewSet, basename="bulk-delete"
 )
 
 urlpatterns = [
     # 1) your other custom endpoints
     path(
-        "programs/create/",
-        ProgramCreateViewSet.as_view({"post": "create"}),
+        "api/v1/programs/create/",
+        v1.ProgramCreateViewSet.as_view({"post": "create"}),
         name="programs-create",
     ),
-    path("programs/featured/", featured_programs, name="programs-featured"),
     path(
-        "programs/filtered-programmes/",
-        filtered_programs,
+        "api/v1/programs/featured/",
+        v1.ProgramListViewSet.as_view({"get": "featured_programs"}),
+        name="programs-featured"
+    ),
+    path(
+        "api/v1/programs/filtered-programmes/",
+        v1.ProgramListViewSet.as_view({"get": "programs_with_related"}),
         name="programs-filtered",
     ),
     # 2) now your bulk-upload *before* the router’s catch‑alls
     path(
-        "programs/bulk-upload/",
-        BulkProgramUploadViewSet.as_view(),
+        "api/v1/programs/bulk-upload/",
+        v1.BulkProgramUploadViewSet.as_view(),
         name="programs-bulk-upload",
     ),
     # 3) finally, drop in all of the router‑generated routes

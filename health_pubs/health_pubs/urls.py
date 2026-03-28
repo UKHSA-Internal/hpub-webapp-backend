@@ -12,7 +12,7 @@ urlpatterns = [
     path(f"{API_PREFIX}products/", include("core.products.urls")),
     path("", include("core.roles.urls")),
     path(f"{API_PREFIX}", include("core.orders.urls")),
-    path(f"{API_PREFIX}", include("core.programs.urls")),
+    path("", include("core.programs.urls")),
     path("", include("core.addresses.urls")),
     path("", include("core.organizations.urls")),
     path("", include("core.establishments.urls")),

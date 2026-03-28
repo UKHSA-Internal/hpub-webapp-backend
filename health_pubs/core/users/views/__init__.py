@@ -12,3 +12,5 @@ from .v1 import (
     DeleteAccountView
 )
 from .v2 import UsersV2
+from core.users.views.v2 import UserRolesView
+from core.users.views.v2 import UserStateView

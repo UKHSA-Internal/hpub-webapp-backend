@@ -19,7 +19,7 @@ urlpatterns = [
     path(f"{API_PREFIX}", include("core.order_limits.urls")),
     path(f"{API_PREFIX}", include("core.feedbacks.urls")),
     path(f"{API_PREFIX}", include("core.audiences.urls")),
-    path(f"{API_PREFIX}", include("core.diseases.urls")),
+    path("", include("core.diseases.urls")),
     path(f"{API_PREFIX}", include("core.vaccinations.urls")),
     path(f"{API_PREFIX}", include("core.customer_support.urls")),
     path(f"{API_PREFIX}", include("core.languages.urls")),

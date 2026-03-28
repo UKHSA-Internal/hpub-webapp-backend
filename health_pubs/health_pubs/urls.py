@@ -15,7 +15,7 @@ urlpatterns = [
     path(f"{API_PREFIX}", include("core.programs.urls")),
     path(f"{API_PREFIX}", include("core.addresses.urls")),
     path("", include("core.organizations.urls")),
-    path(f"{API_PREFIX}", include("core.establishments.urls")),
+    path("", include("core.establishments.urls")),
     path(f"{API_PREFIX}", include("core.order_limits.urls")),
     path(f"{API_PREFIX}", include("core.feedbacks.urls")),
     path(f"{API_PREFIX}", include("core.audiences.urls")),

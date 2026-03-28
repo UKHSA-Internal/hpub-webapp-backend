@@ -2,6 +2,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from core.establishments.views import v1
+from core.establishments.views import v2
 
 router = DefaultRouter()
 router.register(
@@ -33,6 +34,11 @@ router.register(
     r"api/v1/establishments/bulk-delete",
     v1.EstablishmentDeleteViewSet,
     basename="establishments-bulk-delete",
+)
+router.register(
+    r"api/v2/organisations/(?P<organisation_id>[^/.]+)/establishments",
+    v2.OrganisationEstablishmentsV2,
+    basename="establishments-v2",
 )
 
 urlpatterns = [

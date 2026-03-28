@@ -24,8 +24,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from wagtail.models import Page
 
-from .models import Address
-from .serializers import AddressSerializer
+from core.addresses.models import Address
+from core.addresses.serializers import AddressSerializer
 
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

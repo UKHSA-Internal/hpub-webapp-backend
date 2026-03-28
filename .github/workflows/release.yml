@@ -83,7 +83,7 @@ jobs:
       - name: Modify ECS Task Definition Image
         if: ${{ matrix.environment == 'prod' }}
         id: render-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@06472d439cb66af6210a6709bfc842c26b053706 # v1
+        uses: aws-actions/amazon-ecs-render-task-definition@77954e213ba1f9f9cb016b86a1d4f6fcdea0d57e # v1
         with:
           task-definition: task-definition.json
           container-name: app

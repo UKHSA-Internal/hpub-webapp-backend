@@ -10,7 +10,7 @@ urlpatterns = [
     path(f"{API_PREFIX}", include("core.event_analytics.urls")),
     path("", include("core.users.urls")),
     path(f"{API_PREFIX}products/", include("core.products.urls")),
-    path(f"{API_PREFIX}", include("core.roles.urls")),
+    path("", include("core.roles.urls")),
     path(f"{API_PREFIX}", include("core.orders.urls")),
     path(f"{API_PREFIX}", include("core.programs.urls")),
     path(f"{API_PREFIX}", include("core.addresses.urls")),

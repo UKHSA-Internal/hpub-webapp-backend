@@ -2,6 +2,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from core.organizations.views import v1
+from core.organizations.views import v2
 
 router = DefaultRouter()
 router.register(
@@ -25,6 +26,11 @@ router.register(
 )
 router.register(
     r"api/v1/organizations/update", v1.OrganizationUpdateViewSet, basename="organization-update"
+)
+router.register(
+    r"api/v2/organisations",
+    v2.OrganisationV2,
+    basename="organization-v2",
 )
 
 urlpatterns = [

@@ -25,4 +25,7 @@ urlpatterns = [
     path("api/v1/users/<str:user_id>/", views.UserDetailView.as_view(), name="users-get"),
     path("api/v1/users/list/", views.UserListView.as_view(), name="users-list"),
     path("api/v1/users/migrate-users/", views.MigrateUsersAPIView.as_view(), name="users-migrate"),
+    path('api/v2/users/<str:user_id>/roles', views.UserRolesView.as_view(), name='users-roles'),
+    path('api/v2/users/<str:user_id>/state', views.UserStateView.as_view(), name='users-state'),
+
 ] + router.urls

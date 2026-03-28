@@ -1,5 +1,5 @@
 from wagtail.models import Page
-from rest_framework import viewsets, status, filters
+from rest_framework import viewsets, status, filters, views
 from rest_framework import permissions
 from rest_framework import authentication
 from rest_framework.response import Response
@@ -117,3 +117,25 @@ class UsersV2(viewsets.ModelViewSet):
         instance = self.get_object()
         instance.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+    
+
+class UserRolesView(views.APIView):
+    authentication_classes = [authentication.TokenAuthentication]
+    permission_classes = [permissions.AllowAny]
+
+    def put(self, request, user_id):
+        return Response(
+            {"detail": "Not implemented"},
+            status=status.HTTP_501_NOT_IMPLEMENTED
+        )
+
+
+class UserStateView(views.APIView):
+    authentication_classes = [authentication.TokenAuthentication]
+    permission_classes = [permissions.AllowAny]
+
+    def put(self, request, user_id):
+        return Response(
+            {"detail": "Not implemented"},
+            status=status.HTTP_501_NOT_IMPLEMENTED
+        )

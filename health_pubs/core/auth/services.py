@@ -7,7 +7,7 @@ from django.conf import settings
 from core.utils import logging_utils
 from core.utils import custom_token_authentication
 from core.utils import token_generation_validation
-from core.users.views import validate_azure_b2c_token
+# from core.users.views import validate_azure_b2c_token
 
 
 LOGGER = logging_utils.get_logger(__name__)

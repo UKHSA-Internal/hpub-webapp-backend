@@ -2,6 +2,10 @@
 # Project-specific
 # ===========================
 
+/files/
+/config/*
+!/config/.env.example
+
 local_secrets.json
 ZscalerRootCA.crt
 dump.rdb

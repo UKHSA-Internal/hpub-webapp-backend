@@ -40,7 +40,7 @@ jobs:
       - name: Login to Amazon ECR
         if: ${{ matrix.environment == 'dev' }}
         id: login-ecr-release
-        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2
+        uses: aws-actions/amazon-ecr-login@183a1442edf41672e66566b7fc560e297a290896 # v2
 
       - name: Pull, retag, and push Application image for prod
         if: ${{ matrix.environment == 'dev' }}

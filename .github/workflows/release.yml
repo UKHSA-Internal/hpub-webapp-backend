@@ -15,6 +15,7 @@ jobs:
   deploy_to_prod:
     name: Deploy build to Prod
     runs-on: ubuntu-latest
+    environment: ${{ matrix.environment }}
     strategy:
       max-parallel: 1
       matrix:

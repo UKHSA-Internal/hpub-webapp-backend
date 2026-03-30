@@ -68,8 +68,8 @@ def get_or_create_parent_page(title, slug):
 def valid_patch_data():
     return {
         "maximum_order_quantity": 100,
-        "stock_owner_email_address": "TEST@ukhsa.gov.uk",
-        "order_referral_email_address": "TEST123@ukhsa.gov.uk",
+        "stock_owner_email_address": "test@ukhsa.gov.uk",
+        "order_referral_email_address": "test.ref@ukhsa.gov.uk",
         "minimum_stock_level": 30,
         "unit_of_measure": 20,
         "run_to_zero": True,

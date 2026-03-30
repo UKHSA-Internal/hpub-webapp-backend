@@ -14,8 +14,19 @@ repos:
   - repo: https://github.com/PyCQA/autoflake
     rev: v2.3.1
     hooks:
-    - id: autoflake
-      args: [--remove-all-unused-imports, --in-place, --ignore-init-module-imports, --remove-unused-variables]
+      - id: autoflake
+        args:
+          [
+            --remove-all-unused-imports,
+            --in-place,
+            --ignore-init-module-imports,
+            --remove-unused-variables,
+          ]
+
+  - repo: https://github.com/kynan/nbstripout
+    rev: master
+    hooks:
+      - id: nbstripout
 
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.18.1

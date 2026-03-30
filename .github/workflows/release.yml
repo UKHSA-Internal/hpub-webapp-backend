@@ -1,4 +1,4 @@
-name: "Deploy and Release to Preprod and Prod"
+name: "Deploy and release to Prod"
 
 on:
   release:
@@ -9,99 +9,108 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   ECR_NAMESPACE: ${{ vars.ECR_NAMESPACE }}
   RUN_UNIT_TESTS: ${{ vars.RUN_UNIT_TESTS }}
+  BASE_URL: ${{ vars.FPHR_BASE_URL }}
 
 jobs:
-  deploy_preprod_prod:
-    name: Deploy build to ${{ matrix.environment }}
+  deploy_to_prod:
+    name: Deploy build to Prod
     runs-on: ubuntu-latest
-    environment: ${{ matrix.environment }}
     strategy:
       max-parallel: 1
       matrix:
-        environment: ["uat", "preprod", "prod"]
-    if: github.event_name == 'release' && github.event.action == 'published'
+        environment: ["dev","prod"]
+
     permissions:
       contents: write
       id-token: write
       actions: read
     steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5
+  
+      - name: Configure AWS credential
+        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_DEPLOY_ROLE }}
           role-session-name: deploy-${{ github.sha }}
           aws-region: ${{ env.AWS_REGION }}
-      
+     
       - name: Get Release Tag
         run: echo "Release tag is ${{ github.event.release.tag_name }}"
 
-      - name: Update Parameter Store with new value
+      # docker pull + tag + push
+      - name: Login to Amazon ECR
+        if: ${{ matrix.environment == 'dev' }}
+        id: login-ecr-release
+        uses: aws-actions/amazon-ecr-login@183a1442edf41672e66566b7fc560e297a290896 # v2
+
+      - name: Pull, retag, and push Application image for prod
+        if: ${{ matrix.environment == 'dev' }}
+        id: ecr-tag-prod
         env:
-          NEW_TAG: ${{ github.event.release.tag_name }}
+          ECR_REGISTRY: ${{ steps.login-ecr-release.outputs.registry }}
         run: |
-          aws ssm put-parameter --name "/hpub/$APP_NAME/image_tag" --type "String" --value "$NEW_TAG" --overwrite
+          # Pull the PREPROD image (the last promoted artefact)
+          docker pull $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:preprod-${{ github.event.release.tag_name }}
 
-      - name: Download task definition
+          # Retag it for PROD
+          docker tag \
+            $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:preprod-${{ github.event.release.tag_name }} \
+            $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:prod-${{ github.event.release.tag_name }} \
+            $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:latest
+
+          # Push the PROD image to ECR
+          docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:prod-${{ github.event.release.tag_name }}
+
+        
+      - name: Update Parameter Store with new value
+        if: ${{ matrix.environment == 'prod' }}
+        env:
+          NEW_TAG: ${{ matrix.environment }}-${{ github.event.release.tag_name }}
         run: |
-          aws ecs describe-task-definition --task-definition aw-hpub-euw2-${{ matrix.environment }}-ecssvc-$APP_NAME --query taskDefinition > task-definition.json
+          aws ssm put-parameter \
+            --name "/hpub/$APP_NAME/image_tag" \
+            --type "String" \
+            --value "$NEW_TAG" \
+            --overwrite
 
-      - name: Modify Amazon ECS task definition with updated image URI
+      - name: Download ECS Task Definition
+        if: ${{ matrix.environment == 'prod' }}
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition aw-hpub-euw2-${{ matrix.environment }}-ecssvc-$APP_NAME \
+            --query taskDefinition \
+            > task-definition.json
+
+      - name: Modify ECS Task Definition Image
+        if: ${{ matrix.environment == 'prod' }}
         id: render-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@06472d439cb66af6210a6709bfc842c26b053706 # v1
+        uses: aws-actions/amazon-ecs-render-task-definition@77954e213ba1f9f9cb016b86a1d4f6fcdea0d57e # v1
         with:
           task-definition: task-definition.json
           container-name: app
-          # We have to construct this as Github Actions will refuse to pass the full URL from 'release' step as it contains an AWS account ID
-          image: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ github.event.release.tag_name }}
+          image: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ matrix.environment }}-${{ github.event.release.tag_name }}
 
       - name: Deploy to Amazon ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@c6e19c08506099e50400581201a3a767fd8e3ff4 # v2
+        if: ${{ matrix.environment == 'prod' }}
+        uses: aws-actions/amazon-ecs-deploy-task-definition@fc8fc60f3a60ffd500fcb13b209c59d221ac8c8c # v2
         with:
           task-definition: ${{ steps.render-task-def.outputs.task-definition }}
           service: aw-hpub-euw2-${{ matrix.environment }}-ecssvc-${{ env.APP_NAME }}
           cluster: aw-hpub-euw2-${{ matrix.environment }}-ecscluster
           wait-for-service-stability: true
 
-      - name: Determine Base URL
-        id: url
-        env:
-          environment: ${{ matrix.environment }}
-        run: |
-          if [ "$environment" == "prd" ]; then
-            prefix=hpub
-          elif [ "$environment" == "preprod" ]; then
-            prefix=hpubpp
-          elif [ "$environment" == "prod" ]; then
-            prefix=hpub
-          elif [ "$environment" == "uat" ]; then
-            prefix=hpub-uat
-          elif [ "$environment" == "test" ]; then
-            prefix=hpub-test
-          elif [ "$environment" == "dev" ]; then
-            prefix=hpub-dev
-          else
-            echo "Unknown environment. Unable to run tests."
-            exit 1
-          fi
-          echo prefix=$prefix >> $GITHUB_OUTPUT
-
       - name: End-to-end tests
         if: ${{ matrix.environment != 'prod' && matrix.environment != 'preprod' }}
         env:
-          BASE_URL: "https://${{ steps.url.outputs.prefix }}.test-and-trace.nhs.uk"
+          BASE_URL: ${{env.BASE_URL}}
         run: |
           # No end-to-end testing in place yet
           echo npx playwright test
 
       - name: Post-Deployment Smoke Test
-        if: ${{ matrix.environment != 'prod' && matrix.environment != 'preprod' }}
-        env:
-          environment_prefix: ${{ steps.url.outputs.prefix }}
-        shell: bash
+        if: ${{ matrix.environment == 'prod' }}
         run: |
-          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" https://$environment_prefix.test-and-trace.nhs.uk/api/v1/health/)
+          response=$(curl -H "user-agent: Mozilla/5.0 (compatible; PostDeploymentHealthCheck)" -s -o /dev/null -w "%{http_code}" ${{env.BASE_URL}}/api/v1/health/)
           if [ "$response" -ne 200 ]; then
-            echo "Post-Deployment tests failed!"
+            echo "Post-deployment smoke test FAILED!"
             exit 1
           fi
-

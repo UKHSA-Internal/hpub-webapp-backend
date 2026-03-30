@@ -19,8 +19,8 @@ from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet, ReadOnlyModelViewSet, ViewSet
 from wagtail.models import Page
 
-from .models import Establishment
-from .serializers import EstablishmentSerializer
+from core.establishments.models import Establishment
+from core.establishments.serializers import EstablishmentSerializer
 
 logger = logging.getLogger(__name__)
 

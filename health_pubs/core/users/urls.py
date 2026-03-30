@@ -1,31 +1,31 @@
 from django.urls import path
+from django.urls import include
+from rest_framework.routers import DefaultRouter
 
-from .views import (
-    AuthStatusView,
-    LogoutView,
-    MigrateUsersAPIView,
-    TokenRefresh,
-    UpdateUserView,
-    UserDetailView,
-    UserListView,
-    UserLoginView,
-    UserSignUpView,
-    PreRegistrationView,
-)
+from core.users import views
+
+
+router = DefaultRouter()
+router.register(r"api/v2/users", views.UsersV2, basename="users")
+
 
 urlpatterns = [
     path(
-        "users/pre-registration/",
-        PreRegistrationView.as_view(),
-        name="b2c-pre-registration",
+        "api/v1/users/pre-registration/",
+        views.PreRegistrationView.as_view(),
+        name="users-pre-registration",
     ),
-    path("users/signup/", UserSignUpView.as_view(), name="signup"),
-    path("users/update/", UpdateUserView.as_view(), name="update-user-view"),
-    path("users/login/", UserLoginView.as_view(), name="login"),
-    path("users/auth/status/", AuthStatusView.as_view(), name="auth-status"),
-    path("users/logout/", LogoutView().as_view(), name="logout"),
-    path("users/refresh/", TokenRefresh.as_view(), name="token_refresh"),
-    path("users/<str:user_id>/", UserDetailView.as_view(), name="user-detail"),
-    path("users/list/", UserListView.as_view(), name="user-list"),
-    path("users/migrate-users/", MigrateUsersAPIView.as_view(), name="user-migrate"),
-]
+    path("api/v1/users/signup/", views.UserSignUpView.as_view(), name="users-signup"),
+    path("api/v1/users/update/", views.UpdateUserView.as_view(), name="users-update"),
+    path("api/v1/users/login/", views.UserLoginView.as_view(), name="auth-login"),
+    path("api/v1/users/auth/status/", views.AuthStatusView.as_view(), name="auth-status"),
+    path("api/v1/users/logout/", views.LogoutView().as_view(), name="auth-logout"),
+    path("api/v1/users/refresh/", views.TokenRefresh.as_view(), name="auth-token-refresh"),
+    path("api/v1/users/delete-account/", views.DeleteAccountView.as_view(), name="users-delete"),
+    path("api/v1/users/<str:user_id>/", views.UserDetailView.as_view(), name="users-get"),
+    path("api/v1/users/list/", views.UserListView.as_view(), name="users-list"),
+    path("api/v1/users/migrate-users/", views.MigrateUsersAPIView.as_view(), name="users-migrate"),
+    path('api/v2/users/<str:user_id>/roles', views.UserRolesView.as_view(), name='users-roles'),
+    path('api/v2/users/<str:user_id>/state', views.UserStateView.as_view(), name='users-state'),
+
+] + router.urls

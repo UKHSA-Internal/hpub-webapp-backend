@@ -3,31 +3,30 @@ import string
 import uuid
 
 import pandas as pd
-from core.users.permissions import IsAdminUser
-from core.utils.custom_token_authentication import CustomTokenAuthentication
+from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.text import slugify
 from django.db.models import Max
+from django.db.models import Q, Exists, OuterRef
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import status, viewsets
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from wagtail.models import Page
-from django.db.models import Q, Exists, OuterRef
-
-from django.core.exceptions import ValidationError as DjangoValidationError
+from rest_framework.views import APIView
 from rest_framework.exceptions import ValidationError as DRFValidationError
-
-from django.conf import settings
+from wagtail.models import Page
 
 from core.products.models import Product
-from .models import Program
-from .serializers import ProgramSerializer
-from rest_framework.views import APIView
+from core.programs.models import Program
+from core.programs.serializers import ProgramSerializer
+from core.users.permissions import IsAdminUser
+from core.utils.custom_token_authentication import CustomTokenAuthentication
+
 
 logger = logging.getLogger(__name__)
 

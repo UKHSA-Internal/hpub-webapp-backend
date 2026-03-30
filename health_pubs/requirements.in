@@ -27,7 +27,7 @@ boto3==1.35.54
 botocore==1.35.54
 catalogue==2.0.10
 certifi==2024.8.30
-cffi==1.17.1
+cffi>=2.0.0,<3
 cfgv==3.4.0
 charset-normalizer==3.4.0
 click==8.1.7
@@ -35,7 +35,7 @@ cloudpathlib==0.20.0
 colorama==0.4.6
 confection==0.1.5
 coverage==7.6.4
-cryptography==43.0.3
+cryptography==46.0.5
 cymem==2.0.8
 decorator==4.4.2
 defusedxml==0.7.1

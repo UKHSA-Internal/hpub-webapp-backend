@@ -3,11 +3,9 @@ import uuid
 
 import pandas as pd
 from django.utils import timezone
-from core.programs.models import Program
-from core.users.permissions import IsAdminUser
-from core.utils.custom_token_authentication import CustomTokenAuthentication
 from django.core.exceptions import ValidationError
 from django.utils.text import slugify
+from django.contrib.contenttypes.models import ContentType
 from rest_framework import status, viewsets
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
@@ -15,10 +13,13 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from wagtail.models import Page
-from django.contrib.contenttypes.models import ContentType
 
-from .models import Disease
-from .serializers import DiseaseSerializer
+from core.programs.models import Program
+from core.users.permissions import IsAdminUser
+from core.utils.custom_token_authentication import CustomTokenAuthentication
+from core.diseases.models import Disease
+from core.diseases.serializers import DiseaseSerializer
+
 
 logger = logging.getLogger(__name__)
 

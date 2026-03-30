@@ -53,3 +53,6 @@ fetch_secrets:
 clean:
 	rm -f ${ENV_FILE}
 	@echo "${ENV_FILE} file removed"
+
+%:
+	@bash scripts/${@}.sh

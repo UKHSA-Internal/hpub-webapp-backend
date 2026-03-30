@@ -26,21 +26,32 @@ class CommonViewSet(viewsets.ModelViewSet):
     search_fields = []
     pagination_class = ListResponse
 
-
     def list(self, request):
-        return Response({"detail": "Not implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED)
+        return Response(
+            {"detail": "Not implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED
+        )
 
     def retrieve(self, request, pk=None):
-        return Response({"detail": "Not implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED)
+        return Response(
+            {"detail": "Not implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED
+        )
 
     def create(self, request):
-        return Response({"detail": "Not implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED)
+        return Response(
+            {"detail": "Not implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED
+        )
 
     def update(self, request, pk=None):
-        return Response({"detail": "Not implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED)
+        return Response(
+            {"detail": "Not implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED
+        )
 
     def partial_update(self, request, pk=None):
-        return Response({"detail": "Not implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED)
+        return Response(
+            {"detail": "Not implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED
+        )
 
     def destroy(self, request, pk=None):
-        return Response({"detail": "Not implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED)
+        return Response(
+            {"detail": "Not implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED
+        )

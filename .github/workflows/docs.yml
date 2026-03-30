@@ -32,11 +32,12 @@ jobs:
 
       - name: Build MkDocs site
         run: mkdocs build --strict
+        working-directory: docs
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: docs/site
 
   deploy:
     needs: build

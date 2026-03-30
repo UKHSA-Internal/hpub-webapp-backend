@@ -12,7 +12,7 @@ import sys
 CONFIG = {
     "xlsx_file": Path("user.xlsx"),
     "out_dir": Path("batches"),
-    "tenant": "hpb2ctest.onmicrosoft.com",
+    "tenant": "${{ vars.AZURE_B2C_NAME }}",
     "batch_size": 20,
     "pass_length": 12,
 }

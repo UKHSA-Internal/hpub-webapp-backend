@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 
 from core.common.serializers import ListResponse
+from core.utils import custom_token_authentication
 from core.utils import logging_utils
 
 
@@ -18,8 +19,8 @@ logger = logging_utils.get_logger(__name__)
 class CommonViewSet(viewsets.ModelViewSet):
     queryset = None
     serializer_class = None
-    authentication_classes = [authentication.TokenAuthentication]
-    permission_classes = [permissions.AllowAny]
+    authentication_classes = [custom_token_authentication.CustomTokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = []
     search_fields = []

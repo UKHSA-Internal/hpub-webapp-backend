@@ -13,6 +13,7 @@ from core.users.serializers import UserSerializer
 from core.users.models import User
 from core.utils import logging_utils
 from core.utils import microsoft_entra_client
+from core.utils import custom_token_authentication
 
 
 logger = logging_utils.get_logger(__name__)
@@ -44,8 +45,8 @@ class CustomPagination(PageNumberPagination):
 class UsersV2(viewsets.ModelViewSet):
     queryset = User.objects.all().specific()
     serializer_class = UserSerializer
-    authentication_classes = [authentication.TokenAuthentication]
-    permission_classes = [permissions.AllowAny]
+    authentication_classes = [custom_token_authentication.CustomTokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter,]
     filterset_fields = [
         "email",
@@ -140,8 +141,8 @@ class UsersV2(viewsets.ModelViewSet):
     
 
 class UserRolesView(views.APIView):
-    authentication_classes = [authentication.TokenAuthentication]
-    permission_classes = [permissions.AllowAny]
+    authentication_classes = [custom_token_authentication.CustomTokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
 
     def put(self, request, user_id):
         return Response(
@@ -151,8 +152,8 @@ class UserRolesView(views.APIView):
 
 
 class UserStateView(views.APIView):
-    authentication_classes = [authentication.TokenAuthentication]
-    permission_classes = [permissions.AllowAny]
+    authentication_classes = [custom_token_authentication.CustomTokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
 
     def put(self, request, user_id):
         return Response(

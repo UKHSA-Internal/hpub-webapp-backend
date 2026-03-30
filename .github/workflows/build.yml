@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - "develop"
+      - "main"
 env:
   APP_NAME: ${{ vars.APP_NAME }}
   AWS_REGION: ${{ vars.AWS_REGION }}

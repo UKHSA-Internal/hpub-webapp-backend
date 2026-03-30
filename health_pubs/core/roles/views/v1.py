@@ -9,9 +9,9 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from wagtail.models import Page
 
-from .enums import PersonaPermission
-from .models import Role
-from .serializers import RoleSerializer
+from core.roles.enums import PersonaPermission
+from core.roles.models import Role
+from core.roles.serializers import RoleSerializer
 
 
 class RoleViewSet(viewsets.ModelViewSet):

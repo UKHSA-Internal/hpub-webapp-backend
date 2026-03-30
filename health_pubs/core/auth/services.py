@@ -3,6 +3,7 @@ import glob
 import browser_cookie3
 
 from django.conf import settings
+from rest_framework.request import Request
 
 from core.utils import logging_utils
 from core.utils import custom_token_authentication
@@ -52,7 +53,7 @@ def get_access_token_from_browser():
     return None
 
 
-def decode_access_token(request):
+def decode_access_token(request: Request):
     auth_header = request.headers.get("Authorization")
     jwt_token = auth_header.split(" ")[1]
     return token_generation_validation.validate_token(jwt_token)

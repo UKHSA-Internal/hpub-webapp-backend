@@ -18,7 +18,7 @@ router.register(
 router.register(
     r"api/v1/establishments/list",
     v1.EstablishmentListViewSet,
-    basename="establishment-list"
+    basename="establishment-list",
 )
 router.register(
     r"api/v1/establishments/by-organization",

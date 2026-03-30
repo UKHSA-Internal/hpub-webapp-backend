@@ -15,6 +15,7 @@ from core.utils import logging_utils
 
 logger = logging_utils.get_logger(__name__)
 
+
 class CustomPagination(PageNumberPagination):
     from django.conf import settings
 
@@ -44,7 +45,10 @@ class UsersV2(viewsets.ModelViewSet):
     serializer_class = UserSerializer
     authentication_classes = [custom_token_authentication.CustomTokenAuthentication]
     permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter,]
+    filter_backends = [
+        DjangoFilterBackend,
+        filters.SearchFilter,
+    ]
     filterset_fields = [
         "email",
         "first_name",
@@ -61,8 +65,8 @@ class UsersV2(viewsets.ModelViewSet):
     pagination_class = CustomPagination
 
     def get_or_create_parent_page(self):
-        slug = 'users'
-        title = 'Users'
+        slug = "users"
+        title = "Users"
         try:
             parent = Page.objects.get(slug=slug)
             logger.info(f"Parent page '{title}' found.")
@@ -117,7 +121,7 @@ class UsersV2(viewsets.ModelViewSet):
         instance = self.get_object()
         instance.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
-    
+
 
 class UserRolesView(views.APIView):
     authentication_classes = [custom_token_authentication.CustomTokenAuthentication]
@@ -125,8 +129,7 @@ class UserRolesView(views.APIView):
 
     def put(self, request, user_id):
         return Response(
-            {"detail": "Not implemented"},
-            status=status.HTTP_501_NOT_IMPLEMENTED
+            {"detail": "Not implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED
         )
 
 
@@ -136,6 +139,5 @@ class UserStateView(views.APIView):
 
     def put(self, request, user_id):
         return Response(
-            {"detail": "Not implemented"},
-            status=status.HTTP_501_NOT_IMPLEMENTED
+            {"detail": "Not implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED
         )

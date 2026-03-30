@@ -49,16 +49,18 @@ class AnalyticsDatasetView(APIView):
         latest_year = summary["latest_year"]
         latest_month = None
         if latest_year is not None:
-            latest_month = (
-                AnalyticsKPI.objects.filter(year=latest_year).aggregate(latest=Max("month"))["latest"]
-            )
+            latest_month = AnalyticsKPI.objects.filter(year=latest_year).aggregate(
+                latest=Max("month")
+            )["latest"]
 
         return JsonResponse(
             {
                 "name": "HPUB KPI dataset",
                 "description": get_analytics_description(),
                 "csv_url": request.build_absolute_uri(reverse("analytics_data_csv")),
-                "metadata_url": request.build_absolute_uri(reverse("analytics_metadata")),
+                "metadata_url": request.build_absolute_uri(
+                    reverse("analytics_metadata")
+                ),
                 "row_count": summary["row_count"],
                 "latest_year": latest_year,
                 "latest_month": latest_month,
@@ -81,7 +83,9 @@ class AnalyticsCsvView(APIView):
 
     def get(self, request, *args, **kwargs):
         response = HttpResponse(content_type="text/csv; charset=utf-8")
-        response["Content-Disposition"] = 'inline; filename="HPUB_analytics_kpi_data.csv"'
+        response["Content-Disposition"] = (
+            'inline; filename="HPUB_analytics_kpi_data.csv"'
+        )
 
         writer = csv.writer(response)
         writer.writerow(
@@ -194,9 +198,7 @@ class AnalyticsMetadataView(APIView):
             else timezone.now().date().isoformat()
         )
         modified_date = (
-            dates["modified"].date().isoformat()
-            if dates["modified"]
-            else issued_date
+            dates["modified"].date().isoformat() if dates["modified"] else issued_date
         )
 
         metadata = {

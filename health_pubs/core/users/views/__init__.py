@@ -9,7 +9,7 @@ from .v1 import (
     UserLoginView,
     UserSignUpView,
     PreRegistrationView,
-    DeleteAccountView
+    DeleteAccountView,
 )
 from .v2 import UsersV2
 from core.users.views.v2 import UserRolesView

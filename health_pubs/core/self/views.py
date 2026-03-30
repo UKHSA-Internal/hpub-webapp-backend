@@ -16,9 +16,9 @@ def get_health_check(request: HttpRequest):
 @permission_classes([IsAdminUser])
 def get_self_info(request: HttpRequest):
     response = {}
-    response['name'] = 'hpub-backend'
-    response['description'] = 'Backend for Find Public Health Resources.'
-    response['version'] = 'TODO'
+    response["name"] = "hpub-backend"
+    response["description"] = "Backend for Find Public Health Resources."
+    response["version"] = "TODO"
     return JsonResponse(response, status=200)
 
 

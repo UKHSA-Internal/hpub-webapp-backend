@@ -6,10 +6,14 @@ from core.organizations.views import v2
 
 router = DefaultRouter()
 router.register(
-    r"api/v1/organizations/create", v1.OrganizationCreateViewSet, basename="organization-create"
+    r"api/v1/organizations/create",
+    v1.OrganizationCreateViewSet,
+    basename="organization-create",
 )
 router.register(
-    r"api/v1/organizations/list", v1.OrganizationListViewSet, basename="organization-list"
+    r"api/v1/organizations/list",
+    v1.OrganizationListViewSet,
+    basename="organization-list",
 )
 router.register(
     r"api/v1/organizations/bulk-create",
@@ -17,7 +21,9 @@ router.register(
     basename="organization-bulk-create",
 )
 router.register(
-    r"api/v1/organizations/delete", v1.OrganizationDeleteViewSet, basename="organization-delete"
+    r"api/v1/organizations/delete",
+    v1.OrganizationDeleteViewSet,
+    basename="organization-delete",
 )
 router.register(
     r"api/v1/organizations/bulk-upload",
@@ -25,7 +31,9 @@ router.register(
     basename="organization-bulk-upload",
 )
 router.register(
-    r"api/v1/organizations/update", v1.OrganizationUpdateViewSet, basename="organization-update"
+    r"api/v1/organizations/update",
+    v1.OrganizationUpdateViewSet,
+    basename="organization-update",
 )
 router.register(
     r"api/v2/organisations",

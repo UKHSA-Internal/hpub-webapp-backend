@@ -2,6 +2,7 @@ from django.core.management.base import BaseCommand
 
 from core.auth import services
 
+
 class Command(BaseCommand):
     help = "Get auth token from local browser."
 

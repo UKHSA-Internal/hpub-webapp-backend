@@ -24,7 +24,6 @@ from core.utils.token_generation_validation import (
     validate_token,
     validate_token_refresh,
 )
-from core.utils import microsoft_entra_client
 
 from django.utils import timezone
 from django.contrib.contenttypes.models import ContentType
@@ -40,7 +39,6 @@ from rest_framework.generics import GenericAPIView
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.authentication import SessionAuthentication
-from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from wagtail.models import Page
@@ -1207,42 +1205,58 @@ class MigrateUsersAPIView(APIView):
             logger.warning("Role %s not found", rid)
             return None
 
- 
+
 class DeleteAccountView(APIView):
+
     authentication_classes = [CustomTokenAuthentication]
+
     permission_classes = [IsAuthenticated]
 
-    def delete(self, request: Request):
+    def delete(self, request):
+
         try:
-            decoded_access_token = validate_token(request)
-            user_role = decoded_access_token.get('role')
-            if user_role == 'admin':
-                return Response(status=status.HTTP_409_CONFLICT)
 
-            user_email = decoded_access_token.get('email')
-            microsoft_entra_client.delete_user_by_email(user_email)
+            user = request.user
 
-            user_id = decoded_access_token.get("user_id")
+            if not user or not user.is_authenticated:
+
+                return Response(
+                    {"error": "User not authenticated"},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+
+            user_id = str(user.user_id)
+
+            # Use existing delete logic
+
             result = delete_user_and_dependencies(user_id)
 
             if result.get("success"):
+
                 response = Response(
                     {"message": "Account deleted successfully"},
-                    status=status.HTTP_204_NO_CONTENT
+                    status=status.HTTP_204_NO_CONTENT,
                 )
 
                 # Clear auth cookie
+
                 response.delete_cookie("long_term_token")
+
                 return response
 
             return Response(
                 {"error": result.get("error", "Failed to delete account")},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
         except Exception as e:
+
             logger.error(f"Error deleting account: {str(e)}")
+
             return Response(
                 {"error": "Something went wrong"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+#

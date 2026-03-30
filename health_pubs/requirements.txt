@@ -220,3 +220,4 @@ wrapt==1.16.0
 xlsxwriter==3.2.0
 yarg==0.1.9
 yarl==1.17.1
+browser-cookie3==0.20.1

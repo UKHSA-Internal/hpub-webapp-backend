@@ -2,7 +2,6 @@ from wagtail.models import Page
 from rest_framework import viewsets, status, filters, views
 from rest_framework import permissions
 from rest_framework import authentication
-from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 
@@ -12,8 +11,6 @@ from django_filters.rest_framework import DjangoFilterBackend
 from core.users.serializers import UserSerializer
 from core.users.models import User
 from core.utils import logging_utils
-from core.utils import microsoft_entra_client
-from core.utils import custom_token_authentication
 
 
 logger = logging_utils.get_logger(__name__)
@@ -80,10 +77,6 @@ class UsersV2(viewsets.ModelViewSet):
             root.add_child(instance=parent)
             logger.info(f"Parent page '{title}' created.")
         return parent
-    
-    def list(self, request: Request, *args, **kwargs):
-        users = microsoft_entra_client.list_users()
-        return Response(users, status=status.HTTP_200_OK)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -100,15 +93,6 @@ class UsersV2(viewsets.ModelViewSet):
             UserSerializer(user).data,
             status=status.HTTP_201_CREATED,
         )
-    
-    def retrieve(self, request: Request, *args, **kwargs):
-        email = request.query_params.get('email')
-        if not email:
-            return Response(f'{email} not found', status=status.HTTP_404_NOT_FOUND)
-
-        user_id = microsoft_entra_client.get_user_id_by_email(email)
-        user = microsoft_entra_client.get_user(user_id)
-        return Response(user, status=status.HTTP_200_OK)
 
     def update(self, request, *args, **kwargs):
         instance = self.get_object()
@@ -129,14 +113,9 @@ class UsersV2(viewsets.ModelViewSet):
         return Response(UserSerializer(instance).data)
 
     # ---------------------------
-    def destroy(self, request: Request, *args, **kwargs):
-        email = request.query_params.get('email')
-        if not email:
-            return Response(f'{email} not found', status=status.HTTP_404_NOT_FOUND)
-
-        microsoft_entra_client.delete_user_by_email(email)
-        # instance = self.get_object()
-        # instance.delete()
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        instance.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
     
 

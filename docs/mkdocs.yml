@@ -1,0 +1,7 @@
+site_name: Find Public Health Resources (Backend)
+theme:
+  name: material
+
+plugins:
+  - search
+  - mkdocs-jupyter

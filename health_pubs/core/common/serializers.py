@@ -1,6 +1,7 @@
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 
+
 class ListResponse(PageNumberPagination):
     from django.conf import settings
 

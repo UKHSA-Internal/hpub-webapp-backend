@@ -54,7 +54,7 @@ class CustomTokenAuthentication(BaseAuthentication):
         # Azure B2C flow
         if "iss" in unverified:
             logger.debug("Detected Azure B2C token")
-            from core.users.views import (
+            from core.users.views.v1 import (
                 validate_azure_b2c_token,
             )  # avoid circular import
 

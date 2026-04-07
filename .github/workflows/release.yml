@@ -59,6 +59,7 @@ jobs:
 
           # Push the PROD image to ECR
           docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:prod-${{ github.event.release.tag_name }}
+          docker push $ECR_REGISTRY/$ECR_NAMESPACE/$APP_NAME:latest
 
         
       - name: Update Parameter Store with new value

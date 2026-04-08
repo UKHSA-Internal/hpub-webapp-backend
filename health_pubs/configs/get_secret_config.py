@@ -232,7 +232,7 @@ class Config:
 
     @staticmethod
     def get_azure_b2c_secret_value():
-        return Config.get_value("AZURE_B2C_CLIENT_SECRET_VALUE", is_secret=True)
+        return Config.get_value("AZURE_B2C_CLIENT_SECRET_VALUE", is_secret=False)
 
     @staticmethod
     def get_azure_b2c_client_id():

@@ -103,7 +103,7 @@ class OrderViewSet(viewsets.ModelViewSet):
 
             # Recent orders in this org for this product
             recent_qs = Order.objects.filter(
-                user_ref__organization_ref__organization_id=org_id,
+                user_ref=user,
                 order_items__product_ref=product,
                 created_at__gte=window_cutoff,
             ).order_by("created_at")

@@ -13,6 +13,7 @@ from core.users.serializers import UserSerializer
 from core.users.models import User
 from core.utils import logging_utils
 from core.utils import microsoft_entra_client
+from core.utils import custom_token_authentication
 
 
 logger = logging_utils.get_logger(__name__)

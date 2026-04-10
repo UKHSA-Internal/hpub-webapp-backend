@@ -307,7 +307,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             daily_limit = limit_page.order_limit
             already = (
                 Order.objects.filter(
-                    user=user_instance,
+                    user_ref=user_instance,
                     order_items__product_ref=product,
                     created_at__gte=window_start,
                 ).aggregate(total=Sum("order_items__quantity"))["total"]

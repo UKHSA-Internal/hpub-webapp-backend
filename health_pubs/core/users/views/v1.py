@@ -1214,7 +1214,18 @@ class DeleteAccountView(APIView):
 
     def delete(self, request: Request):
         try:
-            decoded_access_token = validate_token(request)
+            auth_header = request.headers.get("Authorization")
+
+
+            if not auth_header or not auth_header.startswith("Bearer "):
+                return Response(
+                    {"error": "Authorization token missing"},
+                    status=status.HTTP_401_UNAUTHORIZED
+                )
+        
+            access_token = auth_header.split(" ")[1]
+            decoded_access_token = validate_token(access_token)
+            
             user_role = decoded_access_token.get('role')
             if user_role == 'admin':
                 return Response(status=status.HTTP_409_CONFLICT)

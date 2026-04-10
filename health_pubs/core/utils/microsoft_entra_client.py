@@ -11,6 +11,7 @@ from core.auth import services as auth_service
 
 config = Config()
 TENANT_ID = config.get_azure_b2c_tenant_id()
+TENANT_NAME = config.get_azure_b2c_tenant_name()
 CLIENT_ID = config.get_azure_b2c_client_id()
 CLIENT_SECRET = config.get_azure_b2c_secret_value()
 
@@ -25,7 +26,7 @@ def __raise_for_status(response: Response):
         raise Exception(error)
 
 def get_access_token():
-    url = f"https://hpextdev.ciamlogin.com/{TENANT_ID}/oauth2/v2.0/token"
+    url = f"https://{TENANT_NAME}.ciamlogin.com/{TENANT_ID}/oauth2/v2.0/token"
     data = {
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,

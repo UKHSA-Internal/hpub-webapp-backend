@@ -246,7 +246,7 @@ jobs:
         with:
           task-definition: task-definition.json
           container-name: app
-          image: ${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}@${{ needs.build.result.image_digest }}
+          image: ${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}@${{ needs.build.outputs.image_digest }}
 
       - name: Deploy to Amazon ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@fc8fc60f3a60ffd500fcb13b209c59d221ac8c8c # v2

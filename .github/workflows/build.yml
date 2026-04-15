@@ -4,8 +4,8 @@ on:
   pull_request:
   push:
     branches:
-      - "develop-chadraktest"
-      - "main-chadraktest"
+      - "develop"
+      - "main"
 env:
   APP_NAME: ${{ vars.APP_NAME }}
   AWS_REGION: ${{ vars.AWS_REGION }}
@@ -73,7 +73,7 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         with:
           context: .
-          push: ${{ (github.ref == 'refs/heads/develop-chadraktest' || github.ref == 'refs/heads/main-chadraktest') && github.event_name == 'push' }}
+          push: ${{ (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') && github.event_name == 'push' }}
           tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ github.sha }}
           cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:latest
           cache-to: type=inline
@@ -86,7 +86,7 @@ jobs:
       max-parallel: 1
       matrix:
         environment: ["dev", "test"]
-    if: github.ref == 'refs/heads/develop-chadraktest' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
     permissions:
       contents: write
       id-token: write
@@ -149,7 +149,7 @@ jobs:
   release:
     name: Tag and release container image
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main-chadraktest' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment: dev
     permissions:
       contents: write
@@ -208,7 +208,7 @@ jobs:
     needs:
       - build
       - release
-    if: github.ref == 'refs/heads/main-chadraktest' && github.event_name == 'push' && needs.release.result == 'success'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.release.result == 'success'
     permissions:
       contents: write
       id-token: write

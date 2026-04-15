@@ -80,6 +80,25 @@ jobs:
             --task-definition aw-hpub-euw2-${{ matrix.environment }}-ecssvc-$APP_NAME \
             --query taskDefinition \
             > task-definition.json
+        
+      - name: Resolve ECR image digest
+        id: resolve-image-digest
+        env:
+          ECR_REPOSITORY: ${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}
+          IMAGE_TAG: ${{ matrix.environment }}-${{ github.event.release.tag_name }}
+        run: |
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "None" ]; then
+            echo "ERROR: Failed to resolve image digest for tag $IMAGE_TAG"
+            exit 1
+          fi
+
+          echo "image_digest=$DIGEST" >> $GITHUB_OUTPUT
 
       - name: Modify ECS Task Definition Image
         if: ${{ matrix.environment == 'prod' }}
@@ -88,7 +107,7 @@ jobs:
         with:
           task-definition: task-definition.json
           container-name: app
-          image: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}:${{ matrix.environment }}-${{ github.event.release.tag_name }}
+          image: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_NAMESPACE }}/${{ env.APP_NAME }}@${{ steps.resolve-image-digest.outputs.image_digest }}
 
       - name: Deploy to Amazon ECS
         if: ${{ matrix.environment == 'prod' }}

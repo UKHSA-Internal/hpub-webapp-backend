@@ -113,7 +113,7 @@ jobs:
 
       - name: Modify Amazon ECS task definition with updated image URI
         id: render-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@77954e213ba1f9f9cb016b86a1d4f6fcdea0d57e # v1
+        uses: aws-actions/amazon-ecs-render-task-definition@6853cfae8c3a7d978fbf68b5a55453395541dfbb # v1
         env:
           ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
           COMMIT_HASH: ${{ github.sha }}
@@ -239,7 +239,7 @@ jobs:
 
       - name: Modify Amazon ECS task definition with updated image URI
         id: render-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@77954e213ba1f9f9cb016b86a1d4f6fcdea0d57e # v1
+        uses: aws-actions/amazon-ecs-render-task-definition@6853cfae8c3a7d978fbf68b5a55453395541dfbb # v1
         env:
           ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID_ECR_REGISTRY }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
           NEW_TAG: ${{ matrix.environment }}-${{ steps.get_tag.outputs.tag }}

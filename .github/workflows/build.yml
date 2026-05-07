@@ -64,7 +64,7 @@ jobs:
 
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@183a1442edf41672e66566b7fc560e297a290896 # v2
+        uses: aws-actions/amazon-ecr-login@fa648b43de3d4d023bcb3f89ed6940096949c419 # v2
 
       - name: Build container image
         id: build-docker-image
@@ -178,7 +178,7 @@ jobs:
 
       - name: Login to Amazon ECR
         id: login-ecr-release
-        uses: aws-actions/amazon-ecr-login@183a1442edf41672e66566b7fc560e297a290896 # v2
+        uses: aws-actions/amazon-ecr-login@fa648b43de3d4d023bcb3f89ed6940096949c419 # v2
 
       # docker pull + tag + push
       - name: Pull, retag, and push Application image for release (with env name)
